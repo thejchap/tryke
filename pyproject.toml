@@ -9,7 +9,7 @@ dependencies = []
 
 [tool.ruff.lint]
 select = ["ALL"]
-ignore = ["D211", "D213", "COM812", "D203"]
+ignore = ["D", "COM812"]
 
 [tool.maturin]
 bindings = "bin"

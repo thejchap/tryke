@@ -1,0 +1,21 @@
+fail_fast: false
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: check-toml
+      - id: end-of-file-fixer
+  - repo: local
+    hooks:
+      - id: rust-linting
+        name: rust linting
+        entry: cargo fmt --all --
+        types: [file, rust]
+        language: system
+      - id: clippy
+        name: clippy
+        entry: cargo clippy --all-targets --all-features -- -Dclippy::all
+        pass_filenames: false
+        types: [file, rust]
+        language: system

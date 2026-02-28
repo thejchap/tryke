@@ -32,14 +32,15 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use insta::assert_snapshot;
 
     #[test]
     fn test_command() {
-        insta::assert_snapshot!(run_test());
+        assert_snapshot!(run_test());
     }
 
     #[test]
     fn discover_command() {
-        insta::assert_snapshot!(run_discover());
+        assert_snapshot!(run_discover());
     }
 }

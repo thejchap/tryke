@@ -2,6 +2,11 @@
 name = "tryke"
 version = "0.1.0"
 edition = "2024"
+publish = true
+description = "python testing"
+license = "MIT"
+repository = "https://github.com/thejchap/tryke"
+readme = "../../README.md"
 
 [dependencies]
 clap = { version = "4.5.60", features = ["derive"] }

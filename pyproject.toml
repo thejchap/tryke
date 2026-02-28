@@ -7,6 +7,10 @@ authors = [{ name = "Justin Chapman", email = "commonmodestudio@gmail.com" }]
 requires-python = ">=3.13"
 dependencies = []
 
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = ["D211", "D213", "COM812", "D203"]
+
 [tool.maturin]
 bindings = "bin"
 manifest-path = "crates/tryke/Cargo.toml"
@@ -15,6 +19,9 @@ python-source = "python"
 [build-system]
 requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
+
+[tool.uv.build-backend]
+module-root = "python/tryke"
 
 [dependency-groups]
 dev = ["ruff~=0.15.4", "ty~=0.0.19"]

@@ -20,3 +20,15 @@ repos:
         pass_filenames: false
         types: [file, rust]
         language: system
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix
+        pass_filenames: false
+        types: [python]
+        language: system
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        pass_filenames: false
+        types: [python]
+        language: system

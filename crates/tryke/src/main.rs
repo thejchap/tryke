@@ -13,14 +13,33 @@ enum Commands {
     Discover,
 }
 
+fn run_test() -> &'static str {
+    "test"
+}
+
+fn run_discover() -> &'static str {
+    "discover"
+}
+
 fn main() {
     let cli = Cli::parse();
     match &cli.command {
-        Commands::Test => {
-            println!("test");
-        }
-        Commands::Discover => {
-            unimplemented!()
-        }
+        Commands::Test => println!("{}", run_test()),
+        Commands::Discover => println!("{}", run_discover()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_command() {
+        insta::assert_snapshot!(run_test());
+    }
+
+    #[test]
+    fn discover_command() {
+        insta::assert_snapshot!(run_discover());
     }
 }

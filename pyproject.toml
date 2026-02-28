@@ -10,7 +10,11 @@ dependencies = []
 [tool.maturin]
 bindings = "bin"
 manifest-path = "crates/tryke/Cargo.toml"
+python-source = "python"
 
 [build-system]
 requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
+
+[dependency-groups]
+dev = ["ruff~=0.15.4", "ty~=0.0.19"]

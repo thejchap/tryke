@@ -1,0 +1,5 @@
+---
+source: crates/tryke/src/main.rs
+expression: run_test()
+---
+test

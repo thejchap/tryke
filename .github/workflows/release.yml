@@ -5,57 +5,27 @@ on:
       - "v*"
 jobs:
   build:
-    name: build ${{ matrix.os }} ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            use-zig: false
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            use-zig: true
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            use-zig: false
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            use-zig: false
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            use-zig: false
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2.8.2
       - uses: astral-sh/setup-uv@v5
-      - if: matrix.use-zig
-        run: uv tool install ziglang && cargo install cargo-zigbuild
-      - if: matrix.use-zig
-        run: uv run maturin build --release --target ${{ matrix.target }} --zig --out dist
-      - if: '!matrix.use-zig'
-        run: uv run maturin build --release --target ${{ matrix.target }} --out dist
+      - run: uv build --wheel --out-dir dist
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}-${{ matrix.target }}
+          name: wheels-${{ matrix.os }}
           path: dist/*.whl
-
-  sdist:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-      - run: uv build --sdist --out-dir dist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-sdist
-          path: dist/*.tar.gz
 
   publish:
     runs-on: ubuntu-latest
-    needs: [build, sdist]
+    needs: [build]
     environment: release
     permissions:
       id-token: write

@@ -4,3 +4,21 @@ resolver = "3"
 
 [workspace.lints.clippy]
 pedantic = "deny"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.93"
+homepage = "https://github.com/thejchap/tryke"
+documentation = "https://github.com/thejchap/tryke"
+repository = "https://github.com/thejchap/tryke"
+authors = ["Justin Chapman <commonmodestudio@gmail.com>"]
+license = "MIT"
+
+[workspace.dependencies]
+miette = { version = "7", features = ["fancy"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tryke = { path = "crates/tryke" }
+tryke_discovery = { path = "crates/tryke_discovery" }
+tryke_reporter = { path = "crates/tryke_reporter" }
+tryke_types = { path = "crates/tryke_types" }

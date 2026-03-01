@@ -1,6 +1,6 @@
 [package]
-name = "tryke"
-version = "0.0.4"
+name = "tryke_reporter"
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 homepage.workspace = true
@@ -8,13 +8,12 @@ documentation.workspace = true
 repository.workspace = true
 authors.workspace = true
 license.workspace = true
-readme = "../../README.md"
 
 [dependencies]
-anyhow = "1.0.102"
-clap = { version = "4.5.60", features = ["derive"] }
-tryke_reporter = { workspace = true }
+miette = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 tryke_types = { workspace = true }
 
-[dev-dependencies]
-insta = "1"
+[lints]
+workspace = true

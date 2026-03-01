@@ -1,7 +1,7 @@
 use std::io;
 
 use serde::Serialize;
-use tryke_types::{RunSummary, TestCase, TestResult};
+use tryke_types::{RunSummary, TestItem, TestResult};
 
 use crate::Reporter;
 
@@ -40,7 +40,7 @@ impl<W: io::Write> JSONReporter<W> {
 #[derive(Serialize)]
 struct RunStartEvent<'a> {
     event: &'static str,
-    tests: &'a [TestCase],
+    tests: &'a [TestItem],
 }
 
 #[derive(Serialize)]
@@ -56,7 +56,7 @@ struct RunCompleteEvent<'a> {
 }
 
 impl<W: io::Write> Reporter for JSONReporter<W> {
-    fn on_run_start(&mut self, tests: &[TestCase]) {
+    fn on_run_start(&mut self, tests: &[TestItem]) {
         self.write_event(&RunStartEvent {
             event: "run_start",
             tests,
@@ -102,10 +102,11 @@ mod tests {
     #[test]
     fn emits_run_start() {
         let mut r = reporter();
-        let tests = vec![TestCase {
+        let tests = vec![TestItem {
             name: "test_one".into(),
-            module: "mod_a".into(),
-            file: None,
+            module_path: "tests.mod_a".into(),
+            file_path: None,
+            line_number: None,
         }];
 
         r.on_run_start(&tests);
@@ -114,20 +115,23 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0]["event"], "run_start");
         assert_eq!(lines[0]["tests"][0]["name"], "test_one");
-        assert_eq!(lines[0]["tests"][0]["module"], "mod_a");
+        assert_eq!(lines[0]["tests"][0]["module_path"], "tests.mod_a");
     }
 
     #[test]
     fn emits_test_complete_passed() {
         let mut r = reporter();
         let result = TestResult {
-            test: TestCase {
+            test: TestItem {
                 name: "test_add".into(),
-                module: "math".into(),
-                file: None,
+                module_path: "tests.math".into(),
+                file_path: None,
+                line_number: None,
             },
             outcome: TestOutcome::Passed,
             duration: Duration::from_millis(42),
+            stdout: String::new(),
+            stderr: String::new(),
         };
 
         r.on_test_complete(&result);
@@ -143,16 +147,19 @@ mod tests {
     fn emits_test_complete_failed() {
         let mut r = reporter();
         let result = TestResult {
-            test: TestCase {
+            test: TestItem {
                 name: "test_sub".into(),
-                module: "math".into(),
-                file: None,
+                module_path: "tests.math".into(),
+                file_path: None,
+                line_number: None,
             },
             outcome: TestOutcome::Failed {
                 message: "expected 1, got 2".into(),
                 assertions: vec![],
             },
             duration: Duration::from_millis(5),
+            stdout: String::new(),
+            stderr: String::new(),
         };
 
         r.on_test_complete(&result);
@@ -169,15 +176,18 @@ mod tests {
     fn emits_test_complete_skipped() {
         let mut r = reporter();
         let result = TestResult {
-            test: TestCase {
+            test: TestItem {
                 name: "test_skip".into(),
-                module: "misc".into(),
-                file: None,
+                module_path: "tests.misc".into(),
+                file_path: None,
+                line_number: None,
             },
             outcome: TestOutcome::Skipped {
                 reason: Some("not implemented".into()),
             },
             duration: Duration::from_millis(0),
+            stdout: String::new(),
+            stderr: String::new(),
         };
 
         r.on_test_complete(&result);
@@ -215,15 +225,17 @@ mod tests {
         let mut r = reporter();
 
         let tests = vec![
-            TestCase {
+            TestItem {
                 name: "test_a".into(),
-                module: "m".into(),
-                file: None,
+                module_path: "tests.m".into(),
+                file_path: None,
+                line_number: None,
             },
-            TestCase {
+            TestItem {
                 name: "test_b".into(),
-                module: "m".into(),
-                file: None,
+                module_path: "tests.m".into(),
+                file_path: None,
+                line_number: None,
             },
         ];
 
@@ -233,6 +245,8 @@ mod tests {
             test: tests[0].clone(),
             outcome: TestOutcome::Passed,
             duration: Duration::from_millis(10),
+            stdout: String::new(),
+            stderr: String::new(),
         });
 
         r.on_test_complete(&TestResult {
@@ -242,6 +256,8 @@ mod tests {
                 assertions: vec![],
             },
             duration: Duration::from_millis(5),
+            stdout: String::new(),
+            stderr: String::new(),
         });
 
         r.on_run_complete(&RunSummary {
@@ -263,15 +279,17 @@ mod tests {
     fn failed_with_assertions_includes_data() {
         let mut r = reporter();
         let result = TestResult {
-            test: TestCase {
+            test: TestItem {
                 name: "test_add".into(),
-                module: "math".into(),
-                file: Some("tests/math.rs".into()),
+                module_path: "tests.math".into(),
+                file_path: Some("tests/math.py".into()),
+                line_number: Some(10),
             },
             outcome: TestOutcome::Failed {
                 message: "assertion failed".into(),
                 assertions: vec![Assertion {
                     expression: "assert_eq!(a, 2)".into(),
+                    file: None,
                     line: 10,
                     span_offset: 14,
                     span_length: 1,
@@ -280,6 +298,8 @@ mod tests {
                 }],
             },
             duration: Duration::from_millis(5),
+            stdout: String::new(),
+            stderr: String::new(),
         };
 
         r.on_test_complete(&result);

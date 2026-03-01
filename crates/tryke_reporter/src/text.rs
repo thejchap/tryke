@@ -1,6 +1,8 @@
 use std::io;
+use std::time::Duration;
 
-use tryke_types::{RunSummary, TestCase, TestOutcome, TestResult};
+use owo_colors::OwoColorize;
+use tryke_types::{RunSummary, TestItem, TestOutcome, TestResult};
 
 use crate::Reporter;
 use crate::diagnostic::render_assertions;
@@ -30,50 +32,104 @@ impl<W: io::Write> TextReporter<W> {
     }
 }
 
+fn format_duration(d: Duration) -> String {
+    let ms = d.as_secs_f64() * 1000.0;
+    if ms < 1000.0 {
+        format!("{ms:.2}ms")
+    } else {
+        format!("{:.2}s", d.as_secs_f64())
+    }
+}
+
 impl<W: io::Write> Reporter for TextReporter<W> {
-    fn on_run_start(&mut self, tests: &[TestCase]) {
-        let _ = writeln!(self.writer, "running {} tests", tests.len());
+    fn on_run_start(&mut self, _tests: &[TestItem]) {
+        let _ = writeln!(
+            self.writer,
+            "{} {}",
+            "tryke test".bold(),
+            format!("v{}", env!("CARGO_PKG_VERSION")).dimmed()
+        );
+        let _ = writeln!(self.writer);
     }
 
     fn on_test_complete(&mut self, result: &TestResult) {
-        let status = match &result.outcome {
-            TestOutcome::Passed => "ok",
-            TestOutcome::Failed { .. } => "FAILED",
-            TestOutcome::Skipped { .. } => "skipped",
-        };
-        let _ = writeln!(
-            self.writer,
-            "  {}::{} ... {} ({:.3}s)",
-            result.test.module,
-            result.test.name,
-            status,
-            result.duration.as_secs_f64()
-        );
+        match &result.outcome {
+            TestOutcome::Passed => {
+                let _ = writeln!(
+                    self.writer,
+                    "{} {} {}",
+                    "✓".green(),
+                    result.test.name.bold(),
+                    format!("[{}]", format_duration(result.duration)).dimmed()
+                );
+            }
+            TestOutcome::Failed { assertions, .. } => {
+                let _ = writeln!(
+                    self.writer,
+                    "{} {} {}",
+                    "✗".red(),
+                    result.test.name.bold(),
+                    format!("[{}]", format_duration(result.duration)).dimmed()
+                );
 
-        if let TestOutcome::Failed { assertions, .. } = &result.outcome
-            && !assertions.is_empty()
-        {
-            let mut buf = String::new();
-            render_assertions(result.test.file.as_deref(), assertions, &mut buf);
-            let _ = write!(self.writer, "{buf}");
+                if !assertions.is_empty() {
+                    let test_file = result
+                        .test
+                        .file_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().into_owned());
+                    let mut buf = String::new();
+                    render_assertions(test_file.as_deref(), assertions, &mut buf);
+                    let _ = write!(self.writer, "{buf}");
+                }
+            }
+            TestOutcome::Skipped { .. } => {
+                let _ = writeln!(
+                    self.writer,
+                    "{} {}",
+                    "»".yellow().dimmed(),
+                    result.test.name.dimmed()
+                );
+            }
         }
     }
 
     fn on_run_complete(&mut self, summary: &RunSummary) {
         let _ = writeln!(self.writer);
+
         let _ = writeln!(
             self.writer,
-            "test result: {} passed, {} failed, {} skipped; finished in {:.3}s",
-            summary.passed,
-            summary.failed,
-            summary.skipped,
-            summary.duration.as_secs_f64()
+            " {} {}",
+            summary.passed.green(),
+            "pass".green()
+        );
+
+        if summary.failed > 0 {
+            let _ = writeln!(self.writer, " {} {}", summary.failed.red(), "fail".red());
+        }
+
+        if summary.skipped > 0 {
+            let _ = writeln!(
+                self.writer,
+                " {} {}",
+                summary.skipped.yellow(),
+                "skip".yellow()
+            );
+        }
+
+        let total = summary.passed + summary.failed + summary.skipped;
+        let _ = writeln!(
+            self.writer,
+            "Ran {} tests. [{}]",
+            total,
+            format_duration(summary.duration)
         );
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::time::Duration;
 
     use tryke_types::{Assertion, TestOutcome};
@@ -89,74 +145,92 @@ mod tests {
     }
 
     #[test]
-    fn run_start_shows_count() {
+    fn run_start_shows_version_header() {
         let mut r = reporter();
         let tests = vec![
-            TestCase {
+            TestItem {
                 name: "test_a".into(),
-                module: "m".into(),
-                file: None,
+                module_path: "tests.m".into(),
+                file_path: None,
+                line_number: None,
             },
-            TestCase {
+            TestItem {
                 name: "test_b".into(),
-                module: "m".into(),
-                file: None,
+                module_path: "tests.m".into(),
+                file_path: None,
+                line_number: None,
             },
         ];
 
         r.on_run_start(&tests);
-        assert_eq!(output(&r), "running 2 tests\n");
+        let out = output(&r);
+        assert!(out.contains("tryke test"));
     }
 
     #[test]
     fn test_complete_passed() {
         let mut r = reporter();
         r.on_test_complete(&TestResult {
-            test: TestCase {
+            test: TestItem {
                 name: "test_add".into(),
-                module: "math".into(),
-                file: None,
+                module_path: "tests.math".into(),
+                file_path: None,
+                line_number: None,
             },
             outcome: TestOutcome::Passed,
             duration: Duration::from_millis(12),
+            stdout: String::new(),
+            stderr: String::new(),
         });
 
-        assert!(output(&r).contains("math::test_add ... ok"));
+        let out = output(&r);
+        assert!(out.contains("✓"));
+        assert!(out.contains("test_add"));
     }
 
     #[test]
     fn test_complete_failed() {
         let mut r = reporter();
         r.on_test_complete(&TestResult {
-            test: TestCase {
+            test: TestItem {
                 name: "test_sub".into(),
-                module: "math".into(),
-                file: None,
+                module_path: "tests.math".into(),
+                file_path: None,
+                line_number: None,
             },
             outcome: TestOutcome::Failed {
                 message: "bad".into(),
                 assertions: vec![],
             },
             duration: Duration::from_millis(5),
+            stdout: String::new(),
+            stderr: String::new(),
         });
 
-        assert!(output(&r).contains("math::test_sub ... FAILED"));
+        let out = output(&r);
+        assert!(out.contains("✗"));
+        assert!(out.contains("test_sub"));
     }
 
     #[test]
     fn test_complete_skipped() {
         let mut r = reporter();
         r.on_test_complete(&TestResult {
-            test: TestCase {
+            test: TestItem {
                 name: "test_skip".into(),
-                module: "misc".into(),
-                file: None,
+                module_path: "tests.misc".into(),
+                file_path: None,
+                line_number: None,
             },
             outcome: TestOutcome::Skipped { reason: None },
             duration: Duration::from_millis(0),
+            stdout: String::new(),
+            stderr: String::new(),
         });
 
-        assert!(output(&r).contains("misc::test_skip ... skipped"));
+        let out = output(&r);
+        assert!(out.contains("»"));
+        assert!(out.contains("test_skip"));
     }
 
     #[test]
@@ -170,18 +244,40 @@ mod tests {
         });
 
         let out = output(&r);
-        assert!(out.contains("3 passed"));
-        assert!(out.contains("1 failed"));
-        assert!(out.contains("2 skipped"));
+        assert!(out.contains('3'));
+        assert!(out.contains("pass"));
+        assert!(out.contains('1'));
+        assert!(out.contains("fail"));
+        assert!(out.contains('2'));
+        assert!(out.contains("skip"));
+        assert!(out.contains("Ran 6 tests"));
+    }
+
+    #[test]
+    fn run_complete_hides_zero_fail_and_skip() {
+        let mut r = reporter();
+        r.on_run_complete(&RunSummary {
+            passed: 5,
+            failed: 0,
+            skipped: 0,
+            duration: Duration::from_millis(50),
+        });
+
+        let out = output(&r);
+        assert!(out.contains("pass"));
+        assert!(!out.contains("fail"));
+        assert!(!out.contains("skip"));
+        assert!(out.contains("Ran 5 tests"));
     }
 
     #[test]
     fn full_lifecycle() {
         let mut r = reporter();
-        let tests = vec![TestCase {
+        let tests = vec![TestItem {
             name: "test_one".into(),
-            module: "mod_a".into(),
-            file: None,
+            module_path: "tests.mod_a".into(),
+            file_path: None,
+            line_number: None,
         }];
 
         r.on_run_start(&tests);
@@ -189,6 +285,8 @@ mod tests {
             test: tests[0].clone(),
             outcome: TestOutcome::Passed,
             duration: Duration::from_millis(10),
+            stdout: String::new(),
+            stderr: String::new(),
         });
         r.on_run_complete(&RunSummary {
             passed: 1,
@@ -198,26 +296,28 @@ mod tests {
         });
 
         let out = output(&r);
-        let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines[0], "running 1 tests");
-        assert!(lines[1].contains("mod_a::test_one ... ok"));
-        // line 2 is blank
-        assert!(lines[3].contains("1 passed"));
+        assert!(out.contains("tryke test"));
+        assert!(out.contains("✓"));
+        assert!(out.contains("test_one"));
+        assert!(out.contains("pass"));
+        assert!(out.contains("Ran 1 tests"));
     }
 
     #[test]
     fn failed_with_assertions_renders_diagnostics() {
         let mut r = reporter();
         r.on_test_complete(&TestResult {
-            test: TestCase {
+            test: TestItem {
                 name: "test_add".into(),
-                module: "math".into(),
-                file: Some("tests/math.rs".into()),
+                module_path: "tests.math".into(),
+                file_path: Some(PathBuf::from("tests/math.py")),
+                line_number: Some(10),
             },
             outcome: TestOutcome::Failed {
                 message: "assertion failed".into(),
                 assertions: vec![Assertion {
                     expression: "assert_eq!(a, 2)".into(),
+                    file: None,
                     line: 10,
                     span_offset: 14,
                     span_length: 1,
@@ -226,10 +326,12 @@ mod tests {
                 }],
             },
             duration: Duration::from_millis(5),
+            stdout: String::new(),
+            stderr: String::new(),
         });
 
         let out = output(&r);
-        assert!(out.contains("FAILED"));
+        assert!(out.contains("✗"));
         assert!(out.contains("assertion failed"));
         assert!(out.contains("expected 2, received 3"));
     }
@@ -238,21 +340,41 @@ mod tests {
     fn failed_with_empty_assertions_no_diagnostics() {
         let mut r = reporter();
         r.on_test_complete(&TestResult {
-            test: TestCase {
+            test: TestItem {
                 name: "test_sub".into(),
-                module: "math".into(),
-                file: None,
+                module_path: "tests.math".into(),
+                file_path: None,
+                line_number: None,
             },
             outcome: TestOutcome::Failed {
                 message: "bad".into(),
                 assertions: vec![],
             },
             duration: Duration::from_millis(5),
+            stdout: String::new(),
+            stderr: String::new(),
         });
 
         let out = output(&r);
-        assert!(out.contains("FAILED"));
-        // should not contain diagnostic output
+        assert!(out.contains("✗"));
         assert!(!out.contains("assertions failed"));
+    }
+
+    #[test]
+    fn format_duration_millis() {
+        let d = Duration::from_millis(48);
+        assert_eq!(format_duration(d), "48.00ms");
+    }
+
+    #[test]
+    fn format_duration_seconds() {
+        let d = Duration::from_millis(1500);
+        assert_eq!(format_duration(d), "1.50s");
+    }
+
+    #[test]
+    fn format_duration_sub_millis() {
+        let d = Duration::from_micros(170);
+        assert_eq!(format_duration(d), "0.17ms");
     }
 }

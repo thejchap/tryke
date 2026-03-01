@@ -1,7 +1,7 @@
-use tryke_types::{RunSummary, TestCase, TestResult};
+use tryke_types::{RunSummary, TestItem, TestResult};
 
 pub trait Reporter {
-    fn on_run_start(&mut self, tests: &[TestCase]);
+    fn on_run_start(&mut self, tests: &[TestItem]);
     fn on_test_complete(&mut self, result: &TestResult);
     fn on_run_complete(&mut self, summary: &RunSummary);
 }
@@ -31,7 +31,7 @@ mod tests {
     }
 
     impl Reporter for RecordingReporter {
-        fn on_run_start(&mut self, _tests: &[TestCase]) {
+        fn on_run_start(&mut self, _tests: &[TestItem]) {
             self.started = true;
         }
 
@@ -49,15 +49,17 @@ mod tests {
         let mut reporter = RecordingReporter::new();
 
         let tests = vec![
-            TestCase {
+            TestItem {
                 name: "test_add".into(),
-                module: "math".into(),
-                file: None,
+                module_path: "tests.math".into(),
+                file_path: None,
+                line_number: None,
             },
-            TestCase {
+            TestItem {
                 name: "test_sub".into(),
-                module: "math".into(),
-                file: None,
+                module_path: "tests.math".into(),
+                file_path: None,
+                line_number: None,
             },
         ];
 
@@ -68,6 +70,8 @@ mod tests {
             test: tests[0].clone(),
             outcome: TestOutcome::Passed,
             duration: Duration::from_millis(10),
+            stdout: String::new(),
+            stderr: String::new(),
         });
 
         reporter.on_test_complete(&TestResult {
@@ -77,6 +81,8 @@ mod tests {
                 assertions: vec![],
             },
             duration: Duration::from_millis(5),
+            stdout: String::new(),
+            stderr: String::new(),
         });
 
         assert_eq!(reporter.results.len(), 2);

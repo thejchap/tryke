@@ -1,9 +1,10 @@
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use tryke_reporter::{JSONReporter, Reporter, TextReporter};
-use tryke_types::{Assertion, RunSummary, TestCase, TestOutcome, TestResult};
+use tryke_types::{Assertion, RunSummary, TestItem, TestOutcome, TestResult};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -27,47 +28,55 @@ enum Commands {
     Discover,
 }
 
-fn fake_tests() -> Vec<TestCase> {
+fn fake_tests() -> Vec<TestItem> {
     vec![
-        TestCase {
+        TestItem {
             name: "test_add".into(),
-            module: "math".into(),
-            file: Some("tests/math.rs".into()),
+            module_path: "tests.math".into(),
+            file_path: Some(PathBuf::from("tests/math.py")),
+            line_number: Some(10),
         },
-        TestCase {
+        TestItem {
             name: "test_sub".into(),
-            module: "math".into(),
-            file: Some("tests/math.rs".into()),
+            module_path: "tests.math".into(),
+            file_path: Some(PathBuf::from("tests/math.py")),
+            line_number: Some(25),
         },
-        TestCase {
+        TestItem {
             name: "test_parse".into(),
-            module: "parser".into(),
-            file: Some("tests/parser.rs".into()),
+            module_path: "tests.parser".into(),
+            file_path: Some(PathBuf::from("tests/parser.py")),
+            line_number: Some(8),
         },
     ]
 }
 
-fn fake_results(tests: &[TestCase]) -> Vec<TestResult> {
+fn fake_results(tests: &[TestItem]) -> Vec<TestResult> {
     vec![
         TestResult {
             test: tests[0].clone(),
             outcome: TestOutcome::Passed,
             duration: Duration::from_millis(12),
+            stdout: String::new(),
+            stderr: String::new(),
         },
         TestResult {
             test: tests[1].clone(),
             outcome: TestOutcome::Failed {
                 message: "assertion failed: 3 - 1 == 3".into(),
                 assertions: vec![Assertion {
-                    expression: "assert_eq!(3 - 1, 3)".into(),
-                    line: 15,
-                    span_offset: 18,
+                    expression: "assert 3 - 1 == 3".into(),
+                    file: None,
+                    line: 26,
+                    span_offset: 15,
                     span_length: 1,
                     expected: "2".into(),
                     received: "3".into(),
                 }],
             },
             duration: Duration::from_millis(5),
+            stdout: String::new(),
+            stderr: String::new(),
         },
         TestResult {
             test: tests[2].clone(),
@@ -75,6 +84,8 @@ fn fake_results(tests: &[TestCase]) -> Vec<TestResult> {
                 reason: Some("not implemented yet".into()),
             },
             duration: Duration::from_millis(0),
+            stdout: String::new(),
+            stderr: String::new(),
         },
     ]
 }
@@ -112,7 +123,7 @@ fn run_test(reporter: &mut dyn Reporter) -> Result<()> {
 fn run_discover() -> Result<()> {
     let tests = fake_tests();
     for test in &tests {
-        println!("{}::{}", test.module, test.name);
+        println!("{}", test.id());
     }
     Ok(())
 }
@@ -150,5 +161,27 @@ mod tests {
     #[test]
     fn discover_command() {
         assert!(run_discover().is_ok());
+    }
+
+    #[test]
+    fn test_item_id_with_file() {
+        let item = TestItem {
+            name: "test_add".into(),
+            module_path: "tests.math".into(),
+            file_path: Some(PathBuf::from("tests/math.py")),
+            line_number: Some(10),
+        };
+        assert_eq!(item.id(), "tests/math.py::test_add");
+    }
+
+    #[test]
+    fn test_item_id_without_file() {
+        let item = TestItem {
+            name: "test_add".into(),
+            module_path: "tests.math".into(),
+            file_path: None,
+            line_number: None,
+        };
+        assert_eq!(item.id(), "tests.math::test_add");
     }
 }

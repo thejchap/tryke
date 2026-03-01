@@ -39,18 +39,23 @@ impl Diagnostic for AssertionReport {
     }
 }
 
-pub fn render_assertions(file: Option<&str>, assertions: &[Assertion], buf: &mut String) {
+pub fn render_assertions(test_file: Option<&str>, assertions: &[Assertion], buf: &mut String) {
     use fmt::Write;
 
     if assertions.is_empty() {
         return;
     }
 
-    let handler = GraphicalReportHandler::new_themed(GraphicalTheme::unicode_nocolor());
+    let handler = GraphicalReportHandler::new_themed(GraphicalTheme::unicode());
     let mut failed = 0;
 
     for assertion in assertions {
-        let source_name = file.unwrap_or("<unknown>");
+        // prefer the assertion's own file, fall back to the test's file
+        let source_name = assertion
+            .file
+            .as_deref()
+            .or(test_file)
+            .unwrap_or("<unknown>");
         let source = NamedSource::new(source_name, assertion.expression.clone());
         let label_text = format!(
             "expected {}, received {}",
@@ -86,6 +91,7 @@ mod tests {
     fn make_assertion(expression: &str, offset: usize, len: usize) -> Assertion {
         Assertion {
             expression: expression.into(),
+            file: None,
             line: 10,
             span_offset: offset,
             span_length: len,
@@ -98,11 +104,11 @@ mod tests {
     fn single_assertion() {
         let assertions = vec![make_assertion("assert_eq!(a, 2)", 14, 1)];
         let mut buf = String::new();
-        render_assertions(Some("tests/math.rs"), &assertions, &mut buf);
+        render_assertions(Some("tests/math.py"), &assertions, &mut buf);
 
         assert!(buf.contains("assertion failed"));
         assert!(buf.contains("expected 2, received 3"));
-        assert!(buf.contains("tests/math.rs"));
+        assert!(buf.contains("tests/math.py"));
         assert!(buf.contains("1/1 assertions failed"));
     }
 
@@ -113,7 +119,7 @@ mod tests {
             make_assertion("assert_eq!(b, 5)", 14, 1),
         ];
         let mut buf = String::new();
-        render_assertions(Some("tests/math.rs"), &assertions, &mut buf);
+        render_assertions(Some("tests/math.py"), &assertions, &mut buf);
 
         assert!(buf.contains("2/2 assertions failed"));
     }
@@ -121,7 +127,7 @@ mod tests {
     #[test]
     fn empty_assertions() {
         let mut buf = String::new();
-        render_assertions(Some("tests/math.rs"), &[], &mut buf);
+        render_assertions(Some("tests/math.py"), &[], &mut buf);
 
         assert!(buf.is_empty());
     }
@@ -134,5 +140,23 @@ mod tests {
 
         assert!(buf.contains("<unknown>"));
         assert!(buf.contains("assertion failed"));
+    }
+
+    #[test]
+    fn assertion_file_overrides_test_file() {
+        let assertions = vec![Assertion {
+            expression: "assert_eq!(x, 1)".into(),
+            file: Some("helpers/utils.py".into()),
+            line: 5,
+            span_offset: 14,
+            span_length: 1,
+            expected: "1".into(),
+            received: "2".into(),
+        }];
+        let mut buf = String::new();
+        render_assertions(Some("tests/math.py"), &assertions, &mut buf);
+
+        assert!(buf.contains("helpers/utils.py"));
+        assert!(!buf.contains("tests/math.py"));
     }
 }

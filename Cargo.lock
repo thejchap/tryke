@@ -574,6 +574,7 @@ dependencies = [
  "anyhow",
  "clap",
  "insta",
+ "tryke_discovery",
  "tryke_reporter",
  "tryke_types",
 ]
@@ -581,6 +582,9 @@ dependencies = [
 [[package]]
 name = "tryke_discovery"
 version = "0.1.0"
+dependencies = [
+ "tryke_types",
+]
 
 [[package]]
 name = "tryke_reporter"

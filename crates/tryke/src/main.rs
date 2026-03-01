@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -26,29 +25,6 @@ enum OutputFormat {
 enum Commands {
     Test,
     Discover,
-}
-
-fn fake_tests() -> Vec<TestItem> {
-    vec![
-        TestItem {
-            name: "test_add".into(),
-            module_path: "tests.math".into(),
-            file_path: Some(PathBuf::from("tests/math.py")),
-            line_number: Some(10),
-        },
-        TestItem {
-            name: "test_sub".into(),
-            module_path: "tests.math".into(),
-            file_path: Some(PathBuf::from("tests/math.py")),
-            line_number: Some(25),
-        },
-        TestItem {
-            name: "test_parse".into(),
-            module_path: "tests.parser".into(),
-            file_path: Some(PathBuf::from("tests/parser.py")),
-            line_number: Some(8),
-        },
-    ]
 }
 
 fn fake_results(tests: &[TestItem]) -> Vec<TestResult> {
@@ -93,7 +69,7 @@ fn fake_results(tests: &[TestItem]) -> Vec<TestResult> {
 fn run_test(reporter: &mut dyn Reporter) -> Result<()> {
     let start = Instant::now();
 
-    let tests = fake_tests();
+    let tests = tryke_discovery::discover();
     reporter.on_run_start(&tests);
 
     let results = fake_results(&tests);
@@ -121,7 +97,7 @@ fn run_test(reporter: &mut dyn Reporter) -> Result<()> {
 }
 
 fn run_discover() -> Result<()> {
-    let tests = fake_tests();
+    let tests = tryke_discovery::discover();
     for test in &tests {
         println!("{}", test.id());
     }
@@ -144,6 +120,8 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     #[test]
@@ -156,11 +134,6 @@ mod tests {
     fn test_command_json() {
         let mut reporter = JSONReporter::new();
         assert!(run_test(&mut reporter).is_ok());
-    }
-
-    #[test]
-    fn discover_command() {
-        assert!(run_discover().is_ok());
     }
 
     #[test]

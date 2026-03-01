@@ -1,15 +1,3 @@
-from collections.abc import Callable
+from .expect import expect, test
 
-
-def test(fn: Callable[[], None]) -> Callable[[], None]:
-    return fn
-
-
-class Expectation[T]:
-    def to_equal(self, other: T) -> None:
-        _ = other
-
-
-def expect[T](expr: T) -> Expectation[T]:
-    _ = expr
-    return Expectation()
+__all__ = ["expect", "test"]

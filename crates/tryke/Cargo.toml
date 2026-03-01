@@ -13,6 +13,7 @@ readme = "../../README.md"
 [dependencies]
 anyhow = "1.0.102"
 clap = { version = "4.5.60", features = ["derive"] }
+tryke_discovery = { workspace = true }
 tryke_reporter = { workspace = true }
 tryke_types = { workspace = true }
 

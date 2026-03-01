@@ -7,12 +7,12 @@ jobs:
   build-linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: PyO3/maturin-action@v1
         with:
           manylinux: auto
           args: --release --out dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: wheels-ubuntu-latest
           path: dist/*.whl
@@ -25,12 +25,12 @@ jobs:
           - macos-latest
           - windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2.8.2
       - uses: astral-sh/setup-uv@v5
       - run: uv build --wheel --out-dir dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: wheels-${{ matrix.os }}
           path: dist/*.whl
@@ -42,7 +42,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v6
         with:
           pattern: wheels-*
           merge-multiple: true

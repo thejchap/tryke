@@ -4,6 +4,7 @@ pub trait Reporter {
     fn on_run_start(&mut self, tests: &[TestItem]);
     fn on_test_complete(&mut self, result: &TestResult);
     fn on_run_complete(&mut self, summary: &RunSummary);
+    fn on_collect_complete(&mut self, _tests: &[TestItem]) {}
 }
 
 #[cfg(test)]
@@ -54,12 +55,16 @@ mod tests {
                 module_path: "tests.math".into(),
                 file_path: None,
                 line_number: None,
+                display_name: None,
+                expected_assertions: vec![],
             },
             TestItem {
                 name: "test_sub".into(),
                 module_path: "tests.math".into(),
                 file_path: None,
                 line_number: None,
+                display_name: None,
+                expected_assertions: vec![],
             },
         ];
 

@@ -32,3 +32,9 @@ repos:
         pass_filenames: false
         types: [python]
         language: system
+      - id: ty-check
+        name: ty check
+        entry: uv run ty check
+        pass_filenames: false
+        types: [python]
+        language: system

@@ -15,6 +15,11 @@ authors = ["Justin Chapman <commonmodestudio@gmail.com>"]
 license = "MIT"
 
 [workspace.dependencies]
+ignore = "0.4"
+ruff_python_ast = { git = "https://github.com/astral-sh/ruff", tag = "0.15.4" }
+ruff_python_parser = { git = "https://github.com/astral-sh/ruff", tag = "0.15.4" }
+ruff_source_file = { git = "https://github.com/astral-sh/ruff", tag = "0.15.4" }
+ruff_text_size = { git = "https://github.com/astral-sh/ruff", tag = "0.15.4" }
 miette = { version = "7", features = ["fancy"] }
 owo-colors = { version = "4", features = ["supports-color"] }
 serde = { version = "1", features = ["derive"] }

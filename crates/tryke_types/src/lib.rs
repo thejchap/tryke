@@ -2,6 +2,16 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct ExpectedAssertion {
+    pub subject: String,
+    pub matcher: String,
+    pub negated: bool,
+    pub args: Vec<String>,
+    pub line: u32,
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Assertion {
     pub expression: String,
     pub file: Option<String>,
@@ -18,6 +28,8 @@ pub struct TestItem {
     pub module_path: String,
     pub file_path: Option<PathBuf>,
     pub line_number: Option<u32>,
+    pub display_name: Option<String>,
+    pub expected_assertions: Vec<ExpectedAssertion>,
 }
 
 impl TestItem {

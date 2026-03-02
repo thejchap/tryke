@@ -29,6 +29,10 @@ impl<W: io::Write> JSONReporter<W> {
         Self { writer }
     }
 
+    pub fn into_writer(self) -> W {
+        self.writer
+    }
+
     fn write_event<T: Serialize>(&mut self, event: &T) {
         // ignore write errors to match typical reporter behavior
         let _ = serde_json::to_writer(&mut self.writer, event)
@@ -55,6 +59,12 @@ struct RunCompleteEvent<'a> {
     summary: &'a RunSummary,
 }
 
+#[derive(Serialize)]
+struct CollectCompleteEvent<'a> {
+    event: &'static str,
+    tests: &'a [TestItem],
+}
+
 impl<W: io::Write> Reporter for JSONReporter<W> {
     fn on_run_start(&mut self, tests: &[TestItem]) {
         self.write_event(&RunStartEvent {
@@ -74,6 +84,13 @@ impl<W: io::Write> Reporter for JSONReporter<W> {
         self.write_event(&RunCompleteEvent {
             event: "run_complete",
             summary,
+        });
+    }
+
+    fn on_collect_complete(&mut self, tests: &[TestItem]) {
+        self.write_event(&CollectCompleteEvent {
+            event: "collect_complete",
+            tests,
         });
     }
 }
@@ -107,6 +124,8 @@ mod tests {
             module_path: "tests.mod_a".into(),
             file_path: None,
             line_number: None,
+            display_name: None,
+            expected_assertions: vec![],
         }];
 
         r.on_run_start(&tests);
@@ -127,6 +146,8 @@ mod tests {
                 module_path: "tests.math".into(),
                 file_path: None,
                 line_number: None,
+                display_name: None,
+                expected_assertions: vec![],
             },
             outcome: TestOutcome::Passed,
             duration: Duration::from_millis(42),
@@ -152,6 +173,8 @@ mod tests {
                 module_path: "tests.math".into(),
                 file_path: None,
                 line_number: None,
+                display_name: None,
+                expected_assertions: vec![],
             },
             outcome: TestOutcome::Failed {
                 message: "expected 1, got 2".into(),
@@ -181,6 +204,8 @@ mod tests {
                 module_path: "tests.misc".into(),
                 file_path: None,
                 line_number: None,
+                display_name: None,
+                expected_assertions: vec![],
             },
             outcome: TestOutcome::Skipped {
                 reason: Some("not implemented".into()),
@@ -230,12 +255,16 @@ mod tests {
                 module_path: "tests.m".into(),
                 file_path: None,
                 line_number: None,
+                display_name: None,
+                expected_assertions: vec![],
             },
             TestItem {
                 name: "test_b".into(),
                 module_path: "tests.m".into(),
                 file_path: None,
                 line_number: None,
+                display_name: None,
+                expected_assertions: vec![],
             },
         ];
 
@@ -276,6 +305,35 @@ mod tests {
     }
 
     #[test]
+    fn emits_collect_complete() {
+        let mut r = reporter();
+        let tests = vec![
+            TestItem {
+                name: "test_add".into(),
+                module_path: "tests.math".into(),
+                file_path: None,
+                line_number: None,
+                display_name: None,
+                expected_assertions: vec![],
+            },
+            TestItem {
+                name: "test_sub".into(),
+                module_path: "tests.math".into(),
+                file_path: None,
+                line_number: None,
+                display_name: None,
+                expected_assertions: vec![],
+            },
+        ];
+        r.on_collect_complete(&tests);
+        let lines = output_lines(&r);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["event"], "collect_complete");
+        assert_eq!(lines[0]["tests"][0]["name"], "test_add");
+        assert_eq!(lines[0]["tests"][1]["name"], "test_sub");
+    }
+
+    #[test]
     fn failed_with_assertions_includes_data() {
         let mut r = reporter();
         let result = TestResult {
@@ -284,6 +342,8 @@ mod tests {
                 module_path: "tests.math".into(),
                 file_path: Some("tests/math.py".into()),
                 line_number: Some(10),
+                display_name: None,
+                expected_assertions: vec![],
             },
             outcome: TestOutcome::Failed {
                 message: "assertion failed".into(),

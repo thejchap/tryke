@@ -7,6 +7,9 @@ authors = [{ name = "Justin Chapman", email = "commonmodestudio@gmail.com" }]
 requires-python = ">=3.13"
 dependencies = []
 
+[tool.ty.src]
+exclude = ["python"] # TODO
+
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = ["D", "COM812"]

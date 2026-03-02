@@ -1,5 +1,10 @@
 # contributing
 
+## local development
+
+run `maturin develop` to build the rust extension and install it into the active
+virtualenv so you can import and test the python bindings locally.
+
 ## updating snapshot tests
 
 1. run `cargo test` — new or changed snapshots are written to

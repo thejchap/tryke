@@ -295,7 +295,8 @@ fn main() -> Result<()> {
             let mut rep = build_reporter(reporter, verbosity);
             if let Some(p) = port {
                 let root_path = root.clone().unwrap_or(env::current_dir()?);
-                return tryke_server::Client::new(*p).run(&root_path, &mut *rep);
+                return tryke_server::Client::new(*p, filter.clone(), paths.clone())
+                    .run(&root_path, &mut *rep);
             }
 
             let cwd = env::current_dir()?;

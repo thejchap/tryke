@@ -9,12 +9,18 @@ use tryke_types::{RunSummary, TestItem, TestResult};
 
 pub struct Client {
     port: u16,
+    filter: Option<String>,
+    paths: Vec<String>,
 }
 
 impl Client {
     #[must_use]
-    pub fn new(port: u16) -> Self {
-        Self { port }
+    pub fn new(port: u16, filter: Option<String>, paths: Vec<String>) -> Self {
+        Self {
+            port,
+            filter,
+            paths,
+        }
     }
 
     #[expect(clippy::missing_errors_doc)]
@@ -28,7 +34,7 @@ impl Client {
             "jsonrpc": "2.0",
             "id": 1,
             "method": "run",
-            "params": { "root": root }
+            "params": { "root": root, "filter": self.filter, "paths": self.paths }
         });
         writer.write_all(serde_json::to_vec(&req)?.as_slice())?;
         writer.write_all(b"\n")?;
@@ -138,7 +144,9 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let mut reporter = RecordingReporter::new();
-        Client::new(port).run(dir.path(), &mut reporter).unwrap();
+        Client::new(port, None, vec![])
+            .run(dir.path(), &mut reporter)
+            .unwrap();
 
         assert!(reporter.started);
         assert!(reporter.summary.is_some());
@@ -149,7 +157,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut reporter = RecordingReporter::new();
         // port 1 is privileged and never has a server
-        let result = Client::new(1).run(dir.path(), &mut reporter);
+        let result = Client::new(1, None, vec![]).run(dir.path(), &mut reporter);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("no server running on port") || !msg.is_empty());

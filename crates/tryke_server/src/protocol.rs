@@ -17,9 +17,11 @@ pub struct DiscoverParams {
     pub root: PathBuf,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct RunParams {
     pub tests: Option<Vec<String>>,
+    pub filter: Option<String>,
+    pub paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]

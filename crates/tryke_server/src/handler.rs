@@ -9,6 +9,7 @@ use tokio::{
 };
 use tokio_stream::StreamExt;
 use tryke_runner::WorkerPool;
+use tryke_types::filter::TestFilter;
 use tryke_types::{RunSummary, TestOutcome};
 
 use crate::protocol::{
@@ -150,19 +151,24 @@ pub async fn handle_request(
             serialize_response(id, serde_json::json!({ "tests": tests }))
         }
         "run" => {
-            let filter = req
+            let rp = req
                 .params
                 .and_then(|p| serde_json::from_value::<RunParams>(p).ok())
-                .and_then(|p| p.tests);
+                .unwrap_or_default();
 
             let all_tests = disc.lock().await.tests();
-            let tests = match &filter {
+            let mut tests = match &rp.tests {
                 Some(ids) => all_tests
                     .into_iter()
                     .filter(|t| ids.contains(&t.id()))
                     .collect::<Vec<_>>(),
                 None => all_tests,
             };
+
+            let paths = rp.paths.unwrap_or_default();
+            if let Ok(tf) = TestFilter::from_args(&paths, rp.filter.as_deref()) {
+                tests = tf.apply(tests);
+            }
 
             broadcast_notification(
                 bcast_tx,
@@ -424,5 +430,40 @@ mod tests {
         // c1 gets a notification or response, c2 gets a notification
         assert!(v1.get("method").is_some() || v1.get("result").is_some());
         assert!(v2.get("method").is_some());
+    }
+
+    #[tokio::test]
+    async fn run_with_filter_restricts_tests() {
+        let dir = make_root();
+        fs::write(
+            dir.path().join("test_x.py"),
+            "@test\ndef test_alpha(): pass\n\n@test\ndef test_beta(): pass\n",
+        )
+        .expect("write test file");
+        let (tx, mut rx) = broadcast::channel(64);
+        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        // populate cache
+        disc.lock().await.rediscover();
+        let pool = make_pool();
+        handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"filter":"alpha"}}"#,
+            &disc,
+            &tx,
+            &pool,
+        )
+        .await;
+
+        let mut run_start_count = None;
+        while let Ok(bytes) = rx.try_recv() {
+            let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if val["method"] == "run_start" {
+                run_start_count = Some(val["params"]["tests"].as_array().unwrap().len());
+            }
+        }
+        assert_eq!(
+            run_start_count,
+            Some(1),
+            "filter should restrict to only test_alpha"
+        );
     }
 }

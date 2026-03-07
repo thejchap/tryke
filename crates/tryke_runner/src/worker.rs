@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use log::debug;
+use log::{debug, trace};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tryke_types::{Assertion, TestItem, TestOutcome, TestResult};
@@ -59,17 +59,17 @@ impl WorkerProcess {
         };
         let mut line = serde_json::to_string(&req)?;
         line.push('\n');
-        debug!("worker rpc -> {}", line.trim());
+        trace!("worker rpc -> {}", line.trim());
         self.stdin.write_all(line.as_bytes()).await?;
         self.stdin.flush().await?;
-        debug!("worker rpc: waiting for response");
+        trace!("worker rpc: waiting for response");
         let mut resp_line = String::new();
         let n = self.stdout.read_line(&mut resp_line).await?;
         if n == 0 {
-            debug!("worker rpc: stdout EOF");
+            trace!("worker rpc: stdout EOF");
             return Err(anyhow!("worker process closed stdout"));
         }
-        debug!("worker rpc <- {}", resp_line.trim());
+        trace!("worker rpc <- {}", resp_line.trim());
         let resp: RpcResponse = serde_json::from_str(resp_line.trim())?;
         if let Some(err) = resp.error {
             let detail = if let Some(tb) = &err.traceback {
@@ -124,7 +124,7 @@ impl WorkerProcess {
         })
         .await;
         if result.is_err() {
-            debug!("drain_stderr: timed out");
+            trace!("drain_stderr: timed out");
         }
         String::from_utf8_lossy(&buf).into_owned()
     }

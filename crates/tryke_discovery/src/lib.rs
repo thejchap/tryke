@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use log::debug;
+use log::trace;
 use rayon::prelude::*;
 
 pub(crate) mod db;
@@ -373,12 +373,12 @@ fn extract_expected_assertions(
 }
 
 pub(crate) fn parse_tests_from_source(root: &Path, file: &Path, source: &str) -> Vec<TestItem> {
-    debug!(
+    trace!(
         "parsing {}",
         file.strip_prefix(root).unwrap_or(file).display()
     );
     let Ok(parsed) = parse_module(source) else {
-        debug!("parse error in {}", file.display());
+        trace!("parse error in {}", file.display());
         return vec![];
     };
     let line_index = LineIndex::from_source_text(source);

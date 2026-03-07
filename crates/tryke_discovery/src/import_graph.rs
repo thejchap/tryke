@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use log::debug;
+use log::trace;
 
 #[derive(Default)]
 pub struct ImportGraph {
@@ -65,7 +65,7 @@ impl ImportGraph {
             if let Some(importers) = self.reverse.get(&file) {
                 for importer in importers {
                     if visited.insert(importer.clone()) {
-                        debug!(
+                        trace!(
                             "import_graph: {} invalidated by change to {}",
                             importer.display(),
                             file.display()

@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use log::debug;
+use log::{debug, trace};
 use ruff_python_parser::parse_module;
 use salsa::Setter;
 use tryke_types::TestItem;
@@ -50,11 +50,11 @@ impl Discoverer {
             };
             if let Some(file) = self.inputs.get(path) {
                 if file.text(&self.db) != &text {
-                    debug!("rediscover: re-parsing changed file {}", path.display());
+                    trace!("rediscover: re-parsing changed file {}", path.display());
                     file.set_text(&mut self.db).to(text);
                 }
             } else {
-                debug!("rediscover: parsing new file {}", path.display());
+                trace!("rediscover: parsing new file {}", path.display());
                 let file = SourceFile::new(&self.db, text, self.root.clone(), path.clone());
                 self.inputs.insert(path.clone(), file);
             }
@@ -104,20 +104,20 @@ impl Discoverer {
                     };
                     if let Some(file) = self.inputs.get(path) {
                         if file.text(&self.db) != &text {
-                            debug!(
+                            trace!(
                                 "rediscover_changed: re-parsing changed file {}",
                                 path.display()
                             );
                             file.set_text(&mut self.db).to(text);
                         }
                     } else {
-                        debug!("rediscover_changed: parsing new file {}", path.display());
+                        trace!("rediscover_changed: parsing new file {}", path.display());
                         let file = SourceFile::new(&self.db, text, self.root.clone(), path.clone());
                         self.inputs.insert(path.clone(), file);
                     }
                     self.import_graph.update(path.clone(), imports);
                 } else {
-                    debug!(
+                    trace!(
                         "rediscover_changed: removing deleted file {}",
                         path.display()
                     );

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use log::debug;
+use log::{debug, trace};
 
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::Stream;
@@ -108,9 +108,9 @@ async fn worker_task(
     while let Some(msg) = rx.recv().await {
         match msg {
             WorkerMsg::Ping(ack_tx) => {
-                debug!("worker_task: ping (pre-warm)");
+                trace!("worker_task: ping (pre-warm)");
                 if worker.is_none() {
-                    debug!("worker_task: spawning process for warm-up");
+                    trace!("worker_task: spawning process for warm-up");
                     match WorkerProcess::spawn(&python_bin, &path_refs) {
                         Ok(w) => worker = Some(w),
                         Err(e) => {
@@ -121,9 +121,9 @@ async fn worker_task(
                 let _ = ack_tx.send(());
             }
             WorkerMsg::Test(test, result_tx) => {
-                debug!("worker_task: running test {}", test.name);
+                trace!("worker_task: running test {}", test.name);
                 if worker.is_none() {
-                    debug!("worker_task: spawning process");
+                    trace!("worker_task: spawning process");
                     match WorkerProcess::spawn(&python_bin, &path_refs) {
                         Ok(w) => worker = Some(w),
                         Err(e) => {
@@ -156,7 +156,7 @@ async fn worker_task(
                 };
                 match w.run_test(&test).await {
                     Ok(result) => {
-                        debug!("worker_task: test {} done", test.name);
+                        trace!("worker_task: test {} done", test.name);
                         let _ = result_tx.send(result);
                     }
                     Err(first_err) => {
@@ -187,14 +187,14 @@ async fn worker_task(
                 }
             }
             WorkerMsg::Reload(modules, ack_tx) => {
-                debug!("worker_task: reload {modules:?}");
+                trace!("worker_task: reload {modules:?}");
                 if let Some(w) = worker.as_mut() {
                     let _ = w.reload(&modules).await;
                 }
                 let _ = ack_tx.send(());
             }
             WorkerMsg::Shutdown => {
-                debug!("worker_task: shutdown");
+                trace!("worker_task: shutdown");
                 break;
             }
         }

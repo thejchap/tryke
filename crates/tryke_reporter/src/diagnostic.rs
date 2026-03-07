@@ -67,7 +67,7 @@ impl Diagnostic for AssertionReport {
 }
 
 pub fn render_assertions(test_file: Option<&str>, assertions: &[Assertion], buf: &mut String) {
-    render_assertions_themed(test_file, assertions, GraphicalTheme::unicode(), buf);
+    render_assertions_themed(test_file, assertions, GraphicalTheme::unicode(), true, buf);
 }
 
 pub fn render_assertions_plain(
@@ -79,6 +79,7 @@ pub fn render_assertions_plain(
         test_file,
         assertions,
         GraphicalTheme::unicode_nocolor(),
+        false,
         buf,
     );
 }
@@ -87,6 +88,7 @@ fn render_assertions_themed(
     test_file: Option<&str>,
     assertions: &[Assertion],
     theme: GraphicalTheme,
+    highlight: bool,
     buf: &mut String,
 ) {
     use fmt::Write;
@@ -96,6 +98,11 @@ fn render_assertions_themed(
     }
 
     let handler = GraphicalReportHandler::new_themed(theme);
+    let handler = if highlight {
+        handler
+    } else {
+        handler.without_syntax_highlighting()
+    };
     let mut failed = 0;
 
     for assertion in assertions {

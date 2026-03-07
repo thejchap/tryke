@@ -25,6 +25,13 @@ def test(fn=None, /, *, name=None):  # noqa: PT028, ARG001
     return decorator
 
 
+class ExpectationError(AssertionError):
+    def __init__(self, message: str, *, expected: str, received: str) -> None:
+        super().__init__(message)
+        self.expected = expected
+        self.received = received
+
+
 class Expectation[T]:
     def __init__(self, value: T, *, negated: bool = False) -> None:
         self._value: T = value
@@ -34,56 +41,117 @@ class Expectation[T]:
     def not_(self) -> Expectation[T]:
         return Expectation(self._value, negated=not self._negated)
 
-    def _assert(self, passed: bool, message: str) -> None:  # noqa: FBT001
+    def _assert(
+        self,
+        passed: bool,  # noqa: FBT001
+        message: str,
+        *,
+        expected: str,
+        received: str,
+    ) -> None:
         ok = (not passed) if self._negated else passed
         if not ok:
             prefix = "expected not " if self._negated else "expected "
-            raise AssertionError(prefix + message)
+            actual_expected = ("not " + expected) if self._negated else expected
+            raise ExpectationError(
+                prefix + message, expected=actual_expected, received=received
+            )
 
     def to_equal(self, other: T) -> None:
-        self._assert(self._value == other, f"{self._value!r} to equal {other!r}")
+        self._assert(
+            self._value == other,
+            f"{self._value!r} to equal {other!r}",
+            expected=repr(other),
+            received=repr(self._value),
+        )
 
     def to_be(self, other: object) -> None:
-        self._assert(self._value is other, f"{self._value!r} to be {other!r}")
+        self._assert(
+            self._value is other,
+            f"{self._value!r} to be {other!r}",
+            expected=repr(other),
+            received=repr(self._value),
+        )
 
     def to_be_truthy(self) -> None:
-        self._assert(bool(self._value), f"{self._value!r} to be truthy")
+        self._assert(
+            bool(self._value),
+            f"{self._value!r} to be truthy",
+            expected="truthy",
+            received=repr(self._value),
+        )
 
     def to_be_falsy(self) -> None:
-        self._assert(not bool(self._value), f"{self._value!r} to be falsy")
+        self._assert(
+            not bool(self._value),
+            f"{self._value!r} to be falsy",
+            expected="falsy",
+            received=repr(self._value),
+        )
 
     def to_be_none(self) -> None:
-        self._assert(self._value is None, f"{self._value!r} to be None")
+        self._assert(
+            self._value is None,
+            f"{self._value!r} to be None",
+            expected="None",
+            received=repr(self._value),
+        )
 
     def to_be_greater_than(self, n: T) -> None:
-        self._assert(self._value > n, f"{self._value!r} to be greater than {n!r}")  # type: ignore[operator]
+        self._assert(
+            self._value > n,
+            f"{self._value!r} to be greater than {n!r}",
+            expected=f"> {n!r}",
+            received=repr(self._value),
+        )  # type: ignore[operator]
 
     def to_be_less_than(self, n: T) -> None:
-        self._assert(self._value < n, f"{self._value!r} to be less than {n!r}")  # type: ignore[operator]
+        self._assert(
+            self._value < n,
+            f"{self._value!r} to be less than {n!r}",
+            expected=f"< {n!r}",
+            received=repr(self._value),
+        )  # type: ignore[operator]
 
     def to_be_greater_than_or_equal(self, n: T) -> None:
         self._assert(
             self._value >= n,  # type: ignore[operator]
             f"{self._value!r} to be greater than or equal to {n!r}",
+            expected=f">= {n!r}",
+            received=repr(self._value),
         )
 
     def to_be_less_than_or_equal(self, n: T) -> None:
         self._assert(
             self._value <= n,  # type: ignore[operator]
             f"{self._value!r} to be less than or equal to {n!r}",
+            expected=f"<= {n!r}",
+            received=repr(self._value),
         )
 
     def to_contain(self, item: T) -> None:
-        self._assert(item in self._value, f"{self._value!r} to contain {item!r}")  # type: ignore[operator]
+        self._assert(
+            item in self._value,
+            f"{self._value!r} to contain {item!r}",
+            expected=f"contains {item!r}",
+            received=repr(self._value),
+        )  # type: ignore[operator]
 
     def to_have_length(self, n: int) -> None:
         actual = len(self._value)  # type: ignore[arg-type]
-        self._assert(actual == n, f"{self._value!r} to have length {n}, got {actual}")
+        self._assert(
+            actual == n,
+            f"{self._value!r} to have length {n}, got {actual}",
+            expected=f"length {n}",
+            received=f"length {actual}",
+        )
 
     def to_match(self, pattern: str) -> None:
         self._assert(
             bool(re.search(pattern, str(self._value))),
             f"{self._value!r} to match pattern {pattern!r}",
+            expected=f"matches {pattern!r}",
+            received=repr(self._value),
         )
 
 
@@ -179,3 +247,28 @@ def test_not_modifier() -> None:
     expect("a").not_.to_be("b")
     expect(0).not_.to_be_truthy()
     expect(1).not_.to_be_falsy()
+
+
+@test
+def test_expectation_error_carries_fields() -> None:
+    _true = True
+    try:
+        expect(_true).to_be_falsy()
+    except ExpectationError as exc:
+        expect(exc.expected).to_equal("falsy")
+        expect(exc.received).to_equal("True")
+    else:
+        msg = "ExpectationError was not raised"
+        raise AssertionError(msg)
+
+
+@test
+def test_negated_expectation_error() -> None:
+    try:
+        expect(1).not_.to_equal(1)
+    except ExpectationError as exc:
+        expect(exc.expected).to_equal("not 1")
+        expect(exc.received).to_equal("1")
+    else:
+        msg = "ExpectationError was not raised"
+        raise AssertionError(msg)

@@ -8,6 +8,11 @@ import sys
 import time
 import traceback
 import unittest
+from pathlib import Path
+
+from tryke.expect import ExpectationError
+
+_TRYKE_PKG = str(Path(__file__).resolve().parent)
 
 
 def main() -> None:
@@ -101,11 +106,12 @@ def _run_test(module_name: str, function_name: str, modules: dict[str, object]) 
         }
     except AssertionError as exc:
         duration_ms = int((time.monotonic() - start) * 1000)
+        assertions = _extract_assertions(exc)
         return {
             "outcome": "failed",
             "message": str(exc) or "assertion failed",
             "traceback": traceback.format_exc(),
-            "assertions": [],
+            "assertions": assertions,
             "duration_ms": duration_ms,
             "stdout": stdout_buf.getvalue(),
             "stderr": stderr_buf.getvalue(),
@@ -121,6 +127,29 @@ def _run_test(module_name: str, function_name: str, modules: dict[str, object]) 
             "stdout": stdout_buf.getvalue(),
             "stderr": stderr_buf.getvalue(),
         }
+
+
+def _is_user_frame(frame: traceback.FrameSummary) -> bool:
+    return not str(Path(frame.filename).resolve()).startswith(_TRYKE_PKG)
+
+
+def _extract_assertions(exc: AssertionError) -> list[dict]:
+    if not isinstance(exc, ExpectationError):
+        return []
+    tb = sys.exc_info()[2]
+    frames = traceback.extract_tb(tb)
+    for frame in reversed(frames):
+        if _is_user_frame(frame):
+            return [
+                {
+                    "expression": (frame.line or "").strip(),
+                    "expected": exc.expected,
+                    "received": exc.received,
+                    "line": frame.lineno,
+                    "file": frame.filename,
+                }
+            ]
+    return []
 
 
 def _reload(module_names: list[str], modules: dict[str, object]) -> None:

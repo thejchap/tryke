@@ -148,15 +148,34 @@ fn build_pythonpath(extra: &[&Path]) -> String {
 }
 
 fn convert_assertion(wire: AssertionWire) -> Assertion {
+    let (span_offset, span_length) = compute_subject_span(&wire.expression);
     Assertion {
-        expression: format!("{}.{}({})", wire.subject, wire.matcher, wire.actual),
-        file: None,
+        expression: wire.expression,
+        file: wire.file,
         line: wire.line as usize,
-        span_offset: 0,
-        span_length: 0,
-        expected: String::new(),
-        received: wire.actual,
+        span_offset,
+        span_length,
+        expected: wire.expected,
+        received: wire.received,
     }
+}
+
+/// Find the subject inside `expect(subject)` by matching parens.
+fn compute_subject_span(expression: &str) -> (usize, usize) {
+    let Some(pos) = expression.find("expect(") else {
+        return (0, expression.len().max(1));
+    };
+    let start = pos + 7; // len("expect(")
+    let mut depth: u32 = 1;
+    for (i, ch) in expression[start..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' if depth == 1 => return (start, i.max(1)),
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    (start, expression.len().saturating_sub(start).max(1))
 }
 
 fn convert_result(test: TestItem, wire: RunTestResultWire) -> TestResult {
@@ -280,16 +299,43 @@ mod tests {
     }
 
     #[test]
-    fn convert_assertion_formats_expression() {
+    fn convert_assertion_maps_wire_fields() {
         let wire = AssertionWire {
-            subject: "x".into(),
-            matcher: "to_equal".into(),
-            actual: "2".into(),
+            expression: "expect(x).to_equal(2)".into(),
+            expected: "2".into(),
+            received: "3".into(),
             line: 10,
+            file: Some("tests/test_math.py".into()),
         };
         let a = convert_assertion(wire);
-        assert_eq!(a.expression, "x.to_equal(2)");
-        assert_eq!(a.received, "2");
+        assert_eq!(a.expression, "expect(x).to_equal(2)");
+        assert_eq!(a.expected, "2");
+        assert_eq!(a.received, "3");
         assert_eq!(a.line, 10);
+        assert_eq!(a.file.as_deref(), Some("tests/test_math.py"));
+        // "expect(" is 7 chars, subject "x" starts at 7, length 1
+        assert_eq!(a.span_offset, 7);
+        assert_eq!(a.span_length, 1);
+    }
+
+    #[test]
+    fn compute_subject_span_simple() {
+        let (off, len) = compute_subject_span("expect(x).to_equal(2)");
+        assert_eq!(off, 7);
+        assert_eq!(len, 1);
+    }
+
+    #[test]
+    fn compute_subject_span_nested_parens() {
+        let (off, len) = compute_subject_span("expect(foo(bar(1))).to_be_truthy()");
+        assert_eq!(off, 7);
+        assert_eq!(len, 11); // "foo(bar(1))"
+    }
+
+    #[test]
+    fn compute_subject_span_no_expect() {
+        let (off, len) = compute_subject_span("assert x == 1");
+        assert_eq!(off, 0);
+        assert_eq!(len, 13);
     }
 }

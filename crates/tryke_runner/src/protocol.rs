@@ -64,8 +64,10 @@ pub enum RunTestResultWire {
 
 #[derive(Debug, Deserialize)]
 pub struct AssertionWire {
-    pub subject: String,
-    pub matcher: String,
-    pub actual: String,
+    pub expression: String,
+    pub expected: String,
+    pub received: String,
     pub line: u32,
+    #[serde(default)]
+    pub file: Option<String>,
 }

@@ -1,0 +1,11 @@
+---
+source: crates/tryke/tests/snapshots.rs
+assertion_line: 84
+expression: strip_ansi(&out)
+---
+tests/test_validation.py:
+✗ test_credit_card_all_zeros [75.00ms]
+  expected True to be falsy
+      File "tests/test_validation.py", line 5, in test_credit_card_all_zeros
+        expect(is_credit_card("0000000000000000")).to_be_falsy()
+    AssertionError: expected True to be falsy

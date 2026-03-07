@@ -1,0 +1,14 @@
+---
+source: crates/tryke/tests/snapshots.rs
+assertion_line: 60
+expression: strip_ansi(&out)
+---
+tests/test_validation.py:
+✗ test_credit_card_all_zeros [75.00ms]
+  × assertion failed
+   ╭─[tests/test_validation.py:1:8]
+ 1 │ expect(is_credit_card("0000000000000000")).to_be_falsy()
+   ·        ────────────────┬────────────────
+   ·                        ╰── expected falsy, received True
+   ╰────
+  1/1 assertions failed

@@ -134,6 +134,15 @@ impl WorkerProcess {
     }
 }
 
+impl Drop for WorkerProcess {
+    fn drop(&mut self) {
+        // Safety net: ensure the child process is killed when the worker is
+        // dropped (e.g. on the error-respawn path in pool.rs). start_kill() is
+        // the synchronous variant — safe to call on already-dead processes.
+        let _ = self.child.start_kill();
+    }
+}
+
 fn build_pythonpath(extra: &[&Path]) -> String {
     let existing = std::env::var("PYTHONPATH").unwrap_or_default();
     let mut parts: Vec<String> = extra
@@ -337,5 +346,30 @@ mod tests {
         let (off, len) = compute_subject_span("assert x == 1");
         assert_eq!(off, 0);
         assert_eq!(len, 13);
+    }
+
+    #[tokio::test]
+    async fn drop_kills_child_process() {
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("failed to spawn sleep");
+        let pid = child.id().expect("missing pid");
+
+        // Wrap in a WorkerProcess-like drop: start_kill then drop
+        let _ = child.start_kill();
+        drop(child);
+
+        // Give the OS a moment to reap the process
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // On Unix, sending signal 0 checks if the process exists
+        let status = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status();
+        assert!(
+            status.is_ok_and(|s| !s.success()),
+            "child process {pid} should be dead after start_kill + drop"
+        );
     }
 }

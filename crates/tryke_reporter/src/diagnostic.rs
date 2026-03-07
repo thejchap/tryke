@@ -1,13 +1,40 @@
 use std::fmt;
 
 use miette::{
-    Diagnostic, GraphicalReportHandler, GraphicalTheme, LabeledSpan, NamedSource, Report, Severity,
-    SourceCode,
+    Diagnostic, GraphicalReportHandler, GraphicalTheme, LabeledSpan, MietteError,
+    MietteSpanContents, NamedSource, Report, Severity, SourceCode, SourceSpan, SpanContents,
 };
 use tryke_types::Assertion;
 
+/// Wraps a source string with a line offset so miette reports the correct
+/// line number instead of always starting at line 1.
+struct OffsetSource {
+    source: String,
+    line_offset: usize, // 0-based
+}
+
+impl SourceCode for OffsetSource {
+    fn read_span<'a>(
+        &'a self,
+        span: &SourceSpan,
+        context_lines_before: usize,
+        context_lines_after: usize,
+    ) -> Result<Box<dyn SpanContents<'a> + 'a>, MietteError> {
+        let inner = self
+            .source
+            .read_span(span, context_lines_before, context_lines_after)?;
+        Ok(Box::new(MietteSpanContents::new(
+            inner.data(),
+            *inner.span(),
+            inner.line() + self.line_offset,
+            inner.column(),
+            inner.line_count(),
+        )))
+    }
+}
+
 struct AssertionReport {
-    source: NamedSource<String>,
+    source: NamedSource<OffsetSource>,
     label: LabeledSpan,
 }
 
@@ -78,7 +105,11 @@ fn render_assertions_themed(
             .as_deref()
             .or(test_file)
             .unwrap_or("<unknown>");
-        let source = NamedSource::new(source_name, assertion.expression.clone());
+        let offset_source = OffsetSource {
+            source: assertion.expression.clone(),
+            line_offset: assertion.line.saturating_sub(1),
+        };
+        let source = NamedSource::new(source_name, offset_source);
         let label_text = format!(
             "expected {}, received {}",
             assertion.expected, assertion.received
@@ -332,5 +363,41 @@ ZeroDivisionError: division by zero";
         assert!(buf.contains("── stdout ──"));
         assert!(buf.contains("hello"));
         assert!(buf.contains("world"));
+    }
+
+    #[test]
+    fn assertion_shows_correct_line_number() {
+        let assertions = vec![Assertion {
+            expression: "expect(x).to_equal(2)".into(),
+            file: Some("tests/test_math.py".into()),
+            line: 42,
+            span_offset: 7,
+            span_length: 1,
+            expected: "2".into(),
+            received: "3".into(),
+        }];
+        let mut buf = String::new();
+        render_assertions_plain(None, &assertions, &mut buf);
+        assert!(
+            buf.contains("42"),
+            "expected line 42 in output, got:\n{buf}"
+        );
+    }
+
+    #[test]
+    fn assertion_line_zero_handled() {
+        let assertions = vec![Assertion {
+            expression: "expect(x).to_equal(1)".into(),
+            file: Some("test.py".into()),
+            line: 0,
+            span_offset: 7,
+            span_length: 1,
+            expected: "1".into(),
+            received: "2".into(),
+        }];
+        let mut buf = String::new();
+        // Should not panic with line 0 (saturating_sub handles it)
+        render_assertions_plain(None, &assertions, &mut buf);
+        assert!(buf.contains("assertion failed"));
     }
 }

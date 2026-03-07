@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, overload
 
 if TYPE_CHECKING:
@@ -33,27 +34,57 @@ class Expectation[T]:
     def not_(self) -> Expectation[T]:
         return Expectation(self._value, negated=not self._negated)
 
-    def to_equal(self, other: T) -> None: ...
+    def _assert(self, passed: bool, message: str) -> None:  # noqa: FBT001
+        ok = (not passed) if self._negated else passed
+        if not ok:
+            prefix = "expected not " if self._negated else "expected "
+            raise AssertionError(prefix + message)
 
-    def to_be(self, other: object) -> None: ...
+    def to_equal(self, other: T) -> None:
+        self._assert(self._value == other, f"{self._value!r} to equal {other!r}")
 
-    def to_be_truthy(self) -> None: ...
+    def to_be(self, other: object) -> None:
+        self._assert(self._value is other, f"{self._value!r} to be {other!r}")
 
-    def to_be_falsy(self) -> None: ...
+    def to_be_truthy(self) -> None:
+        self._assert(bool(self._value), f"{self._value!r} to be truthy")
 
-    def to_be_none(self) -> None: ...
+    def to_be_falsy(self) -> None:
+        self._assert(not bool(self._value), f"{self._value!r} to be falsy")
 
-    def to_be_greater_than(self, n: T) -> None: ...
+    def to_be_none(self) -> None:
+        self._assert(self._value is None, f"{self._value!r} to be None")
 
-    def to_be_less_than(self, n: T) -> None: ...
+    def to_be_greater_than(self, n: T) -> None:
+        self._assert(self._value > n, f"{self._value!r} to be greater than {n!r}")  # type: ignore[operator]
 
-    def to_be_greater_than_or_equal(self, n: T) -> None: ...
+    def to_be_less_than(self, n: T) -> None:
+        self._assert(self._value < n, f"{self._value!r} to be less than {n!r}")  # type: ignore[operator]
 
-    def to_be_less_than_or_equal(self, n: T) -> None: ...
+    def to_be_greater_than_or_equal(self, n: T) -> None:
+        self._assert(
+            self._value >= n,  # type: ignore[operator]
+            f"{self._value!r} to be greater than or equal to {n!r}",
+        )
 
-    def to_contain(self, item: T) -> None: ...
+    def to_be_less_than_or_equal(self, n: T) -> None:
+        self._assert(
+            self._value <= n,  # type: ignore[operator]
+            f"{self._value!r} to be less than or equal to {n!r}",
+        )
 
-    def to_have_length(self, n: int) -> None: ...
+    def to_contain(self, item: T) -> None:
+        self._assert(item in self._value, f"{self._value!r} to contain {item!r}")  # type: ignore[operator]
+
+    def to_have_length(self, n: int) -> None:
+        actual = len(self._value)  # type: ignore[arg-type]
+        self._assert(actual == n, f"{self._value!r} to have length {n}, got {actual}")
+
+    def to_match(self, pattern: str) -> None:
+        self._assert(
+            bool(re.search(pattern, str(self._value))),
+            f"{self._value!r} to match pattern {pattern!r}",
+        )
 
 
 def expect[T](expr: T, name: str | None = None) -> Expectation[T]:  # noqa: ARG001

@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{sync::Arc, time::Instant};
 
 use bytes::Bytes;
 use serde_json::Value;
@@ -7,7 +7,9 @@ use tokio::{
     net::TcpStream,
     sync::{Mutex, broadcast},
 };
-use tryke_types::{RunSummary, TestOutcome, TestResult};
+use tokio_stream::StreamExt;
+use tryke_runner::WorkerPool;
+use tryke_types::{RunSummary, TestOutcome};
 
 use crate::protocol::{
     DiscoverCompleteParams, DiscoverParams, ErrorResponse, METHOD_NOT_FOUND, Notification, Request,
@@ -19,6 +21,7 @@ pub struct ConnectionHandler {
     disc: Arc<std::sync::Mutex<tryke_discovery::Discoverer>>,
     broadcast_rx: broadcast::Receiver<Bytes>,
     broadcast_tx: broadcast::Sender<Bytes>,
+    pool: Arc<WorkerPool>,
 }
 
 impl ConnectionHandler {
@@ -27,12 +30,14 @@ impl ConnectionHandler {
         disc: Arc<std::sync::Mutex<tryke_discovery::Discoverer>>,
         broadcast_rx: broadcast::Receiver<Bytes>,
         broadcast_tx: broadcast::Sender<Bytes>,
+        pool: Arc<WorkerPool>,
     ) -> Self {
         Self {
             stream,
             disc,
             broadcast_rx,
             broadcast_tx,
+            pool,
         }
     }
 
@@ -66,12 +71,9 @@ impl ConnectionHandler {
                 Ok(_) => {
                     let disc = Arc::clone(&self.disc);
                     let bcast_tx = self.broadcast_tx.clone();
+                    let pool = Arc::clone(&self.pool);
                     let line_owned = line.clone();
-                    let response = tokio::task::spawn_blocking(move || {
-                        handle_request(&line_owned, &disc, &bcast_tx)
-                    })
-                    .await
-                    .unwrap_or(None);
+                    let response = handle_request(&line_owned, &disc, &bcast_tx, &pool).await;
                     if let Some(bytes) = response {
                         let mut w = writer.lock().await;
                         if w.write_all(&bytes).await.is_err() || w.flush().await.is_err() {
@@ -82,19 +84,6 @@ impl ConnectionHandler {
             }
         }
     }
-}
-
-fn fake_results(tests: &[tryke_types::TestItem]) -> Vec<TestResult> {
-    tests
-        .iter()
-        .map(|test| TestResult {
-            test: test.clone(),
-            outcome: TestOutcome::Passed,
-            duration: Duration::from_millis(0),
-            stdout: String::new(),
-            stderr: String::new(),
-        })
-        .collect()
 }
 
 fn broadcast_notification<T: serde::Serialize>(
@@ -137,12 +126,12 @@ fn serialize_error(id: Option<Value>, code: i32, message: String) -> Option<Vec<
     })
 }
 
-#[must_use]
 #[expect(clippy::missing_panics_doc)]
-pub fn handle_request(
+pub async fn handle_request(
     line: &str,
     disc: &std::sync::Mutex<tryke_discovery::Discoverer>,
     bcast_tx: &broadcast::Sender<Bytes>,
+    pool: &WorkerPool,
 ) -> Option<Vec<u8>> {
     let req: Request = serde_json::from_str(line.trim()).ok()?;
     let id = req.id.clone().unwrap_or(Value::Null);
@@ -184,12 +173,13 @@ pub fn handle_request(
                 },
             );
 
-            let results = fake_results(&tests);
+            let start = Instant::now();
+            let mut stream = pool.run(tests);
             let mut passed = 0usize;
             let mut failed = 0usize;
             let mut skipped = 0usize;
 
-            for result in &results {
+            while let Some(result) = stream.next().await {
                 match &result.outcome {
                     TestOutcome::Passed => passed += 1,
                     TestOutcome::Failed { .. } => failed += 1,
@@ -208,7 +198,7 @@ pub fn handle_request(
                 passed,
                 failed,
                 skipped,
-                duration: Duration::from_millis(0),
+                duration: start.elapsed(),
             };
             broadcast_notification(
                 bcast_tx,
@@ -242,6 +232,7 @@ mod tests {
         sync::broadcast,
     };
     use tryke_discovery::Discoverer;
+    use tryke_runner::WorkerPool;
 
     use super::*;
 
@@ -251,16 +242,23 @@ mod tests {
         dir
     }
 
+    fn make_pool() -> Arc<WorkerPool> {
+        Arc::new(WorkerPool::new(1, "python3"))
+    }
+
     #[tokio::test]
     async fn ping_returns_pong() {
         let dir = make_root();
         let (tx, _rx) = broadcast::channel(16);
         let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
-        let resp = tokio::task::spawn_blocking(move || {
-            handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#, &disc, &tx)
-        })
+        let pool = make_pool();
+        let resp = handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#,
+            &disc,
+            &tx,
+            &pool,
+        )
         .await
-        .unwrap()
         .unwrap();
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(val["result"], "pong");
@@ -273,13 +271,14 @@ mod tests {
             .expect("write test file");
         let (tx, _rx) = broadcast::channel(16);
         let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
-        let resp = tokio::task::spawn_blocking(move || {
-            let line =
-                r#"{"jsonrpc":"2.0","id":1,"method":"discover","params":{"root":"/ignored"}}"#;
-            handle_request(line, &disc, &tx)
-        })
+        let pool = make_pool();
+        let resp = handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"discover","params":{"root":"/ignored"}}"#,
+            &disc,
+            &tx,
+            &pool,
+        )
         .await
-        .unwrap()
         .unwrap();
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert!(val["result"]["tests"].is_array());
@@ -290,12 +289,14 @@ mod tests {
         let dir = make_root();
         let (tx, mut rx) = broadcast::channel(64);
         let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
-        tokio::task::spawn_blocking(move || {
-            let line = r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"root":"/ignored","tests":null}}"#;
-            handle_request(line, &disc, &tx)
-        })
-        .await
-        .unwrap();
+        let pool = make_pool();
+        handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"root":"/ignored","tests":null}}"#,
+            &disc,
+            &tx,
+            &pool,
+        )
+        .await;
 
         let mut methods = vec![];
         while let Ok(bytes) = rx.try_recv() {
@@ -317,16 +318,14 @@ mod tests {
 
         // populate cache via discover
         let (tx, _rx) = broadcast::channel(64);
-        let d = Arc::clone(&disc);
-        tokio::task::spawn_blocking(move || {
-            handle_request(
-                r#"{"jsonrpc":"2.0","id":1,"method":"discover","params":{"root":"/ignored"}}"#,
-                &d,
-                &tx,
-            )
-        })
-        .await
-        .unwrap();
+        let pool = make_pool();
+        handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"discover","params":{"root":"/ignored"}}"#,
+            &disc,
+            &tx,
+            &pool,
+        )
+        .await;
 
         // write a new file to disk without calling discover again
         fs::write(dir.path().join("test_y.py"), "@test\ndef test_y(): pass\n")
@@ -334,16 +333,13 @@ mod tests {
 
         // run should return only cached tests (test_x), not pick up test_y
         let (tx2, mut rx2) = broadcast::channel(64);
-        let d2 = Arc::clone(&disc);
-        tokio::task::spawn_blocking(move || {
-            handle_request(
-                r#"{"jsonrpc":"2.0","id":2,"method":"run","params":{"root":"/ignored","tests":null}}"#,
-                &d2,
-                &tx2,
-            )
-        })
-        .await
-        .unwrap();
+        handle_request(
+            r#"{"jsonrpc":"2.0","id":2,"method":"run","params":{"root":"/ignored","tests":null}}"#,
+            &disc,
+            &tx2,
+            &pool,
+        )
+        .await;
 
         let mut run_start_count = None;
         while let Ok(bytes) = rx2.try_recv() {
@@ -364,15 +360,14 @@ mod tests {
         let dir = make_root();
         let (tx, _rx) = broadcast::channel(16);
         let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
-        let resp = tokio::task::spawn_blocking(move || {
-            handle_request(
-                r#"{"jsonrpc":"2.0","id":1,"method":"unknown_method"}"#,
-                &disc,
-                &tx,
-            )
-        })
+        let pool = make_pool();
+        let resp = handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"unknown_method"}"#,
+            &disc,
+            &tx,
+            &pool,
+        )
         .await
-        .unwrap()
         .unwrap();
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(val["error"]["code"], METHOD_NOT_FOUND);
@@ -384,10 +379,12 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let dir = make_root();
         let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        let pool = Arc::new(WorkerPool::new(1, "python3"));
 
         let (bcast_tx, _) = broadcast::channel::<Bytes>(64);
         let bcast_tx_clone = bcast_tx.clone();
         let disc_clone = Arc::clone(&disc);
+        let pool_clone = Arc::clone(&pool);
 
         tokio::spawn(async move {
             for _ in 0..2u8 {
@@ -395,8 +392,9 @@ mod tests {
                 let bcast_rx = bcast_tx_clone.subscribe();
                 let bcast_tx_conn = bcast_tx_clone.clone();
                 let d = Arc::clone(&disc_clone);
+                let p = Arc::clone(&pool_clone);
                 tokio::spawn(async move {
-                    ConnectionHandler::new(stream, d, bcast_rx, bcast_tx_conn)
+                    ConnectionHandler::new(stream, d, bcast_rx, bcast_tx_conn, p)
                         .run()
                         .await;
                 });

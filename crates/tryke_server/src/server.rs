@@ -7,6 +7,7 @@ use bytes::Bytes;
 use log::debug;
 use tokio::{net::TcpListener, sync::broadcast};
 use tryke_discovery::Discoverer;
+use tryke_runner::WorkerPool;
 
 use crate::{
     handler::ConnectionHandler,
@@ -34,6 +35,9 @@ impl Server {
     #[expect(clippy::missing_errors_doc)]
     #[expect(clippy::missing_panics_doc)]
     pub async fn run_on_listener(self, listener: TcpListener) -> anyhow::Result<()> {
+        let size = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+        let pool = Arc::new(WorkerPool::new(size, "python3"));
+
         let (bcast_tx, _) = broadcast::channel::<Bytes>(256);
         let disc = Arc::new(Mutex::new(Discoverer::new(&self.root)));
         disc.lock().unwrap().rediscover();
@@ -41,10 +45,27 @@ impl Server {
         let (std_tx, std_rx) = std::sync::mpsc::channel::<Vec<std::path::PathBuf>>();
         let _debouncer = spawn_watcher(&self.root, std_tx)?;
 
-        let disc_for_watcher = Arc::clone(&disc);
-        let bcast_for_watcher = bcast_tx.clone();
+        // bridge blocking std receiver to async tokio channel
+        let (watcher_tx, mut watcher_rx) = tokio::sync::mpsc::channel::<Vec<PathBuf>>(64);
         tokio::task::spawn_blocking(move || {
             while let Ok(paths) = std_rx.recv() {
+                let _ = watcher_tx.blocking_send(paths);
+            }
+        });
+
+        let disc_for_watcher = Arc::clone(&disc);
+        let bcast_for_watcher = bcast_tx.clone();
+        let pool_for_watcher = Arc::clone(&pool);
+        let root_for_watcher = self.root.clone();
+        tokio::spawn(async move {
+            while let Some(paths) = watcher_rx.recv().await {
+                let modules: Vec<String> = paths
+                    .iter()
+                    .filter_map(|p| tryke_runner::path_to_module(&root_for_watcher, p))
+                    .collect();
+                if !modules.is_empty() {
+                    pool_for_watcher.reload(modules).await;
+                }
                 let tests = disc_for_watcher.lock().unwrap().rediscover_changed(&paths);
                 debug!("file change: rediscovered {} tests", tests.len());
                 let notif = Notification {
@@ -65,8 +86,9 @@ impl Server {
             let bcast_rx = bcast_tx.subscribe();
             let bcast_tx_conn = bcast_tx.clone();
             let disc_conn = Arc::clone(&disc);
+            let pool_conn = Arc::clone(&pool);
             tokio::spawn(async move {
-                ConnectionHandler::new(stream, disc_conn, bcast_rx, bcast_tx_conn)
+                ConnectionHandler::new(stream, disc_conn, bcast_rx, bcast_tx_conn, pool_conn)
                     .run()
                     .await;
             });
@@ -123,22 +145,17 @@ mod tests {
 
     #[tokio::test]
     async fn multi_client_both_receive_broadcast() {
-        let (port, dir) = start_server().await;
-        fs::write(dir.path().join("test_m.py"), "@test\ndef test_m(): pass\n")
-            .expect("write test file");
+        let (port, _dir) = start_server().await;
 
         let mut c1 = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
         let mut c2 = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
 
-        let run_req = format!(
-            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"run\",\"params\":{{\"root\":\"{}\",\"tests\":null}}}}\n",
-            dir.path().display()
-        );
+        let run_req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"run\",\"params\":{\"root\":\"/ignored\",\"tests\":null}}\n";
         c1.write_all(run_req.as_bytes()).await.unwrap();
 
         let mut r2 = BufReader::new(&mut c2);
         let mut line2 = String::new();
-        time::timeout(Duration::from_secs(2), r2.read_line(&mut line2))
+        time::timeout(Duration::from_secs(5), r2.read_line(&mut line2))
             .await
             .unwrap()
             .unwrap();

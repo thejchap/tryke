@@ -1,16 +1,18 @@
 use std::{
     env,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use clap_verbosity_flag::{Verbosity as LogVerbosity, WarnLevel};
 use log::debug;
+use tokio_stream::StreamExt;
 use tryke_discovery::Discoverer;
 use tryke_reporter::{DotReporter, JSONReporter, JUnitReporter, Reporter, TextReporter, Verbosity};
-use tryke_types::{RunSummary, TestItem, TestOutcome, TestResult};
+use tryke_runner::{WorkerPool, path_to_module};
+use tryke_types::{RunSummary, TestOutcome};
 
 #[derive(Debug, Parser)]
 #[command(version, about, long_about = None)]
@@ -56,44 +58,31 @@ enum Commands {
     },
 }
 
-fn fake_results(tests: &[TestItem]) -> Vec<TestResult> {
-    tests
-        .iter()
-        .map(|test| {
-            let outcome = TestOutcome::Passed;
-            let duration = Duration::from_millis(0);
-            TestResult {
-                test: test.clone(),
-                outcome,
-                duration,
-                stdout: String::new(),
-                stderr: String::new(),
-            }
-        })
-        .collect()
+fn worker_pool_size() -> usize {
+    std::thread::available_parallelism().map_or(4, std::num::NonZero::get)
 }
 
-fn run_test(reporter: &mut dyn Reporter, root: Option<&Path>) -> Result<()> {
+async fn run_test(reporter: &mut dyn Reporter, root: Option<&Path>) -> Result<()> {
     let start = Instant::now();
-
     let tests = match root {
         Some(r) => tryke_discovery::discover_from(r),
         None => tryke_discovery::discover(),
     };
     reporter.on_run_start(&tests);
 
-    let results = fake_results(&tests);
+    let pool = WorkerPool::new(worker_pool_size(), "python3");
+    let mut stream = pool.run(tests);
     let mut passed = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;
 
-    for result in &results {
+    while let Some(result) = stream.next().await {
         match &result.outcome {
             TestOutcome::Passed => passed += 1,
             TestOutcome::Failed { .. } => failed += 1,
             TestOutcome::Skipped { .. } => skipped += 1,
         }
-        reporter.on_test_complete(result);
+        reporter.on_test_complete(&result);
     }
 
     reporter.on_run_complete(&RunSummary {
@@ -103,6 +92,7 @@ fn run_test(reporter: &mut dyn Reporter, root: Option<&Path>) -> Result<()> {
         duration: start.elapsed(),
     });
 
+    pool.shutdown();
     Ok(())
 }
 
@@ -115,22 +105,26 @@ fn run_collect_only(reporter: &mut dyn Reporter, root: Option<&Path>) -> Result<
     Ok(())
 }
 
-fn report_cycle(reporter: &mut dyn Reporter, tests: Vec<TestItem>) -> Result<()> {
+async fn report_cycle(
+    reporter: &mut dyn Reporter,
+    tests: Vec<tryke_types::TestItem>,
+    pool: &WorkerPool,
+) -> Result<()> {
     let start = Instant::now();
     reporter.on_run_start(&tests);
 
-    let results = fake_results(&tests);
+    let mut stream = pool.run(tests);
     let mut passed = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;
 
-    for result in &results {
+    while let Some(result) = stream.next().await {
         match &result.outcome {
             TestOutcome::Passed => passed += 1,
             TestOutcome::Failed { .. } => failed += 1,
             TestOutcome::Skipped { .. } => skipped += 1,
         }
-        reporter.on_test_complete(result);
+        reporter.on_test_complete(&result);
     }
 
     reporter.on_run_complete(&RunSummary {
@@ -143,8 +137,12 @@ fn report_cycle(reporter: &mut dyn Reporter, tests: Vec<TestItem>) -> Result<()>
     Ok(())
 }
 
-fn run_cycle(reporter: &mut dyn Reporter, discoverer: &mut Discoverer) -> Result<()> {
-    report_cycle(reporter, discoverer.rediscover())
+async fn run_cycle(
+    reporter: &mut dyn Reporter,
+    discoverer: &mut Discoverer,
+    pool: &WorkerPool,
+) -> Result<()> {
+    report_cycle(reporter, discoverer.rediscover(), pool).await
 }
 
 fn clear_if_tty() {
@@ -154,22 +152,32 @@ fn clear_if_tty() {
     }
 }
 
-fn run_watch(reporter: &mut dyn Reporter, root: Option<&Path>) -> Result<()> {
+async fn run_watch(reporter: &mut dyn Reporter, root: Option<&Path>) -> Result<()> {
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let root = root.unwrap_or(&cwd);
     let mut discoverer = Discoverer::new(root);
 
+    let pool = WorkerPool::new(worker_pool_size(), "python3");
+
     clear_if_tty();
-    run_cycle(reporter, &mut discoverer)?;
+    run_cycle(reporter, &mut discoverer, &pool).await?;
 
     let (tx, rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
     let _debouncer = tryke_server::watcher::spawn_watcher(root, tx)?;
 
     for paths in &rx {
+        let modules: Vec<String> = paths
+            .iter()
+            .filter_map(|p| path_to_module(root, p))
+            .collect();
+        if !modules.is_empty() {
+            pool.reload(modules).await;
+        }
         clear_if_tty();
-        report_cycle(reporter, discoverer.rediscover_changed(&paths))?;
+        report_cycle(reporter, discoverer.rediscover_changed(&paths), &pool).await?;
     }
 
+    pool.shutdown();
     Ok(())
 }
 
@@ -197,6 +205,7 @@ fn main() -> Result<()> {
         _ => Verbosity::Normal,
     };
 
+    let rt = tokio::runtime::Runtime::new()?;
     match &cli.command {
         Commands::Test {
             collect_only,
@@ -214,51 +223,55 @@ fn main() -> Result<()> {
             } else if *collect_only {
                 run_collect_only(&mut *rep, root_ref)
             } else {
-                run_test(&mut *rep, root_ref)
+                rt.block_on(run_test(&mut *rep, root_ref))
             }
         }
         Commands::Watch { reporter, root } => {
             let mut rep = build_reporter(reporter, verbosity);
-            run_watch(&mut *rep, root.as_deref())
+            rt.block_on(run_watch(&mut *rep, root.as_deref()))
         }
         Commands::Server { port, root } => {
             let root_path = root
                 .clone()
                 .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
             let server = tryke_server::Server::new(*port, root_path);
-            tokio::runtime::Runtime::new()?.block_on(server.run())
+            rt.block_on(server.run())
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use clap_verbosity_flag::log::LevelFilter;
+    use tryke_reporter::{JSONReporter, TextReporter};
+    use tryke_types::TestItem;
 
     use super::*;
 
-    #[test]
-    fn test_command_text() {
+    #[tokio::test]
+    async fn test_command_text() {
         let mut reporter = TextReporter::new();
-        assert!(run_test(&mut reporter, None).is_ok());
+        assert!(run_test(&mut reporter, None).await.is_ok());
     }
 
-    #[test]
-    fn test_command_json() {
+    #[tokio::test]
+    async fn test_command_json() {
         let mut reporter = JSONReporter::new();
-        assert!(run_test(&mut reporter, None).is_ok());
+        assert!(run_test(&mut reporter, None).await.is_ok());
     }
 
-    #[test]
-    fn test_command_dot() {
+    #[tokio::test]
+    async fn test_command_dot() {
         let mut reporter = DotReporter::new();
-        assert!(run_test(&mut reporter, None).is_ok());
+        assert!(run_test(&mut reporter, None).await.is_ok());
     }
 
-    #[test]
-    fn test_command_junit() {
+    #[tokio::test]
+    async fn test_command_junit() {
         let mut reporter = JUnitReporter::new();
-        assert!(run_test(&mut reporter, None).is_ok());
+        assert!(run_test(&mut reporter, None).await.is_ok());
     }
 
     #[test]
@@ -432,23 +445,33 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn run_cycle_runs_without_error() {
+    #[tokio::test]
+    async fn run_cycle_runs_without_error() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
         std::fs::write(dir.path().join("test_x.py"), "@test\ndef test_x(): pass\n")
             .expect("write test file");
         let mut discoverer = Discoverer::new(dir.path());
         let mut reporter = TextReporter::new();
-        assert!(run_cycle(&mut reporter, &mut discoverer).is_ok());
+        let pool = WorkerPool::new(1, "python3");
+        assert!(
+            run_cycle(&mut reporter, &mut discoverer, &pool)
+                .await
+                .is_ok()
+        );
     }
 
-    #[test]
-    fn run_cycle_with_json_reporter() {
+    #[tokio::test]
+    async fn run_cycle_with_json_reporter() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
         let mut discoverer = Discoverer::new(dir.path());
         let mut reporter = JSONReporter::with_writer(Vec::new());
-        assert!(run_cycle(&mut reporter, &mut discoverer).is_ok());
+        let pool = WorkerPool::new(1, "python3");
+        assert!(
+            run_cycle(&mut reporter, &mut discoverer, &pool)
+                .await
+                .is_ok()
+        );
     }
 }

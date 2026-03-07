@@ -25,11 +25,13 @@ miette = { version = "7", features = ["fancy"] }
 owo-colors = { version = "4", features = ["supports-color"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time", "process"] }
+tokio-stream = "0.1"
 notify = "6"
 notify-debouncer-mini = "0.4"
 tryke = { path = "crates/tryke" }
 tryke_discovery = { path = "crates/tryke_discovery" }
 tryke_reporter = { path = "crates/tryke_reporter" }
+tryke_runner = { path = "crates/tryke_runner" }
 tryke_server = { path = "crates/tryke_server" }
 tryke_types = { path = "crates/tryke_types" }

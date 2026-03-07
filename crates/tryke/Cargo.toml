@@ -19,8 +19,10 @@ env_logger = "0.11"
 log = "0.4"
 notify-debouncer-mini = { workspace = true }
 tokio = { workspace = true }
+tokio-stream = { workspace = true }
 tryke_discovery = { workspace = true }
 tryke_reporter = { workspace = true }
+tryke_runner = { workspace = true }
 tryke_server = { workspace = true }
 tryke_types = { workspace = true }
 

@@ -1,0 +1,170 @@
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use tokio::sync::{mpsc, oneshot};
+use tokio_stream::Stream;
+use tokio_stream::wrappers::UnboundedReceiverStream;
+use tryke_types::{TestItem, TestResult};
+
+use crate::worker::WorkerProcess;
+
+enum WorkerMsg {
+    Test(TestItem, oneshot::Sender<TestResult>),
+    Reload(Vec<String>, oneshot::Sender<()>),
+    Shutdown,
+}
+
+pub struct WorkerPool {
+    worker_txs: Vec<mpsc::UnboundedSender<WorkerMsg>>,
+    next: Arc<AtomicUsize>,
+}
+
+impl WorkerPool {
+    #[must_use]
+    pub fn new(size: usize, python_bin: &str) -> Self {
+        let size = size.max(1);
+        let mut worker_txs = Vec::with_capacity(size);
+        for _ in 0..size {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let bin = python_bin.to_owned();
+            tokio::spawn(worker_task(bin, rx));
+            worker_txs.push(tx);
+        }
+        Self {
+            worker_txs,
+            next: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    pub fn run(&self, tests: Vec<TestItem>) -> impl Stream<Item = TestResult> + use<> {
+        let (stream_tx, stream_rx) = mpsc::unbounded_channel();
+        let n = self.worker_txs.len();
+        let next = Arc::clone(&self.next);
+
+        for test in tests {
+            let (result_tx, result_rx) = oneshot::channel();
+            let idx = next.fetch_add(1, Ordering::Relaxed) % n;
+            let _ = self.worker_txs[idx].send(WorkerMsg::Test(test, result_tx));
+            let stx = stream_tx.clone();
+            tokio::spawn(async move {
+                if let Ok(result) = result_rx.await {
+                    let _ = stx.send(result);
+                }
+            });
+        }
+
+        UnboundedReceiverStream::new(stream_rx)
+    }
+
+    pub async fn reload(&self, modules: Vec<String>) {
+        let mut ack_rxs = Vec::with_capacity(self.worker_txs.len());
+        for tx in &self.worker_txs {
+            let (ack_tx, ack_rx) = oneshot::channel();
+            let _ = tx.send(WorkerMsg::Reload(modules.clone(), ack_tx));
+            ack_rxs.push(ack_rx);
+        }
+        for ack_rx in ack_rxs {
+            let _ = ack_rx.await;
+        }
+    }
+
+    pub fn shutdown(self) {
+        for tx in self.worker_txs {
+            let _ = tx.send(WorkerMsg::Shutdown);
+        }
+    }
+}
+
+// converts a file path to a python module name relative to root
+// e.g. /project/tests/test_math.py -> tests.test_math
+#[must_use]
+pub fn path_to_module(root: &Path, path: &Path) -> Option<String> {
+    let relative = path.strip_prefix(root).ok()?;
+    let without_ext = relative.with_extension("");
+    let parts: Vec<String> = without_ext
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join("."))
+}
+
+async fn worker_task(python_bin: String, mut rx: mpsc::UnboundedReceiver<WorkerMsg>) {
+    let mut worker: Option<WorkerProcess> = None;
+
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            WorkerMsg::Test(test, result_tx) => {
+                if worker.is_none() {
+                    worker = WorkerProcess::spawn(&python_bin).ok();
+                }
+                let Some(w) = worker.as_mut() else {
+                    continue;
+                };
+                if let Ok(result) = w.run_test(&test).await {
+                    let _ = result_tx.send(result);
+                } else {
+                    // worker died; respawn and retry once
+                    worker = WorkerProcess::spawn(&python_bin).ok();
+                    if let Some(w) = worker.as_mut()
+                        && let Ok(result) = w.run_test(&test).await
+                    {
+                        let _ = result_tx.send(result);
+                    }
+                }
+            }
+            WorkerMsg::Reload(modules, ack_tx) => {
+                if let Some(w) = worker.as_mut() {
+                    let _ = w.reload(&modules).await;
+                }
+                let _ = ack_tx.send(());
+            }
+            WorkerMsg::Shutdown => break,
+        }
+    }
+
+    if let Some(mut w) = worker {
+        w.shutdown().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn path_to_module_basic() {
+        let root = PathBuf::from("/project");
+        let path = PathBuf::from("/project/tests/test_math.py");
+        assert_eq!(
+            path_to_module(&root, &path),
+            Some("tests.test_math".to_string())
+        );
+    }
+
+    #[test]
+    fn path_to_module_top_level() {
+        let root = PathBuf::from("/project");
+        let path = PathBuf::from("/project/test_foo.py");
+        assert_eq!(path_to_module(&root, &path), Some("test_foo".to_string()));
+    }
+
+    #[test]
+    fn path_to_module_not_under_root() {
+        let root = PathBuf::from("/project");
+        let path = PathBuf::from("/other/test_foo.py");
+        assert_eq!(path_to_module(&root, &path), None);
+    }
+
+    #[test]
+    fn path_to_module_root_itself() {
+        let root = PathBuf::from("/project");
+        let path = PathBuf::from("/project");
+        assert_eq!(path_to_module(&root, &path), None);
+    }
+}

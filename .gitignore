@@ -1,5 +1,6 @@
 /target
 /dist
+.worktrees/
 __pycache__/
 *.pyc
 

@@ -167,7 +167,7 @@ pub fn handle_request(
                 .and_then(|p| serde_json::from_value::<RunParams>(p).ok())
                 .and_then(|p| p.tests);
 
-            let all_tests = disc.lock().unwrap().rediscover();
+            let all_tests = disc.lock().unwrap().tests();
             let tests = match &filter {
                 Some(ids) => all_tests
                     .into_iter()
@@ -306,6 +306,57 @@ mod tests {
         }
         assert!(methods.contains(&"run_start".to_string()));
         assert!(methods.contains(&"run_complete".to_string()));
+    }
+
+    #[tokio::test]
+    async fn run_uses_cached_tests_not_rediscover() {
+        let dir = make_root();
+        fs::write(dir.path().join("test_x.py"), "@test\ndef test_x(): pass\n")
+            .expect("write initial file");
+        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+
+        // populate cache via discover
+        let (tx, _rx) = broadcast::channel(64);
+        let d = Arc::clone(&disc);
+        tokio::task::spawn_blocking(move || {
+            handle_request(
+                r#"{"jsonrpc":"2.0","id":1,"method":"discover","params":{"root":"/ignored"}}"#,
+                &d,
+                &tx,
+            )
+        })
+        .await
+        .unwrap();
+
+        // write a new file to disk without calling discover again
+        fs::write(dir.path().join("test_y.py"), "@test\ndef test_y(): pass\n")
+            .expect("write second file");
+
+        // run should return only cached tests (test_x), not pick up test_y
+        let (tx2, mut rx2) = broadcast::channel(64);
+        let d2 = Arc::clone(&disc);
+        tokio::task::spawn_blocking(move || {
+            handle_request(
+                r#"{"jsonrpc":"2.0","id":2,"method":"run","params":{"root":"/ignored","tests":null}}"#,
+                &d2,
+                &tx2,
+            )
+        })
+        .await
+        .unwrap();
+
+        let mut run_start_count = None;
+        while let Ok(bytes) = rx2.try_recv() {
+            let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if val["method"] == "run_start" {
+                run_start_count = Some(val["params"]["tests"].as_array().unwrap().len());
+            }
+        }
+        assert_eq!(
+            run_start_count,
+            Some(1),
+            "run should use cached tests, not rediscover"
+        );
     }
 
     #[tokio::test]

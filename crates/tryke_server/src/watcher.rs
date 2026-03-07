@@ -4,6 +4,7 @@ use std::{
     time::Duration,
 };
 
+use log::debug;
 use notify::RecommendedWatcher;
 use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
 
@@ -22,6 +23,7 @@ pub fn spawn_watcher(
                     .map(|e| e.path.clone())
                     .collect();
                 if !paths.is_empty() {
+                    debug!("file changes detected: {paths:?}");
                     let _ = tx.send(paths);
                 }
             }

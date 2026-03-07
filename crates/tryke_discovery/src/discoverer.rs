@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use log::debug;
 use salsa::Setter;
 use tryke_types::TestItem;
 
@@ -28,19 +29,36 @@ impl Discoverer {
     pub fn rediscover(&mut self) -> Vec<TestItem> {
         let mut paths = crate::collect_python_files(&self.root);
         paths.sort();
+        debug!(
+            "rediscover: found {} python files in {}",
+            paths.len(),
+            self.root.display()
+        );
         for path in &paths {
             let text = std::fs::read_to_string(path).unwrap_or_default();
             if let Some(file) = self.inputs.get(path) {
                 if file.text(&self.db) != &text {
+                    debug!("rediscover: re-parsing changed file {}", path.display());
                     file.set_text(&mut self.db).to(text);
                 }
             } else {
+                debug!("rediscover: parsing new file {}", path.display());
                 let file = SourceFile::new(&self.db, text, self.root.clone(), path.clone());
                 self.inputs.insert(path.clone(), file);
             }
         }
         let path_set: HashSet<&PathBuf> = paths.iter().collect();
         self.inputs.retain(|p, _| path_set.contains(p));
+        let tests: Vec<TestItem> = self
+            .inputs
+            .values()
+            .flat_map(|f| parse_tests(&self.db, *f))
+            .collect();
+        debug!("rediscover: discovered {} tests total", tests.len());
+        tests
+    }
+
+    pub fn tests(&self) -> Vec<TestItem> {
         self.inputs
             .values()
             .flat_map(|f| parse_tests(&self.db, *f))
@@ -48,27 +66,43 @@ impl Discoverer {
     }
 
     pub fn rediscover_changed(&mut self, changed: &[PathBuf]) -> Vec<TestItem> {
+        debug!(
+            "rediscover_changed: processing {} changed paths",
+            changed.len()
+        );
         for path in changed {
             if path.extension().is_some_and(|ext| ext == "py") {
                 if path.exists() {
                     let text = std::fs::read_to_string(path).unwrap_or_default();
                     if let Some(file) = self.inputs.get(path) {
                         if file.text(&self.db) != &text {
+                            debug!(
+                                "rediscover_changed: re-parsing changed file {}",
+                                path.display()
+                            );
                             file.set_text(&mut self.db).to(text);
                         }
                     } else {
+                        debug!("rediscover_changed: parsing new file {}", path.display());
                         let file = SourceFile::new(&self.db, text, self.root.clone(), path.clone());
                         self.inputs.insert(path.clone(), file);
                     }
                 } else {
+                    debug!(
+                        "rediscover_changed: removing deleted file {}",
+                        path.display()
+                    );
                     self.inputs.remove(path);
                 }
             }
         }
-        self.inputs
+        let tests: Vec<TestItem> = self
+            .inputs
             .values()
             .flat_map(|f| parse_tests(&self.db, *f))
-            .collect()
+            .collect();
+        debug!("rediscover_changed: {} tests after update", tests.len());
+        tests
     }
 }
 
@@ -92,6 +126,22 @@ mod tests {
             fs::write(&path, content).expect("write file");
         }
         dir
+    }
+
+    #[test]
+    fn tests_returns_same_results_as_prior_rediscover() {
+        let source = "@test\ndef test_hello():\n    pass\n";
+        let dir = make_project(&[("test_example.py", source)]);
+        let mut discoverer = Discoverer::new(dir.path());
+        let mut from_rediscover = discoverer.rediscover();
+        let mut from_tests = discoverer.tests();
+        from_rediscover.sort_by(|a, b| a.name.cmp(&b.name));
+        from_tests.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(from_rediscover.len(), from_tests.len());
+        for (a, b) in from_rediscover.iter().zip(from_tests.iter()) {
+            assert_eq!(a.name, b.name);
+            assert_eq!(a.module_path, b.module_path);
+        }
     }
 
     #[test]

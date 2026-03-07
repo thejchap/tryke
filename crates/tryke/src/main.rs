@@ -39,7 +39,7 @@ enum Commands {
         reporter: ReporterFormat,
         #[arg(long)]
         root: Option<PathBuf>,
-        #[arg(long)]
+        #[arg(long, default_missing_value = "2337", num_args = 0..=1, require_equals = false)]
         port: Option<u16>,
     },
     Watch {
@@ -411,6 +411,18 @@ mod tests {
     #[test]
     fn test_port_flag_parsed() {
         let cli = Cli::try_parse_from(["tryke", "test", "--port", "2337"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Test {
+                port: Some(2337),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_port_flag_defaults_to_2337() {
+        let cli = Cli::try_parse_from(["tryke", "test", "--port"]).unwrap();
         assert!(matches!(
             cli.command,
             Commands::Test {

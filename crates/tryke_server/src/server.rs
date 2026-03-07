@@ -36,6 +36,7 @@ impl Server {
     pub async fn run_on_listener(self, listener: TcpListener) -> anyhow::Result<()> {
         let (bcast_tx, _) = broadcast::channel::<Bytes>(256);
         let disc = Arc::new(Mutex::new(Discoverer::new(&self.root)));
+        disc.lock().unwrap().rediscover();
 
         let (std_tx, std_rx) = std::sync::mpsc::channel::<Vec<std::path::PathBuf>>();
         let _debouncer = spawn_watcher(&self.root, std_tx)?;

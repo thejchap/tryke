@@ -4,6 +4,7 @@ use std::{
 };
 
 use log::debug;
+use ruff_python_parser::parse_module;
 use salsa::Setter;
 use tryke_types::TestItem;
 
@@ -42,7 +43,11 @@ impl Discoverer {
         );
         for path in &paths {
             let text = std::fs::read_to_string(path).unwrap_or_default();
-            let imports = crate::extract_local_imports(&self.root, path, &text);
+            let imports = if let Ok(parsed) = parse_module(&text) {
+                crate::extract_local_imports(&self.root, path, &parsed.syntax().body)
+            } else {
+                vec![]
+            };
             if let Some(file) = self.inputs.get(path) {
                 if file.text(&self.db) != &text {
                     debug!("rediscover: re-parsing changed file {}", path.display());
@@ -92,7 +97,11 @@ impl Discoverer {
             if path.extension().is_some_and(|ext| ext == "py") {
                 if path.exists() {
                     let text = std::fs::read_to_string(path).unwrap_or_default();
-                    let imports = crate::extract_local_imports(&self.root, path, &text);
+                    let imports = if let Ok(parsed) = parse_module(&text) {
+                        crate::extract_local_imports(&self.root, path, &parsed.syntax().body)
+                    } else {
+                        vec![]
+                    };
                     if let Some(file) = self.inputs.get(path) {
                         if file.text(&self.db) != &text {
                             debug!(

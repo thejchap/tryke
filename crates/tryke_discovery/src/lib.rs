@@ -81,12 +81,9 @@ fn resolve_relative_import_path(root: &Path, base: &Path, module_name: &str) -> 
     None
 }
 
-/// Extract local file imports from a Python source file.
+/// Extract local file imports from a pre-parsed Python module body.
 /// Returns absolute paths of project-local files that this file imports.
-pub(crate) fn extract_local_imports(root: &Path, file: &Path, source: &str) -> Vec<PathBuf> {
-    let Ok(parsed) = parse_module(source) else {
-        return vec![];
-    };
+pub(crate) fn extract_local_imports(root: &Path, file: &Path, body: &[Stmt]) -> Vec<PathBuf> {
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut result: Vec<PathBuf> = Vec::new();
 
@@ -96,7 +93,7 @@ pub(crate) fn extract_local_imports(root: &Path, file: &Path, source: &str) -> V
         }
     };
 
-    for stmt in &parsed.syntax().body {
+    for stmt in body {
         match stmt {
             Stmt::Import(import_stmt) => {
                 for alias in &import_stmt.names {
@@ -863,8 +860,9 @@ def my_func():
         let root = dir.path();
         fs::write(root.join("utils.py"), "").expect("write");
         let source = "import utils\n";
+        let parsed = parse_module(source).expect("parse");
         let file = root.join("test_foo.py");
-        let imports = extract_local_imports(root, &file, source);
+        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
         assert_eq!(imports, vec![root.join("utils.py")]);
     }
 
@@ -874,8 +872,9 @@ def my_func():
         let root = dir.path();
         fs::write(root.join("utils.py"), "").expect("write");
         let source = "from utils import helper\n";
+        let parsed = parse_module(source).expect("parse");
         let file = root.join("test_foo.py");
-        let imports = extract_local_imports(root, &file, source);
+        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
         assert_eq!(imports, vec![root.join("utils.py")]);
     }
 
@@ -885,8 +884,9 @@ def my_func():
         let root = dir.path();
         // stdlib / third-party (doesn't exist under root)
         let source = "import os\nimport pytest\n";
+        let parsed = parse_module(source).expect("parse");
         let file = root.join("test_foo.py");
-        let imports = extract_local_imports(root, &file, source);
+        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
         assert!(imports.is_empty());
     }
 
@@ -898,8 +898,9 @@ def my_func():
         fs::create_dir_all(&sub).expect("mkdir");
         fs::write(sub.join("utils.py"), "").expect("write");
         let source = "from .utils import helper\n";
+        let parsed = parse_module(source).expect("parse");
         let file = sub.join("test_foo.py");
-        let imports = extract_local_imports(root, &file, source);
+        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
         assert_eq!(imports, vec![sub.join("utils.py")]);
     }
 
@@ -911,8 +912,9 @@ def my_func():
         fs::create_dir_all(&sub).expect("mkdir");
         fs::write(root.join("pkg").join("utils.py"), "").expect("write");
         let source = "from ..utils import helper\n";
+        let parsed = parse_module(source).expect("parse");
         let file = sub.join("test_foo.py");
-        let imports = extract_local_imports(root, &file, source);
+        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
         assert_eq!(imports, vec![root.join("pkg").join("utils.py")]);
     }
 
@@ -924,8 +926,9 @@ def my_func():
         fs::create_dir_all(&sub).expect("mkdir");
         fs::write(sub.join("helpers.py"), "").expect("write");
         let source = "from . import helpers\n";
+        let parsed = parse_module(source).expect("parse");
         let file = sub.join("test_foo.py");
-        let imports = extract_local_imports(root, &file, source);
+        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
         assert_eq!(imports, vec![sub.join("helpers.py")]);
     }
 
@@ -937,8 +940,9 @@ def my_func():
         fs::create_dir_all(&sub).expect("mkdir");
         fs::write(sub.join("__init__.py"), "").expect("write");
         let source = "import mypkg\n";
+        let parsed = parse_module(source).expect("parse");
         let file = root.join("test_foo.py");
-        let imports = extract_local_imports(root, &file, source);
+        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
         assert_eq!(imports, vec![sub.join("__init__.py")]);
     }
 
@@ -948,8 +952,9 @@ def my_func():
         let root = dir.path();
         fs::write(root.join("utils.py"), "").expect("write");
         let source = "import utils\nimport utils\n";
+        let parsed = parse_module(source).expect("parse");
         let file = root.join("test_foo.py");
-        let imports = extract_local_imports(root, &file, source);
+        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
         assert_eq!(imports.len(), 1);
     }
 }

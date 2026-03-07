@@ -343,9 +343,7 @@ mod tests {
 
     use super::*;
 
-    fn group_tests_by_file(
-        tests: Vec<TestItem>,
-    ) -> Vec<(Option<PathBuf>, Vec<TestItem>)> {
+    fn group_tests_by_file(tests: Vec<TestItem>) -> Vec<(Option<PathBuf>, Vec<TestItem>)> {
         let mut index: std::collections::HashMap<Option<PathBuf>, usize> =
             std::collections::HashMap::new();
         let mut groups: Vec<(Option<PathBuf>, Vec<TestItem>)> = Vec::new();

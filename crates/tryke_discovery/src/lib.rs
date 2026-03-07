@@ -4,6 +4,7 @@ use std::{
 };
 
 use log::debug;
+use rayon::prelude::*;
 
 pub(crate) mod db;
 mod discoverer;
@@ -430,8 +431,8 @@ pub fn discover_from(start: &Path) -> Vec<TestItem> {
     let mut files = collect_python_files(&root);
     files.sort();
     files
-        .iter()
-        .flat_map(|f| parse_tests_from_file(&root, f))
+        .par_iter()
+        .flat_map_iter(|f| parse_tests_from_file(&root, f))
         .collect()
 }
 

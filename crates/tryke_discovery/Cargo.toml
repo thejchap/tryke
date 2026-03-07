@@ -12,6 +12,7 @@ license.workspace = true
 [dependencies]
 ignore = { workspace = true }
 log = "0.4"
+rayon = { workspace = true }
 salsa = { workspace = true }
 ruff_python_ast = { workspace = true }
 ruff_python_parser = { workspace = true }

@@ -80,21 +80,7 @@ impl WorkerPool {
     }
 }
 
-// converts a file path to a python module name relative to root
-// e.g. /project/tests/test_math.py -> tests.test_math
-#[must_use]
-pub fn path_to_module(root: &Path, path: &Path) -> Option<String> {
-    let relative = path.strip_prefix(root).ok()?;
-    let without_ext = relative.with_extension("");
-    let parts: Vec<String> = without_ext
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect();
-    if parts.is_empty() {
-        return None;
-    }
-    Some(parts.join("."))
-}
+pub use tryke_types::path_to_module;
 
 async fn worker_task(
     python_bin: String,
@@ -127,7 +113,18 @@ async fn worker_task(
                     }
                 }
                 let Some(w) = worker.as_mut() else {
-                    unreachable!("worker is always Some after the spawn block above");
+                    // Cannot happen: the None branch above either assigns
+                    // Some or continues the loop.  Handle gracefully anyway.
+                    let _ = result_tx.send(TestResult {
+                        test,
+                        outcome: TestOutcome::Error {
+                            message: "no worker available".into(),
+                        },
+                        duration: Duration::ZERO,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    });
+                    continue;
                 };
                 match w.run_test(&test).await {
                     Ok(result) => {
@@ -177,43 +174,5 @@ async fn worker_task(
 
     if let Some(mut w) = worker {
         w.shutdown().await;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use super::*;
-
-    #[test]
-    fn path_to_module_basic() {
-        let root = PathBuf::from("/project");
-        let path = PathBuf::from("/project/tests/test_math.py");
-        assert_eq!(
-            path_to_module(&root, &path),
-            Some("tests.test_math".to_string())
-        );
-    }
-
-    #[test]
-    fn path_to_module_top_level() {
-        let root = PathBuf::from("/project");
-        let path = PathBuf::from("/project/test_foo.py");
-        assert_eq!(path_to_module(&root, &path), Some("test_foo".to_string()));
-    }
-
-    #[test]
-    fn path_to_module_not_under_root() {
-        let root = PathBuf::from("/project");
-        let path = PathBuf::from("/other/test_foo.py");
-        assert_eq!(path_to_module(&root, &path), None);
-    }
-
-    #[test]
-    fn path_to_module_root_itself() {
-        let root = PathBuf::from("/project");
-        let path = PathBuf::from("/project");
-        assert_eq!(path_to_module(&root, &path), None);
     }
 }

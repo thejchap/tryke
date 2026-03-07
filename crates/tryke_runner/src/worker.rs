@@ -143,7 +143,8 @@ fn build_pythonpath(extra: &[&Path]) -> String {
     if !existing.is_empty() {
         parts.push(existing);
     }
-    parts.join(":")
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    parts.join(sep)
 }
 
 fn convert_assertion(wire: AssertionWire) -> Assertion {
@@ -268,6 +269,14 @@ mod tests {
             result.outcome,
             TestOutcome::Skipped { reason: Some(ref r) } if r == "not ready"
         ));
+    }
+
+    #[test]
+    fn build_pythonpath_joins_paths() {
+        let paths = vec![Path::new("/a"), Path::new("/b")];
+        let result = build_pythonpath(&paths);
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        assert_eq!(result, format!("/a{sep}/b"));
     }
 
     #[test]

@@ -1,7 +1,25 @@
 pub mod filter;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// Convert a file path to a Python module name relative to `root`.
+/// e.g. `/project/tests/test_math.py` → `"tests.test_math"`
+///
+/// Returns `None` if `path` is not under `root` or has no components.
+#[must_use]
+pub fn path_to_module(root: &Path, path: &Path) -> Option<String> {
+    let relative = path.strip_prefix(root).ok()?;
+    let without_ext = relative.with_extension("");
+    let parts: Vec<String> = without_ext
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join("."))
+}
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExpectedAssertion {
@@ -99,4 +117,40 @@ pub struct DiscoveryError {
     pub file_path: PathBuf,
     pub message: String,
     pub line_number: Option<u32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_to_module_basic() {
+        let root = PathBuf::from("/project");
+        let path = PathBuf::from("/project/tests/test_math.py");
+        assert_eq!(
+            path_to_module(&root, &path),
+            Some("tests.test_math".to_string())
+        );
+    }
+
+    #[test]
+    fn path_to_module_top_level() {
+        let root = PathBuf::from("/project");
+        let path = PathBuf::from("/project/test_foo.py");
+        assert_eq!(path_to_module(&root, &path), Some("test_foo".to_string()));
+    }
+
+    #[test]
+    fn path_to_module_not_under_root() {
+        let root = PathBuf::from("/project");
+        let path = PathBuf::from("/other/test_foo.py");
+        assert_eq!(path_to_module(&root, &path), None);
+    }
+
+    #[test]
+    fn path_to_module_root_itself() {
+        let root = PathBuf::from("/project");
+        let path = PathBuf::from("/project");
+        assert_eq!(path_to_module(&root, &path), None);
+    }
 }

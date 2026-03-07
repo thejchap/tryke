@@ -88,14 +88,15 @@ fn worker_pool_size() -> usize {
 fn group_tests_by_file(
     tests: Vec<tryke_types::TestItem>,
 ) -> Vec<(Option<PathBuf>, Vec<tryke_types::TestItem>)> {
+    let mut index: std::collections::HashMap<Option<PathBuf>, usize> =
+        std::collections::HashMap::new();
     let mut groups: Vec<(Option<PathBuf>, Vec<tryke_types::TestItem>)> = Vec::new();
     for test in tests {
         let key = test.file_path.clone();
-        if let Some(group) = groups.last_mut()
-            && group.0 == key
-        {
-            group.1.push(test);
+        if let Some(&idx) = index.get(&key) {
+            groups[idx].1.push(test);
         } else {
+            index.insert(key.clone(), groups.len());
             groups.push((key, vec![test]));
         }
     }
@@ -131,37 +132,9 @@ async fn run_tests(
     root: &Path,
     tests: Vec<tryke_types::TestItem>,
 ) -> Result<()> {
-    let start = Instant::now();
-    reporter.on_run_start(&tests);
-
     let python = resolve_python(root);
     let pool = WorkerPool::new(worker_pool_size(), &python, root);
-    let mut passed = 0usize;
-    let mut failed = 0usize;
-    let mut skipped = 0usize;
-    let mut errors = 0usize;
-
-    for (_file, file_tests) in group_tests_by_file(tests) {
-        let mut stream = pool.run(file_tests);
-        while let Some(result) = stream.next().await {
-            match &result.outcome {
-                TestOutcome::Passed => passed += 1,
-                TestOutcome::Failed { .. } => failed += 1,
-                TestOutcome::Skipped { .. } => skipped += 1,
-                TestOutcome::Error { .. } => errors += 1,
-            }
-            reporter.on_test_complete(&result);
-        }
-    }
-
-    reporter.on_run_complete(&RunSummary {
-        passed,
-        failed,
-        skipped,
-        errors,
-        duration: start.elapsed(),
-    });
-
+    report_cycle(reporter, tests, &pool).await?;
     pool.shutdown();
     Ok(())
 }
@@ -203,14 +176,6 @@ async fn report_cycle(
     Ok(())
 }
 
-async fn run_cycle(
-    reporter: &mut dyn Reporter,
-    discoverer: &mut Discoverer,
-    pool: &WorkerPool,
-) -> Result<()> {
-    report_cycle(reporter, discoverer.rediscover(), pool).await
-}
-
 fn clear_if_tty() {
     use std::io::IsTerminal;
     if std::io::stdout().is_terminal() {
@@ -218,8 +183,12 @@ fn clear_if_tty() {
     }
 }
 
-async fn run_watch(reporter: &mut dyn Reporter, root: Option<&Path>) -> Result<()> {
-    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+async fn run_watch(
+    reporter: &mut dyn Reporter,
+    root: Option<&Path>,
+    test_filter: &TestFilter,
+) -> Result<()> {
+    let cwd = env::current_dir()?;
     let root = root.unwrap_or(&cwd);
     let mut discoverer = Discoverer::new(root);
 
@@ -227,7 +196,8 @@ async fn run_watch(reporter: &mut dyn Reporter, root: Option<&Path>) -> Result<(
     let pool = WorkerPool::new(worker_pool_size(), &python, root);
 
     clear_if_tty();
-    run_cycle(reporter, &mut discoverer, &pool).await?;
+    let tests = test_filter.apply(discoverer.rediscover());
+    report_cycle(reporter, tests, &pool).await?;
 
     let (tx, rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
     let _debouncer = tryke_server::watcher::spawn_watcher(root, tx)?;
@@ -239,7 +209,7 @@ async fn run_watch(reporter: &mut dyn Reporter, root: Option<&Path>) -> Result<(
         }
         discoverer.rediscover_changed(&paths);
         clear_if_tty();
-        let tests = discoverer.tests_for_changed(&paths);
+        let tests = test_filter.apply(discoverer.tests_for_changed(&paths));
         report_cycle(reporter, tests, &pool).await?;
     }
 
@@ -268,7 +238,7 @@ fn git_changed_files(root: &Path) -> Option<Vec<PathBuf>> {
 }
 
 fn run_graph(root: Option<&Path>, connected_only: bool) -> Result<()> {
-    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd = env::current_dir()?;
     let root_path = root.unwrap_or(&cwd);
     let mut discoverer = Discoverer::new(root_path);
     discoverer.rediscover();
@@ -342,13 +312,11 @@ fn main() -> Result<()> {
         } => {
             let mut rep = build_reporter(reporter, verbosity);
             if let Some(p) = port {
-                let root_path = root
-                    .clone()
-                    .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+                let root_path = root.clone().unwrap_or(env::current_dir()?);
                 return tryke_server::Client::new(*p).run(&root_path, &mut *rep);
             }
 
-            let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let cwd = env::current_dir()?;
             let root_path = root.as_deref().unwrap_or(&cwd);
             let test_filter =
                 TestFilter::from_args(paths, filter.as_deref()).map_err(|e| anyhow::anyhow!(e))?;
@@ -364,17 +332,17 @@ fn main() -> Result<()> {
             }
         }
         Commands::Watch {
-            filter: _filter,
+            filter,
             reporter,
             root,
         } => {
             let mut rep = build_reporter(reporter, verbosity);
-            rt.block_on(run_watch(&mut *rep, root.as_deref()))
+            let test_filter =
+                TestFilter::from_args(&[], filter.as_deref()).map_err(|e| anyhow::anyhow!(e))?;
+            rt.block_on(run_watch(&mut *rep, root.as_deref(), &test_filter))
         }
         Commands::Server { port, root } => {
-            let root_path = root
-                .clone()
-                .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            let root_path = root.clone().unwrap_or(env::current_dir()?);
             let server = tryke_server::Server::new(*port, root_path);
             rt.block_on(server.run())
         }
@@ -397,6 +365,14 @@ mod tests {
 
     fn cwd() -> PathBuf {
         env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    }
+
+    async fn run_cycle(
+        reporter: &mut dyn Reporter,
+        discoverer: &mut Discoverer,
+        pool: &WorkerPool,
+    ) -> Result<()> {
+        report_cycle(reporter, discoverer.rediscover(), pool).await
     }
 
     #[tokio::test]
@@ -452,7 +428,7 @@ mod tests {
     #[test]
     fn test_collect_only_text() {
         let mut reporter = TextReporter::with_writer(Vec::new());
-        let tests = tryke_discovery::discover();
+        let tests = tryke_discovery::discover().expect("current_dir");
         reporter.on_collect_complete(&tests);
         let out = String::from_utf8_lossy(&reporter.into_writer()).into_owned();
         for test in &tests {
@@ -464,7 +440,7 @@ mod tests {
     #[test]
     fn test_collect_only_json() {
         let mut reporter = JSONReporter::with_writer(Vec::new());
-        let tests = tryke_discovery::discover();
+        let tests = tryke_discovery::discover().expect("current_dir");
         reporter.on_collect_complete(&tests);
         let buf = reporter.into_writer();
         let out = String::from_utf8_lossy(&buf);
@@ -547,6 +523,44 @@ mod tests {
             expected_assertions: vec![],
         };
         assert_eq!(item.id(), "tests.math::test_add");
+    }
+
+    #[test]
+    fn group_tests_by_file_handles_unsorted_input() {
+        let tests = vec![
+            TestItem {
+                name: "test_a".into(),
+                module_path: "m".into(),
+                file_path: Some(PathBuf::from("a.py")),
+                line_number: None,
+                display_name: None,
+                expected_assertions: vec![],
+            },
+            TestItem {
+                name: "test_b".into(),
+                module_path: "m".into(),
+                file_path: Some(PathBuf::from("b.py")),
+                line_number: None,
+                display_name: None,
+                expected_assertions: vec![],
+            },
+            TestItem {
+                name: "test_a2".into(),
+                module_path: "m".into(),
+                file_path: Some(PathBuf::from("a.py")),
+                line_number: None,
+                display_name: None,
+                expected_assertions: vec![],
+            },
+        ];
+        let groups = group_tests_by_file(tests);
+        assert_eq!(
+            groups.len(),
+            2,
+            "a.py tests should be merged into one group"
+        );
+        assert_eq!(groups[0].1.len(), 2);
+        assert_eq!(groups[1].1.len(), 1);
     }
 
     #[test]

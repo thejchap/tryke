@@ -19,7 +19,6 @@ pub struct DiscoverParams {
 
 #[derive(Debug, Deserialize)]
 pub struct RunParams {
-    pub root: PathBuf,
     pub tests: Option<Vec<String>>,
 }
 
@@ -99,7 +98,6 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":3,"method":"run","params":{"root":"/tmp","tests":null}}"#;
         let req: Request = serde_json::from_str(json).unwrap();
         let params: RunParams = serde_json::from_value(req.params.unwrap()).unwrap();
-        assert_eq!(params.root, PathBuf::from("/tmp"));
         assert!(params.tests.is_none());
     }
 

@@ -1,11 +1,11 @@
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::{path::PathBuf, sync::Arc};
 
 use bytes::Bytes;
 use log::debug;
-use tokio::{net::TcpListener, sync::broadcast};
+use tokio::{
+    net::TcpListener,
+    sync::{Mutex, broadcast},
+};
 use tryke_discovery::Discoverer;
 use tryke_runner::{WorkerPool, resolve_python};
 
@@ -28,12 +28,11 @@ impl Server {
 
     #[expect(clippy::missing_errors_doc)]
     pub async fn run(self) -> anyhow::Result<()> {
-        let listener = TcpListener::bind(("0.0.0.0", self.port)).await?;
+        let listener = TcpListener::bind(("127.0.0.1", self.port)).await?;
         self.run_on_listener(listener).await
     }
 
     #[expect(clippy::missing_errors_doc)]
-    #[expect(clippy::missing_panics_doc)]
     pub async fn run_on_listener(self, listener: TcpListener) -> anyhow::Result<()> {
         let size = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
         let python = resolve_python(&self.root);
@@ -41,7 +40,7 @@ impl Server {
 
         let (bcast_tx, _) = broadcast::channel::<Bytes>(256);
         let disc = Arc::new(Mutex::new(Discoverer::new(&self.root)));
-        disc.lock().unwrap().rediscover();
+        disc.lock().await.rediscover();
 
         let (std_tx, std_rx) = std::sync::mpsc::channel::<Vec<std::path::PathBuf>>();
         let _debouncer = spawn_watcher(&self.root, std_tx)?;
@@ -59,12 +58,16 @@ impl Server {
         let pool_for_watcher = Arc::clone(&pool);
         tokio::spawn(async move {
             while let Some(paths) = watcher_rx.recv().await {
-                let modules = disc_for_watcher.lock().unwrap().affected_modules(&paths);
+                let (modules, tests) = {
+                    let mut disc = disc_for_watcher.lock().await;
+                    let modules = disc.affected_modules(&paths);
+                    disc.rediscover_changed(&paths);
+                    let tests = disc.tests_for_changed(&paths);
+                    (modules, tests)
+                };
                 if !modules.is_empty() {
                     pool_for_watcher.reload(modules).await;
                 }
-                disc_for_watcher.lock().unwrap().rediscover_changed(&paths);
-                let tests = disc_for_watcher.lock().unwrap().tests_for_changed(&paths);
                 debug!("file change: {} affected tests", tests.len());
                 let notif = Notification {
                     jsonrpc: "2.0".to_string(),

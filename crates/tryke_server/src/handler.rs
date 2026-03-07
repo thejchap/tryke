@@ -18,7 +18,7 @@ use crate::protocol::{
 
 pub struct ConnectionHandler {
     stream: TcpStream,
-    disc: Arc<std::sync::Mutex<tryke_discovery::Discoverer>>,
+    disc: Arc<tokio::sync::Mutex<tryke_discovery::Discoverer>>,
     broadcast_rx: broadcast::Receiver<Bytes>,
     broadcast_tx: broadcast::Sender<Bytes>,
     pool: Arc<WorkerPool>,
@@ -27,7 +27,7 @@ pub struct ConnectionHandler {
 impl ConnectionHandler {
     pub fn new(
         stream: TcpStream,
-        disc: Arc<std::sync::Mutex<tryke_discovery::Discoverer>>,
+        disc: Arc<tokio::sync::Mutex<tryke_discovery::Discoverer>>,
         broadcast_rx: broadcast::Receiver<Bytes>,
         broadcast_tx: broadcast::Sender<Bytes>,
         pool: Arc<WorkerPool>,
@@ -126,10 +126,9 @@ fn serialize_error(id: Option<Value>, code: i32, message: String) -> Option<Vec<
     })
 }
 
-#[expect(clippy::missing_panics_doc)]
 pub async fn handle_request(
     line: &str,
-    disc: &std::sync::Mutex<tryke_discovery::Discoverer>,
+    disc: &tokio::sync::Mutex<tryke_discovery::Discoverer>,
     bcast_tx: &broadcast::Sender<Bytes>,
     pool: &WorkerPool,
 ) -> Option<Vec<u8>> {
@@ -140,7 +139,7 @@ pub async fn handle_request(
         "ping" => serialize_response(id, "pong"),
         "discover" => {
             let _params: DiscoverParams = serde_json::from_value(req.params?).ok()?;
-            let tests = disc.lock().unwrap().rediscover();
+            let tests = disc.lock().await.rediscover();
             broadcast_notification(
                 bcast_tx,
                 "discover_complete",
@@ -156,7 +155,7 @@ pub async fn handle_request(
                 .and_then(|p| serde_json::from_value::<RunParams>(p).ok())
                 .and_then(|p| p.tests);
 
-            let all_tests = disc.lock().unwrap().tests();
+            let all_tests = disc.lock().await.tests();
             let tests = match &filter {
                 Some(ids) => all_tests
                     .into_iter()
@@ -223,16 +222,13 @@ pub async fn handle_request(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        sync::{Arc, Mutex},
-    };
+    use std::{fs, sync::Arc};
 
     use bytes::Bytes;
     use tokio::{
         io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
         net::{TcpListener, TcpStream},
-        sync::broadcast,
+        sync::{Mutex, broadcast},
     };
     use tryke_discovery::Discoverer;
     use tryke_runner::WorkerPool;

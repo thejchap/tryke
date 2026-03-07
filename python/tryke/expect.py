@@ -87,6 +87,8 @@ class Expectation[T]:
         )
 
 
+# `name` is unused at runtime — it exists as an AST-level metadata carrier
+# so the Rust-side discovery can extract assertion labels from source code.
 def expect[T](expr: T, name: str | None = None) -> Expectation[T]:  # noqa: ARG001
     return Expectation(expr)
 

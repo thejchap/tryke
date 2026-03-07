@@ -35,13 +35,7 @@ pub(crate) fn collect_python_files(root: &Path) -> Vec<PathBuf> {
 }
 
 pub(crate) fn path_to_module(root: &Path, file: &Path) -> String {
-    file.strip_prefix(root)
-        .unwrap_or(file)
-        .with_extension("")
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join(".")
+    tryke_types::path_to_module(root, file).unwrap_or_default()
 }
 
 /// Resolve `module_name` (e.g. "foo.bar") as a local file under `root`.
@@ -444,10 +438,11 @@ pub fn discover_from(start: &Path) -> Vec<TestItem> {
         .collect()
 }
 
-#[must_use]
-pub fn discover() -> Vec<TestItem> {
-    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    discover_from(&cwd)
+/// # Errors
+/// Returns an error if the current directory cannot be determined.
+pub fn discover() -> std::io::Result<Vec<TestItem>> {
+    let cwd = env::current_dir()?;
+    Ok(discover_from(&cwd))
 }
 
 #[cfg(test)]

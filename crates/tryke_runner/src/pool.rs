@@ -27,9 +27,14 @@ pub struct WorkerPool {
 impl WorkerPool {
     #[must_use]
     pub fn new(size: usize, python_bin: &str, root: &Path) -> Self {
+        Self::with_python_path(size, python_bin, &[root.to_path_buf()])
+    }
+
+    #[must_use]
+    pub fn with_python_path(size: usize, python_bin: &str, python_path: &[PathBuf]) -> Self {
         let size = size.max(1);
         let mut worker_txs = Vec::with_capacity(size);
-        let python_path = vec![root.to_owned()];
+        let python_path = python_path.to_vec();
         for _ in 0..size {
             let (tx, rx) = mpsc::unbounded_channel();
             let bin = python_bin.to_owned();

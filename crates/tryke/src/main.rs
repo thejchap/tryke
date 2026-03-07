@@ -508,7 +508,8 @@ mod tests {
         reporter.on_collect_complete(&tests);
         let out = String::from_utf8_lossy(&reporter.into_writer()).into_owned();
         for test in &tests {
-            assert!(out.contains(&test.id()), "missing {} in output", test.id());
+            let display = test.display_name.as_deref().unwrap_or(&test.name);
+            assert!(out.contains(display), "missing {display} in output");
         }
         assert!(out.contains("tests collected."));
     }
@@ -855,5 +856,61 @@ mod tests {
                 ..
             } if f == "test_add"
         ));
+    }
+
+    #[tokio::test]
+    async fn integration_python_worker_runs_tests() {
+        let python_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../python")
+            .canonicalize()
+            .expect("python/ dir must exist");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        std::fs::write(
+            dir.path().join("test_example.py"),
+            "\
+from tryke import test, expect
+
+@test
+def test_passing():
+    expect(1 + 1).to_equal(2)
+
+@test
+def test_failing():
+    expect(1 + 1).to_equal(3)
+",
+        )
+        .expect("write test file");
+
+        let tests = discover_tests(dir.path(), false);
+        assert_eq!(tests.len(), 2);
+
+        let pool =
+            WorkerPool::with_python_path(1, "python3", &[dir.path().to_path_buf(), python_dir]);
+        pool.warm().await;
+        let mut results: Vec<_> = pool.run(tests).collect().await;
+        results.sort_by(|a, b| a.test.name.cmp(&b.test.name));
+
+        assert_eq!(results.len(), 2);
+        assert!(
+            matches!(results[0].outcome, TestOutcome::Failed { .. }),
+            "test_failing should fail, got {:?}",
+            results[0].outcome
+        );
+        assert!(
+            matches!(results[1].outcome, TestOutcome::Passed),
+            "test_passing should pass, got {:?}",
+            results[1].outcome
+        );
+        for r in &results {
+            assert!(
+                !matches!(r.outcome, TestOutcome::Error { .. }),
+                "unexpected worker error: {:?}",
+                r.outcome
+            );
+        }
+
+        pool.shutdown();
     }
 }

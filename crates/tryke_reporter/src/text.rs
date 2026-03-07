@@ -105,6 +105,7 @@ fn format_duration(d: Duration) -> String {
 
 impl<W: io::Write> Reporter for TextReporter<W> {
     fn on_run_start(&mut self, _tests: &[TestItem]) {
+        self.current_file = None;
         let _ = writeln!(
             self.writer,
             "{} {}",
@@ -117,16 +118,17 @@ impl<W: io::Write> Reporter for TextReporter<W> {
     fn on_test_complete(&mut self, result: &TestResult) {
         let file = result.test.file_path.as_ref();
         if file != self.current_file.as_ref() {
-            if self.current_file.is_some() && !matches!(self.verbosity, Verbosity::Quiet) {
-                let _ = writeln!(self.writer);
-            }
-            if let Some(path) = file
-                && !matches!(self.verbosity, Verbosity::Quiet)
-            {
-                let _ = writeln!(self.writer, "{}:", path.display());
+            if !matches!(self.verbosity, Verbosity::Quiet) {
+                if self.current_file.is_some() {
+                    let _ = writeln!(self.writer);
+                }
+                if let Some(path) = file {
+                    let _ = writeln!(self.writer, "{}:", path.display());
+                }
             }
             self.current_file = file.cloned();
         }
+
         let display = result
             .test
             .display_name

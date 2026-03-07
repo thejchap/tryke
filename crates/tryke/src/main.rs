@@ -73,6 +73,23 @@ fn worker_pool_size() -> usize {
     std::thread::available_parallelism().map_or(4, std::num::NonZero::get)
 }
 
+fn group_tests_by_file(
+    tests: Vec<tryke_types::TestItem>,
+) -> Vec<(Option<PathBuf>, Vec<tryke_types::TestItem>)> {
+    let mut groups: Vec<(Option<PathBuf>, Vec<tryke_types::TestItem>)> = Vec::new();
+    for test in tests {
+        let key = test.file_path.clone();
+        if let Some(group) = groups.last_mut()
+            && group.0 == key
+        {
+            group.1.push(test);
+        } else {
+            groups.push((key, vec![test]));
+        }
+    }
+    groups
+}
+
 async fn run_test(reporter: &mut dyn Reporter, root: Option<&Path>) -> Result<()> {
     let start = Instant::now();
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -82,18 +99,20 @@ async fn run_test(reporter: &mut dyn Reporter, root: Option<&Path>) -> Result<()
 
     let python = resolve_python(root_path);
     let pool = WorkerPool::new(worker_pool_size(), &python, root_path);
-    let mut stream = pool.run(tests);
     let mut passed = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;
 
-    while let Some(result) = stream.next().await {
-        match &result.outcome {
-            TestOutcome::Passed => passed += 1,
-            TestOutcome::Failed { .. } => failed += 1,
-            TestOutcome::Skipped { .. } => skipped += 1,
+    for (_file, file_tests) in group_tests_by_file(tests) {
+        let mut stream = pool.run(file_tests);
+        while let Some(result) = stream.next().await {
+            match &result.outcome {
+                TestOutcome::Passed => passed += 1,
+                TestOutcome::Failed { .. } => failed += 1,
+                TestOutcome::Skipped { .. } => skipped += 1,
+            }
+            reporter.on_test_complete(&result);
         }
-        reporter.on_test_complete(&result);
     }
 
     reporter.on_run_complete(&RunSummary {
@@ -124,18 +143,20 @@ async fn report_cycle(
     let start = Instant::now();
     reporter.on_run_start(&tests);
 
-    let mut stream = pool.run(tests);
     let mut passed = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;
 
-    while let Some(result) = stream.next().await {
-        match &result.outcome {
-            TestOutcome::Passed => passed += 1,
-            TestOutcome::Failed { .. } => failed += 1,
-            TestOutcome::Skipped { .. } => skipped += 1,
+    for (_file, file_tests) in group_tests_by_file(tests) {
+        let mut stream = pool.run(file_tests);
+        while let Some(result) = stream.next().await {
+            match &result.outcome {
+                TestOutcome::Passed => passed += 1,
+                TestOutcome::Failed { .. } => failed += 1,
+                TestOutcome::Skipped { .. } => skipped += 1,
+            }
+            reporter.on_test_complete(&result);
         }
-        reporter.on_test_complete(&result);
     }
 
     reporter.on_run_complete(&RunSummary {
@@ -237,17 +258,19 @@ async fn run_changed_test(reporter: &mut dyn Reporter, root: Option<&Path>) -> R
     reporter.on_run_start(&tests);
     let python = resolve_python(root_path);
     let pool = WorkerPool::new(worker_pool_size(), &python, root_path);
-    let mut stream = pool.run(tests);
     let mut passed = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;
-    while let Some(result) = stream.next().await {
-        match &result.outcome {
-            TestOutcome::Passed => passed += 1,
-            TestOutcome::Failed { .. } => failed += 1,
-            TestOutcome::Skipped { .. } => skipped += 1,
+    for (_file, file_tests) in group_tests_by_file(tests) {
+        let mut stream = pool.run(file_tests);
+        while let Some(result) = stream.next().await {
+            match &result.outcome {
+                TestOutcome::Passed => passed += 1,
+                TestOutcome::Failed { .. } => failed += 1,
+                TestOutcome::Skipped { .. } => skipped += 1,
+            }
+            reporter.on_test_complete(&result);
         }
-        reporter.on_test_complete(&result);
     }
     reporter.on_run_complete(&RunSummary {
         passed,

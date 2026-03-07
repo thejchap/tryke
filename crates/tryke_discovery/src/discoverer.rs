@@ -23,6 +23,7 @@ impl Discoverer {
     #[must_use]
     pub fn new(start: &Path) -> Self {
         let root = crate::find_project_root(start).unwrap_or_else(|| start.to_path_buf());
+        let root = root.canonicalize().unwrap_or(root);
         Self {
             db: Database::default(),
             inputs: HashMap::new(),
@@ -82,11 +83,12 @@ impl Discoverer {
     }
 
     pub fn rediscover_changed(&mut self, changed: &[PathBuf]) -> Vec<TestItem> {
+        let changed = Self::canonicalize_paths(changed);
         debug!(
             "rediscover_changed: processing {} changed paths",
             changed.len()
         );
-        for path in changed {
+        for path in &changed {
             if path.extension().is_some_and(|ext| ext == "py") {
                 if path.exists() {
                     let text = std::fs::read_to_string(path).unwrap_or_default();
@@ -124,10 +126,28 @@ impl Discoverer {
         tests
     }
 
+    fn canonicalize_path(p: &Path) -> PathBuf {
+        if let Ok(c) = p.canonicalize() {
+            return c;
+        }
+        // file may be deleted; canonicalize parent + filename
+        if let (Some(parent), Some(name)) = (p.parent(), p.file_name())
+            && let Ok(cp) = parent.canonicalize()
+        {
+            return cp.join(name);
+        }
+        p.to_path_buf()
+    }
+
+    fn canonicalize_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+        paths.iter().map(|p| Self::canonicalize_path(p)).collect()
+    }
+
     /// Returns module names for all files transitively affected by the given changed paths.
     /// Used to reload Python modules in the worker pool.
     pub fn affected_modules(&self, changed: &[PathBuf]) -> Vec<String> {
-        let affected = self.import_graph.affected_files(changed);
+        let changed = Self::canonicalize_paths(changed);
+        let affected = self.import_graph.affected_files(&changed);
         let mut modules: Vec<String> = affected
             .iter()
             .map(|p| crate::path_to_module(&self.root, p))
@@ -146,7 +166,8 @@ impl Discoverer {
 
     /// Returns only tests whose source file is transitively affected by the changed paths.
     pub fn tests_for_changed(&self, changed: &[PathBuf]) -> Vec<TestItem> {
-        let affected = self.import_graph.affected_files(changed);
+        let changed = Self::canonicalize_paths(changed);
+        let affected = self.import_graph.affected_files(&changed);
         let tests: Vec<TestItem> = self
             .tests()
             .into_iter()
@@ -413,6 +434,63 @@ mod tests {
             .expect("test_foo.py entry");
         assert!(foo_entry.imports.contains(&PathBuf::from("utils.py")));
         assert!(foo_entry.imported_by.is_empty());
+    }
+
+    #[test]
+    fn tests_for_changed_dotted_absolute_import() {
+        let auth_src = "def login(): pass\n";
+        let test_auth_src =
+            "from src.services.auth import login\n@test\ndef test_login():\n    pass\n";
+        let isolated_src = "@test\ndef test_other():\n    pass\n";
+        let dir = make_project(&[
+            ("src/__init__.py", ""),
+            ("src/services/__init__.py", ""),
+            ("src/services/auth.py", auth_src),
+            ("tests/test_auth.py", test_auth_src),
+            ("tests/test_other.py", isolated_src),
+        ]);
+        let mut discoverer = Discoverer::new(dir.path());
+        discoverer.rediscover();
+
+        let changed = vec![dir.path().join("src/services/auth.py")];
+        let tests = discoverer.tests_for_changed(&changed);
+        let names: Vec<&str> = tests.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            names.contains(&"test_login"),
+            "test_login should be affected by change to src/services/auth.py, got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"test_other"),
+            "test_other should not be affected"
+        );
+    }
+
+    #[test]
+    fn tests_for_changed_canonical_vs_noncanonical_paths() {
+        let auth_src = "def login(): pass\n";
+        let test_auth_src =
+            "from src.services.auth import login\n@test\ndef test_login():\n    pass\n";
+        let dir = make_project(&[
+            ("src/__init__.py", ""),
+            ("src/services/__init__.py", ""),
+            ("src/services/auth.py", auth_src),
+            ("tests/test_auth.py", test_auth_src),
+        ]);
+        let mut discoverer = Discoverer::new(dir.path());
+        discoverer.rediscover();
+
+        // simulate canonical path (e.g. macOS /private/var vs /var, or watcher paths)
+        let canonical = dir
+            .path()
+            .join("src/services/auth.py")
+            .canonicalize()
+            .expect("canonicalize");
+        let tests = discoverer.tests_for_changed(&[canonical]);
+        let names: Vec<&str> = tests.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            names.contains(&"test_login"),
+            "should find test_login even with canonical changed path, got: {names:?}"
+        );
     }
 
     #[test]

@@ -1,3 +1,5 @@
+pub mod filter;
+
 use std::path::PathBuf;
 use std::time::Duration;
 

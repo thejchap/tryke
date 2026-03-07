@@ -12,6 +12,7 @@ use tokio_stream::StreamExt;
 use tryke_discovery::Discoverer;
 use tryke_reporter::{DotReporter, JSONReporter, JUnitReporter, Reporter, TextReporter, Verbosity};
 use tryke_runner::{WorkerPool, resolve_python};
+use tryke_types::filter::TestFilter;
 use tryke_types::{RunSummary, TestOutcome};
 
 #[derive(Debug, Parser)]
@@ -35,8 +36,13 @@ enum ReporterFormat {
 #[derive(Debug, Subcommand)]
 enum Commands {
     Test {
+        /// File paths or file:line specs to restrict collection
+        paths: Vec<String>,
         #[arg(long)]
         collect_only: bool,
+        /// Filter expression (e.g. "math and not slow")
+        #[arg(short = 'k', long = "filter")]
+        filter: Option<String>,
         #[arg(long = "reporter", default_value = "text")]
         reporter: ReporterFormat,
         #[arg(long)]
@@ -48,6 +54,9 @@ enum Commands {
         changed: bool,
     },
     Watch {
+        /// Filter expression (e.g. "math and not slow")
+        #[arg(short = 'k', long = "filter")]
+        filter: Option<String>,
         #[arg(long = "reporter", default_value = "text")]
         reporter: ReporterFormat,
         #[arg(long)]
@@ -90,15 +99,40 @@ fn group_tests_by_file(
     groups
 }
 
-async fn run_test(reporter: &mut dyn Reporter, root: Option<&Path>) -> Result<()> {
+/// Discover tests, optionally restricting to changed files.
+fn discover_tests(root: &Path, changed: bool) -> Vec<tryke_types::TestItem> {
+    if changed {
+        let mut discoverer = Discoverer::new(root);
+        discoverer.rediscover();
+        match git_changed_files(root) {
+            Some(changed_files) if !changed_files.is_empty() => {
+                debug!("--changed: {} git-changed files", changed_files.len());
+                discoverer.tests_for_changed(&changed_files)
+            }
+            Some(_) => {
+                warn!("--changed: no changed files found via git, running all tests");
+                discoverer.tests()
+            }
+            None => {
+                warn!("--changed: git unavailable or failed, running all tests");
+                discoverer.tests()
+            }
+        }
+    } else {
+        tryke_discovery::discover_from(root)
+    }
+}
+
+async fn run_tests(
+    reporter: &mut dyn Reporter,
+    root: &Path,
+    tests: Vec<tryke_types::TestItem>,
+) -> Result<()> {
     let start = Instant::now();
-    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let root_path = root.unwrap_or(&cwd);
-    let tests = tryke_discovery::discover_from(root_path);
     reporter.on_run_start(&tests);
 
-    let python = resolve_python(root_path);
-    let pool = WorkerPool::new(worker_pool_size(), &python, root_path);
+    let python = resolve_python(root);
+    let pool = WorkerPool::new(worker_pool_size(), &python, root);
     let mut passed = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;
@@ -123,15 +157,6 @@ async fn run_test(reporter: &mut dyn Reporter, root: Option<&Path>) -> Result<()
     });
 
     pool.shutdown();
-    Ok(())
-}
-
-fn run_collect_only(reporter: &mut dyn Reporter, root: Option<&Path>) -> Result<()> {
-    let tests = match root {
-        Some(r) => tryke_discovery::discover_from(r),
-        None => tryke_discovery::discover(),
-    };
-    reporter.on_collect_complete(&tests);
     Ok(())
 }
 
@@ -233,55 +258,6 @@ fn git_changed_files(root: &Path) -> Option<Vec<PathBuf>> {
     Some(paths)
 }
 
-async fn run_changed_test(reporter: &mut dyn Reporter, root: Option<&Path>) -> Result<()> {
-    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let root_path = root.unwrap_or(&cwd);
-    let mut discoverer = Discoverer::new(root_path);
-    discoverer.rediscover();
-
-    let tests = match git_changed_files(root_path) {
-        Some(changed) if !changed.is_empty() => {
-            debug!("--changed: {} git-changed files", changed.len());
-            discoverer.tests_for_changed(&changed)
-        }
-        Some(_) => {
-            warn!("--changed: no changed files found via git, running all tests");
-            discoverer.tests()
-        }
-        None => {
-            warn!("--changed: git unavailable or failed, running all tests");
-            discoverer.tests()
-        }
-    };
-
-    let start = Instant::now();
-    reporter.on_run_start(&tests);
-    let python = resolve_python(root_path);
-    let pool = WorkerPool::new(worker_pool_size(), &python, root_path);
-    let mut passed = 0usize;
-    let mut failed = 0usize;
-    let mut skipped = 0usize;
-    for (_file, file_tests) in group_tests_by_file(tests) {
-        let mut stream = pool.run(file_tests);
-        while let Some(result) = stream.next().await {
-            match &result.outcome {
-                TestOutcome::Passed => passed += 1,
-                TestOutcome::Failed { .. } => failed += 1,
-                TestOutcome::Skipped { .. } => skipped += 1,
-            }
-            reporter.on_test_complete(&result);
-        }
-    }
-    reporter.on_run_complete(&RunSummary {
-        passed,
-        failed,
-        skipped,
-        duration: start.elapsed(),
-    });
-    pool.shutdown();
-    Ok(())
-}
-
 fn run_graph(root: Option<&Path>, connected_only: bool) -> Result<()> {
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let root_path = root.unwrap_or(&cwd);
@@ -346,28 +322,42 @@ fn main() -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     match &cli.command {
         Commands::Test {
+            paths,
             collect_only,
+            filter,
             reporter,
             root,
             port,
             changed,
         } => {
             let mut rep = build_reporter(reporter, verbosity);
-            let root_ref = root.as_deref();
             if let Some(p) = port {
                 let root_path = root
                     .clone()
                     .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-                tryke_server::Client::new(*p).run(&root_path, &mut *rep)
-            } else if *collect_only {
-                run_collect_only(&mut *rep, root_ref)
-            } else if *changed {
-                rt.block_on(run_changed_test(&mut *rep, root_ref))
+                return tryke_server::Client::new(*p).run(&root_path, &mut *rep);
+            }
+
+            let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let root_path = root.as_deref().unwrap_or(&cwd);
+            let test_filter =
+                TestFilter::from_args(paths, filter.as_deref()).map_err(|e| anyhow::anyhow!(e))?;
+
+            let tests = discover_tests(root_path, *changed);
+            let tests = test_filter.apply(tests);
+
+            if *collect_only {
+                rep.on_collect_complete(&tests);
+                Ok(())
             } else {
-                rt.block_on(run_test(&mut *rep, root_ref))
+                rt.block_on(run_tests(&mut *rep, root_path, tests))
             }
         }
-        Commands::Watch { reporter, root } => {
+        Commands::Watch {
+            filter: _filter,
+            reporter,
+            root,
+        } => {
             let mut rep = build_reporter(reporter, verbosity);
             rt.block_on(run_watch(&mut *rep, root.as_deref()))
         }
@@ -395,28 +385,40 @@ mod tests {
 
     use super::*;
 
+    fn cwd() -> PathBuf {
+        env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    }
+
     #[tokio::test]
     async fn test_command_text() {
         let mut reporter = TextReporter::new();
-        assert!(run_test(&mut reporter, None).await.is_ok());
+        let root = cwd();
+        let tests = discover_tests(&root, false);
+        assert!(run_tests(&mut reporter, &root, tests).await.is_ok());
     }
 
     #[tokio::test]
     async fn test_command_json() {
         let mut reporter = JSONReporter::new();
-        assert!(run_test(&mut reporter, None).await.is_ok());
+        let root = cwd();
+        let tests = discover_tests(&root, false);
+        assert!(run_tests(&mut reporter, &root, tests).await.is_ok());
     }
 
     #[tokio::test]
     async fn test_command_dot() {
         let mut reporter = DotReporter::new();
-        assert!(run_test(&mut reporter, None).await.is_ok());
+        let root = cwd();
+        let tests = discover_tests(&root, false);
+        assert!(run_tests(&mut reporter, &root, tests).await.is_ok());
     }
 
     #[tokio::test]
     async fn test_command_junit() {
         let mut reporter = JUnitReporter::new();
-        assert!(run_test(&mut reporter, None).await.is_ok());
+        let root = cwd();
+        let tests = discover_tests(&root, false);
+        assert!(run_tests(&mut reporter, &root, tests).await.is_ok());
     }
 
     #[test]
@@ -440,9 +442,9 @@ mod tests {
     #[test]
     fn test_collect_only_text() {
         let mut reporter = TextReporter::with_writer(Vec::new());
-        assert!(run_collect_only(&mut reporter, None).is_ok());
-        let out = String::from_utf8_lossy(&reporter.into_writer()).into_owned();
         let tests = tryke_discovery::discover();
+        reporter.on_collect_complete(&tests);
+        let out = String::from_utf8_lossy(&reporter.into_writer()).into_owned();
         for test in &tests {
             assert!(out.contains(&test.id()), "missing {} in output", test.id());
         }
@@ -452,7 +454,8 @@ mod tests {
     #[test]
     fn test_collect_only_json() {
         let mut reporter = JSONReporter::with_writer(Vec::new());
-        assert!(run_collect_only(&mut reporter, None).is_ok());
+        let tests = tryke_discovery::discover();
+        reporter.on_collect_complete(&tests);
         let buf = reporter.into_writer();
         let out = String::from_utf8_lossy(&buf);
         let val: serde_json::Value = serde_json::from_str(out.trim()).expect("valid json");
@@ -680,11 +683,68 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
         let mut reporter = TextReporter::new();
-        // non-git directory → git_changed_files returns None → runs all tests (0 tests here)
-        assert!(
-            run_changed_test(&mut reporter, Some(dir.path()))
-                .await
-                .is_ok()
-        );
+        // non-git directory → git_changed_files returns None → discover_tests runs all (0 here)
+        let tests = discover_tests(dir.path(), true);
+        assert!(run_tests(&mut reporter, dir.path(), tests).await.is_ok());
+    }
+
+    #[test]
+    fn test_filter_flag_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "test", "-k", "test_add"]).unwrap();
+        assert!(matches!(
+            &cli.command,
+            Commands::Test {
+                filter: Some(f),
+                ..
+            } if f == "test_add"
+        ));
+    }
+
+    #[test]
+    fn test_filter_long_flag_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "test", "--filter", "math and add"]).unwrap();
+        assert!(matches!(
+            &cli.command,
+            Commands::Test {
+                filter: Some(f),
+                ..
+            } if f == "math and add"
+        ));
+    }
+
+    #[test]
+    fn test_positional_paths_parsed() {
+        let cli =
+            Cli::try_parse_from(["tryke", "test", "tests/math.py", "tests/utils.py"]).unwrap();
+        assert!(matches!(
+            &cli.command,
+            Commands::Test { paths, .. } if paths == &["tests/math.py", "tests/utils.py"]
+        ));
+    }
+
+    #[test]
+    fn test_paths_and_filter_combined() {
+        let cli =
+            Cli::try_parse_from(["tryke", "test", "tests/math.py", "-k", "test_add"]).unwrap();
+        assert!(matches!(
+            &cli.command,
+            Commands::Test {
+                paths,
+                filter: Some(f),
+                ..
+            } if paths == &["tests/math.py"] && f == "test_add"
+        ));
+    }
+
+    #[test]
+    fn watch_filter_flag_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "watch", "-k", "test_add"]).unwrap();
+        assert!(matches!(
+            &cli.command,
+            Commands::Watch {
+                filter: Some(f),
+                ..
+            } if f == "test_add"
+        ));
     }
 }

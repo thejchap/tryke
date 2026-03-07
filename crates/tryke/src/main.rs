@@ -116,6 +116,7 @@ async fn run_tests(
 ) -> Result<()> {
     let python = resolve_python(root);
     let pool = WorkerPool::new(worker_pool_size(), &python, root);
+    pool.warm().await;
     report_cycle(reporter, tests, &pool).await?;
     pool.shutdown();
     Ok(())
@@ -174,6 +175,7 @@ async fn run_watch(
 
     let python = resolve_python(root);
     let pool = WorkerPool::new(worker_pool_size(), &python, root);
+    pool.warm().await;
 
     clear_if_tty();
     let tests = test_filter.apply(discoverer.rediscover());

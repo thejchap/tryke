@@ -13,6 +13,7 @@ use tryke_types::{TestItem, TestOutcome, TestResult};
 use crate::worker::WorkerProcess;
 
 enum WorkerMsg {
+    Ping(oneshot::Sender<()>),
     Test(TestItem, oneshot::Sender<TestResult>),
     Reload(Vec<String>, oneshot::Sender<()>),
     Shutdown,
@@ -73,6 +74,20 @@ impl WorkerPool {
         }
     }
 
+    /// Pre-spawn all worker processes in parallel so Python startup
+    /// latency is not on the critical path of the first tests.
+    pub async fn warm(&self) {
+        let mut ack_rxs = Vec::with_capacity(self.worker_txs.len());
+        for tx in &self.worker_txs {
+            let (ack_tx, ack_rx) = oneshot::channel();
+            let _ = tx.send(WorkerMsg::Ping(ack_tx));
+            ack_rxs.push(ack_rx);
+        }
+        for ack_rx in ack_rxs {
+            let _ = ack_rx.await;
+        }
+    }
+
     pub fn shutdown(self) {
         for tx in self.worker_txs {
             let _ = tx.send(WorkerMsg::Shutdown);
@@ -92,6 +107,19 @@ async fn worker_task(
 
     while let Some(msg) = rx.recv().await {
         match msg {
+            WorkerMsg::Ping(ack_tx) => {
+                debug!("worker_task: ping (pre-warm)");
+                if worker.is_none() {
+                    debug!("worker_task: spawning process for warm-up");
+                    match WorkerProcess::spawn(&python_bin, &path_refs) {
+                        Ok(w) => worker = Some(w),
+                        Err(e) => {
+                            debug!("worker_task: warm-up spawn failed: {e}");
+                        }
+                    }
+                }
+                let _ = ack_tx.send(());
+            }
             WorkerMsg::Test(test, result_tx) => {
                 debug!("worker_task: running test {}", test.name);
                 if worker.is_none() {

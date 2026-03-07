@@ -37,6 +37,7 @@ impl Server {
         let size = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
         let python = resolve_python(&self.root);
         let pool = Arc::new(WorkerPool::new(size, &python, &self.root));
+        pool.warm().await;
 
         let (bcast_tx, _) = broadcast::channel::<Bytes>(256);
         let disc = Arc::new(Mutex::new(Discoverer::new(&self.root)));

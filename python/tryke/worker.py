@@ -10,6 +10,7 @@ import traceback
 import unittest
 from pathlib import Path
 
+import tryke.expect as _expect_mod
 from tryke.expect import ExpectationError
 
 _TRYKE_PKG = str(Path(__file__).resolve().parent)
@@ -82,12 +83,26 @@ def _run_test(module_name: str, function_name: str, modules: dict[str, object]) 
     stderr_buf = io.StringIO()
     start = time.monotonic()
 
+    ctx = _expect_mod.SoftContext()
+    _expect_mod._soft_context = ctx  # noqa: SLF001
     try:
         with (
             contextlib.redirect_stdout(stdout_buf),
             contextlib.redirect_stderr(stderr_buf),
         ):
             fn()
+        if ctx.failures:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            assertions = _extract_soft_failures(ctx.failures)
+            return {
+                "outcome": "failed",
+                "message": "assertion failed",
+                "traceback": "",
+                "assertions": assertions,
+                "duration_ms": duration_ms,
+                "stdout": stdout_buf.getvalue(),
+                "stderr": stderr_buf.getvalue(),
+            }
         duration_ms = int((time.monotonic() - start) * 1000)
         return {
             "outcome": "passed",
@@ -101,6 +116,20 @@ def _run_test(module_name: str, function_name: str, modules: dict[str, object]) 
             "outcome": "skipped",
             "duration_ms": duration_ms,
             "reason": str(exc),
+            "stdout": stdout_buf.getvalue(),
+            "stderr": stderr_buf.getvalue(),
+        }
+    except ExpectationError as exc:
+        # .fatal() raised — include it plus any prior soft failures
+        duration_ms = int((time.monotonic() - start) * 1000)
+        assertions = _extract_soft_failures(ctx.failures)
+        assertions.append(_extract_single(exc))
+        return {
+            "outcome": "failed",
+            "message": str(exc) or "assertion failed",
+            "traceback": traceback.format_exc(),
+            "assertions": assertions,
+            "duration_ms": duration_ms,
             "stdout": stdout_buf.getvalue(),
             "stderr": stderr_buf.getvalue(),
         }
@@ -127,6 +156,45 @@ def _run_test(module_name: str, function_name: str, modules: dict[str, object]) 
             "stdout": stdout_buf.getvalue(),
             "stderr": stderr_buf.getvalue(),
         }
+    finally:
+        _expect_mod._soft_context = None  # noqa: SLF001
+
+
+def _extract_soft_failures(
+    failures: list[tuple[ExpectationError, traceback.FrameSummary | None]],
+) -> list[dict]:
+    result = []
+    for err, frame in failures:
+        entry: dict = {
+            "expression": "",
+            "expected": err.expected,
+            "received": err.received,
+        }
+        if frame is not None:
+            entry["expression"] = (frame.line or "").strip()
+            entry["line"] = frame.lineno
+            entry["file"] = frame.filename
+        result.append(entry)
+    return result
+
+
+def _extract_single(exc: ExpectationError) -> dict:
+    tb = sys.exc_info()[2]
+    frames = traceback.extract_tb(tb)
+    for frame in reversed(frames):
+        if _is_user_frame(frame):
+            return {
+                "expression": (frame.line or "").strip(),
+                "expected": exc.expected,
+                "received": exc.received,
+                "line": frame.lineno,
+                "file": frame.filename,
+            }
+    return {
+        "expression": "",
+        "expected": exc.expected,
+        "received": exc.received,
+    }
 
 
 def _is_user_frame(frame: traceback.FrameSummary) -> bool:

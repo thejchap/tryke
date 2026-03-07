@@ -248,6 +248,14 @@ fn try_extract_assertion(
     source: &str,
     line_index: &LineIndex,
 ) -> Option<ExpectedAssertion> {
+    // Unwrap `.fatal()`: expect(x).to_equal(y).fatal() wraps the assertion call
+    if let Expr::Attribute(attr) = call.func.as_ref()
+        && attr.attr.id.as_str() == "fatal"
+        && let Expr::Call(inner_call) = attr.value.as_ref()
+    {
+        return try_extract_assertion(inner_call, source, line_index);
+    }
+
     let Expr::Attribute(outer_attr) = call.func.as_ref() else {
         return None;
     };
@@ -957,5 +965,36 @@ def my_func():
         let file = root.join("test_foo.py");
         let imports = extract_local_imports(root, &file, &parsed.syntax().body);
         assert_eq!(imports.len(), 1);
+    }
+
+    #[test]
+    fn extracts_assertion_with_fatal() {
+        let source = "@test
+def test_fn():
+    expect(x).to_equal(1).fatal()
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items[0].expected_assertions.len(), 1);
+        let a = &items[0].expected_assertions[0];
+        assert_eq!(a.subject, "x");
+        assert_eq!(a.matcher, "to_equal");
+        assert!(!a.negated);
+        assert_eq!(a.args, vec!["1"]);
+    }
+
+    #[test]
+    fn extracts_negated_assertion_with_fatal() {
+        let source = "@test
+def test_fn():
+    expect(x).not_.to_be_none().fatal()
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items[0].expected_assertions.len(), 1);
+        let a = &items[0].expected_assertions[0];
+        assert_eq!(a.subject, "x");
+        assert_eq!(a.matcher, "to_be_none");
+        assert!(a.negated);
     }
 }

@@ -7,6 +7,7 @@ use log::debug;
 
 pub(crate) mod db;
 mod discoverer;
+pub(crate) mod import_graph;
 pub use discoverer::Discoverer;
 
 use ignore::WalkBuilder;
@@ -33,7 +34,7 @@ pub(crate) fn collect_python_files(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn path_to_module(root: &Path, file: &Path) -> String {
+pub(crate) fn path_to_module(root: &Path, file: &Path) -> String {
     file.strip_prefix(root)
         .unwrap_or(file)
         .with_extension("")
@@ -41,6 +42,117 @@ fn path_to_module(root: &Path, file: &Path) -> String {
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .collect::<Vec<_>>()
         .join(".")
+}
+
+/// Resolve `module_name` (e.g. "foo.bar") as a local file under `root`.
+/// Tries `root/foo/bar.py` then `root/foo/bar/__init__.py`.
+fn resolve_absolute_import(root: &Path, module_name: &str) -> Option<PathBuf> {
+    let mut path = root.to_path_buf();
+    for part in module_name.split('.') {
+        path = path.join(part);
+    }
+    let py = path.with_extension("py");
+    if py.starts_with(root) && py.exists() {
+        return Some(py);
+    }
+    let init = path.join("__init__.py");
+    if init.starts_with(root) && init.exists() {
+        return Some(init);
+    }
+    None
+}
+
+/// Resolve a module path from `base` directory.
+/// If `module_name` is empty, tries `base/__init__.py`.
+fn resolve_relative_import_path(root: &Path, base: &Path, module_name: &str) -> Option<PathBuf> {
+    if module_name.is_empty() {
+        let init = base.join("__init__.py");
+        if init.starts_with(root) && init.exists() {
+            return Some(init);
+        }
+        return None;
+    }
+    let mut path = base.to_path_buf();
+    for part in module_name.split('.') {
+        path = path.join(part);
+    }
+    let py = path.with_extension("py");
+    if py.starts_with(root) && py.exists() {
+        return Some(py);
+    }
+    let init = path.join("__init__.py");
+    if init.starts_with(root) && init.exists() {
+        return Some(init);
+    }
+    None
+}
+
+/// Extract local file imports from a Python source file.
+/// Returns absolute paths of project-local files that this file imports.
+pub(crate) fn extract_local_imports(root: &Path, file: &Path, source: &str) -> Vec<PathBuf> {
+    let Ok(parsed) = parse_module(source) else {
+        return vec![];
+    };
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut result: Vec<PathBuf> = Vec::new();
+
+    let mut add = |p: PathBuf| {
+        if seen.insert(p.clone()) {
+            result.push(p);
+        }
+    };
+
+    for stmt in &parsed.syntax().body {
+        match stmt {
+            Stmt::Import(import_stmt) => {
+                for alias in &import_stmt.names {
+                    let module_name = alias.name.id.as_str();
+                    if let Some(path) = resolve_absolute_import(root, module_name) {
+                        add(path);
+                    }
+                }
+            }
+            Stmt::ImportFrom(from_stmt) => {
+                let level = from_stmt.level;
+                if level == 0 {
+                    // Absolute: from foo.bar import x
+                    if let Some(module) = &from_stmt.module
+                        && let Some(path) = resolve_absolute_import(root, module.id.as_str())
+                    {
+                        add(path);
+                    }
+                } else {
+                    // Relative: walk up level-1 directories from file's parent
+                    let mut base = file.parent().map(Path::to_path_buf);
+                    for _ in 0..level.saturating_sub(1) {
+                        base = base.and_then(|b| b.parent().map(Path::to_path_buf));
+                    }
+                    if let Some(base) = base {
+                        if let Some(module) = &from_stmt.module {
+                            // from .utils import x → resolve "utils" from base
+                            if let Some(path) =
+                                resolve_relative_import_path(root, &base, module.id.as_str())
+                            {
+                                add(path);
+                            }
+                        } else {
+                            // from . import x, y → try each name as a submodule
+                            for alias in &from_stmt.names {
+                                let name = alias.name.id.as_str();
+                                if let Some(path) = resolve_relative_import_path(root, &base, name)
+                                {
+                                    add(path);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    result
 }
 
 fn is_locally_defined(name: &str, body: &[Stmt]) -> bool {
@@ -748,5 +860,101 @@ def my_func():
         let items = parse_tests_from_file(dir.path(), &file);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].display_name.as_deref(), Some("foo"));
+    }
+
+    #[test]
+    fn extract_local_imports_absolute() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(root.join("utils.py"), "").expect("write");
+        let source = "import utils\n";
+        let file = root.join("test_foo.py");
+        let imports = extract_local_imports(root, &file, source);
+        assert_eq!(imports, vec![root.join("utils.py")]);
+    }
+
+    #[test]
+    fn extract_local_imports_from_absolute() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(root.join("utils.py"), "").expect("write");
+        let source = "from utils import helper\n";
+        let file = root.join("test_foo.py");
+        let imports = extract_local_imports(root, &file, source);
+        assert_eq!(imports, vec![root.join("utils.py")]);
+    }
+
+    #[test]
+    fn extract_local_imports_ignores_nonlocal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        // stdlib / third-party (doesn't exist under root)
+        let source = "import os\nimport pytest\n";
+        let file = root.join("test_foo.py");
+        let imports = extract_local_imports(root, &file, source);
+        assert!(imports.is_empty());
+    }
+
+    #[test]
+    fn extract_local_imports_relative() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let sub = root.join("pkg");
+        fs::create_dir_all(&sub).expect("mkdir");
+        fs::write(sub.join("utils.py"), "").expect("write");
+        let source = "from .utils import helper\n";
+        let file = sub.join("test_foo.py");
+        let imports = extract_local_imports(root, &file, source);
+        assert_eq!(imports, vec![sub.join("utils.py")]);
+    }
+
+    #[test]
+    fn extract_local_imports_relative_parent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let sub = root.join("pkg").join("sub");
+        fs::create_dir_all(&sub).expect("mkdir");
+        fs::write(root.join("pkg").join("utils.py"), "").expect("write");
+        let source = "from ..utils import helper\n";
+        let file = sub.join("test_foo.py");
+        let imports = extract_local_imports(root, &file, source);
+        assert_eq!(imports, vec![root.join("pkg").join("utils.py")]);
+    }
+
+    #[test]
+    fn extract_local_imports_from_dot_import_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let sub = root.join("pkg");
+        fs::create_dir_all(&sub).expect("mkdir");
+        fs::write(sub.join("helpers.py"), "").expect("write");
+        let source = "from . import helpers\n";
+        let file = sub.join("test_foo.py");
+        let imports = extract_local_imports(root, &file, source);
+        assert_eq!(imports, vec![sub.join("helpers.py")]);
+    }
+
+    #[test]
+    fn extract_local_imports_resolves_package_init() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let sub = root.join("mypkg");
+        fs::create_dir_all(&sub).expect("mkdir");
+        fs::write(sub.join("__init__.py"), "").expect("write");
+        let source = "import mypkg\n";
+        let file = root.join("test_foo.py");
+        let imports = extract_local_imports(root, &file, source);
+        assert_eq!(imports, vec![sub.join("__init__.py")]);
+    }
+
+    #[test]
+    fn extract_local_imports_deduplicates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(root.join("utils.py"), "").expect("write");
+        let source = "import utils\nimport utils\n";
+        let file = root.join("test_foo.py");
+        let imports = extract_local_imports(root, &file, source);
+        assert_eq!(imports.len(), 1);
     }
 }

@@ -57,18 +57,15 @@ impl Server {
         let disc_for_watcher = Arc::clone(&disc);
         let bcast_for_watcher = bcast_tx.clone();
         let pool_for_watcher = Arc::clone(&pool);
-        let root_for_watcher = self.root.clone();
         tokio::spawn(async move {
             while let Some(paths) = watcher_rx.recv().await {
-                let modules: Vec<String> = paths
-                    .iter()
-                    .filter_map(|p| tryke_runner::path_to_module(&root_for_watcher, p))
-                    .collect();
+                let modules = disc_for_watcher.lock().unwrap().affected_modules(&paths);
                 if !modules.is_empty() {
                     pool_for_watcher.reload(modules).await;
                 }
-                let tests = disc_for_watcher.lock().unwrap().rediscover_changed(&paths);
-                debug!("file change: rediscovered {} tests", tests.len());
+                disc_for_watcher.lock().unwrap().rediscover_changed(&paths);
+                let tests = disc_for_watcher.lock().unwrap().tests_for_changed(&paths);
+                debug!("file change: {} affected tests", tests.len());
                 let notif = Notification {
                     jsonrpc: "2.0".to_string(),
                     method: "discover_complete".to_string(),

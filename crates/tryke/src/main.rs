@@ -7,11 +7,11 @@ use std::{
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use clap_verbosity_flag::{Verbosity as LogVerbosity, WarnLevel};
-use log::debug;
+use log::{debug, warn};
 use tokio_stream::StreamExt;
 use tryke_discovery::Discoverer;
 use tryke_reporter::{DotReporter, JSONReporter, JUnitReporter, Reporter, TextReporter, Verbosity};
-use tryke_runner::{WorkerPool, path_to_module, resolve_python};
+use tryke_runner::{WorkerPool, resolve_python};
 use tryke_types::{RunSummary, TestOutcome};
 
 #[derive(Debug, Parser)]
@@ -43,6 +43,9 @@ enum Commands {
         root: Option<PathBuf>,
         #[arg(long, default_missing_value = "2337", num_args = 0..=1, require_equals = false)]
         port: Option<u16>,
+        /// Run only tests affected by files changed since HEAD (requires git)
+        #[arg(long)]
+        changed: bool,
     },
     Watch {
         #[arg(long = "reporter", default_value = "text")]
@@ -55,6 +58,14 @@ enum Commands {
         port: u16,
         #[arg(long)]
         root: Option<PathBuf>,
+    },
+    /// Print the import dependency graph for the project
+    Graph {
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Show only files that have dependents or dependencies (skip isolated files)
+        #[arg(long)]
+        connected_only: bool,
     },
 }
 
@@ -167,18 +178,121 @@ async fn run_watch(reporter: &mut dyn Reporter, root: Option<&Path>) -> Result<(
     let _debouncer = tryke_server::watcher::spawn_watcher(root, tx)?;
 
     for paths in &rx {
-        let modules: Vec<String> = paths
-            .iter()
-            .filter_map(|p| path_to_module(root, p))
-            .collect();
+        let modules = discoverer.affected_modules(&paths);
         if !modules.is_empty() {
             pool.reload(modules).await;
         }
+        discoverer.rediscover_changed(&paths);
         clear_if_tty();
-        report_cycle(reporter, discoverer.rediscover_changed(&paths), &pool).await?;
+        let tests = discoverer.tests_for_changed(&paths);
+        report_cycle(reporter, tests, &pool).await?;
     }
 
     pool.shutdown();
+    Ok(())
+}
+
+/// Collect changed files from `git diff --name-only HEAD` relative to `root`.
+/// Returns `None` if git is unavailable or the command fails.
+fn git_changed_files(root: &Path) -> Option<Vec<PathBuf>> {
+    let output = std::process::Command::new("git")
+        .args(["diff", "--name-only", "HEAD"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let paths: Vec<PathBuf> = text
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| root.join(l))
+        .collect();
+    Some(paths)
+}
+
+async fn run_changed_test(reporter: &mut dyn Reporter, root: Option<&Path>) -> Result<()> {
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let root_path = root.unwrap_or(&cwd);
+    let mut discoverer = Discoverer::new(root_path);
+    discoverer.rediscover();
+
+    let tests = match git_changed_files(root_path) {
+        Some(changed) if !changed.is_empty() => {
+            debug!("--changed: {} git-changed files", changed.len());
+            discoverer.tests_for_changed(&changed)
+        }
+        Some(_) => {
+            warn!("--changed: no changed files found via git, running all tests");
+            discoverer.tests()
+        }
+        None => {
+            warn!("--changed: git unavailable or failed, running all tests");
+            discoverer.tests()
+        }
+    };
+
+    let start = Instant::now();
+    reporter.on_run_start(&tests);
+    let python = resolve_python(root_path);
+    let pool = WorkerPool::new(worker_pool_size(), &python, root_path);
+    let mut stream = pool.run(tests);
+    let mut passed = 0usize;
+    let mut failed = 0usize;
+    let mut skipped = 0usize;
+    while let Some(result) = stream.next().await {
+        match &result.outcome {
+            TestOutcome::Passed => passed += 1,
+            TestOutcome::Failed { .. } => failed += 1,
+            TestOutcome::Skipped { .. } => skipped += 1,
+        }
+        reporter.on_test_complete(&result);
+    }
+    reporter.on_run_complete(&RunSummary {
+        passed,
+        failed,
+        skipped,
+        duration: start.elapsed(),
+    });
+    pool.shutdown();
+    Ok(())
+}
+
+fn run_graph(root: Option<&Path>, connected_only: bool) -> Result<()> {
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let root_path = root.unwrap_or(&cwd);
+    let mut discoverer = Discoverer::new(root_path);
+    discoverer.rediscover();
+
+    let summary = discoverer.import_graph_summary();
+    for entry in &summary {
+        if connected_only && entry.imports.is_empty() && entry.imported_by.is_empty() {
+            continue;
+        }
+        println!("{}", entry.file.display());
+        if entry.imports.is_empty() {
+            println!("  imports:     (none)");
+        } else {
+            let names: Vec<String> = entry
+                .imports
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect();
+            println!("  imports:     {}", names.join(", "));
+        }
+        if entry.imported_by.is_empty() {
+            println!("  imported by: (none)");
+        } else {
+            let names: Vec<String> = entry
+                .imported_by
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect();
+            println!("  imported by: {}", names.join(", "));
+        }
+        println!();
+    }
     Ok(())
 }
 
@@ -213,6 +327,7 @@ fn main() -> Result<()> {
             reporter,
             root,
             port,
+            changed,
         } => {
             let mut rep = build_reporter(reporter, verbosity);
             let root_ref = root.as_deref();
@@ -223,6 +338,8 @@ fn main() -> Result<()> {
                 tryke_server::Client::new(*p).run(&root_path, &mut *rep)
             } else if *collect_only {
                 run_collect_only(&mut *rep, root_ref)
+            } else if *changed {
+                rt.block_on(run_changed_test(&mut *rep, root_ref))
             } else {
                 rt.block_on(run_test(&mut *rep, root_ref))
             }
@@ -238,6 +355,10 @@ fn main() -> Result<()> {
             let server = tryke_server::Server::new(*port, root_path);
             rt.block_on(server.run())
         }
+        Commands::Graph {
+            root,
+            connected_only,
+        } => run_graph(root.as_deref(), *connected_only),
     }
 }
 
@@ -471,6 +592,74 @@ mod tests {
         let pool = WorkerPool::new(1, "python3", dir.path());
         assert!(
             run_cycle(&mut reporter, &mut discoverer, &pool)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_changed_flag_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "test", "--changed"]).unwrap();
+        assert!(matches!(cli.command, Commands::Test { changed: true, .. }));
+    }
+
+    #[test]
+    fn graph_subcommand_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "graph"]).unwrap();
+        assert!(matches!(cli.command, Commands::Graph { .. }));
+    }
+
+    #[test]
+    fn graph_subcommand_connected_only_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "graph", "--connected-only"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Graph {
+                connected_only: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn run_graph_prints_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        std::fs::write(dir.path().join("utils.py"), "def helper(): pass\n").expect("write");
+        std::fs::write(
+            dir.path().join("test_foo.py"),
+            "from utils import helper\n@test\ndef test_foo(): pass\n",
+        )
+        .expect("write");
+        assert!(run_graph(Some(dir.path()), false).is_ok());
+    }
+
+    #[test]
+    fn run_graph_connected_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        std::fs::write(dir.path().join("utils.py"), "def helper(): pass\n").expect("write");
+        std::fs::write(
+            dir.path().join("test_foo.py"),
+            "from utils import helper\n@test\ndef test_foo(): pass\n",
+        )
+        .expect("write");
+        std::fs::write(
+            dir.path().join("test_isolated.py"),
+            "@test\ndef test_isolated(): pass\n",
+        )
+        .expect("write");
+        assert!(run_graph(Some(dir.path()), true).is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_changed_test_without_git_runs_all() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        let mut reporter = TextReporter::new();
+        // non-git directory → git_changed_files returns None → runs all tests (0 tests here)
+        assert!(
+            run_changed_test(&mut reporter, Some(dir.path()))
                 .await
                 .is_ok()
         );

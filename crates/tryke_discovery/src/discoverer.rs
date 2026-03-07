@@ -7,12 +7,16 @@ use log::debug;
 use salsa::Setter;
 use tryke_types::TestItem;
 
-use crate::db::{Database, SourceFile, parse_tests};
+use crate::{
+    db::{Database, SourceFile, parse_tests},
+    import_graph::{GraphEntry, ImportGraph},
+};
 
 pub struct Discoverer {
     db: Database,
     inputs: HashMap<PathBuf, SourceFile>,
     root: PathBuf,
+    import_graph: ImportGraph,
 }
 
 impl Discoverer {
@@ -23,6 +27,7 @@ impl Discoverer {
             db: Database::default(),
             inputs: HashMap::new(),
             root,
+            import_graph: ImportGraph::default(),
         }
     }
 
@@ -36,6 +41,7 @@ impl Discoverer {
         );
         for path in &paths {
             let text = std::fs::read_to_string(path).unwrap_or_default();
+            let imports = crate::extract_local_imports(&self.root, path, &text);
             if let Some(file) = self.inputs.get(path) {
                 if file.text(&self.db) != &text {
                     debug!("rediscover: re-parsing changed file {}", path.display());
@@ -46,9 +52,19 @@ impl Discoverer {
                 let file = SourceFile::new(&self.db, text, self.root.clone(), path.clone());
                 self.inputs.insert(path.clone(), file);
             }
+            self.import_graph.update(path.clone(), imports);
         }
         let path_set: HashSet<&PathBuf> = paths.iter().collect();
-        self.inputs.retain(|p, _| path_set.contains(p));
+        let removed: Vec<PathBuf> = self
+            .inputs
+            .keys()
+            .filter(|p| !path_set.contains(p))
+            .cloned()
+            .collect();
+        for path in removed {
+            self.import_graph.remove(&path);
+            self.inputs.remove(&path);
+        }
         let tests: Vec<TestItem> = self
             .inputs
             .values()
@@ -74,6 +90,7 @@ impl Discoverer {
             if path.extension().is_some_and(|ext| ext == "py") {
                 if path.exists() {
                     let text = std::fs::read_to_string(path).unwrap_or_default();
+                    let imports = crate::extract_local_imports(&self.root, path, &text);
                     if let Some(file) = self.inputs.get(path) {
                         if file.text(&self.db) != &text {
                             debug!(
@@ -87,11 +104,13 @@ impl Discoverer {
                         let file = SourceFile::new(&self.db, text, self.root.clone(), path.clone());
                         self.inputs.insert(path.clone(), file);
                     }
+                    self.import_graph.update(path.clone(), imports);
                 } else {
                     debug!(
                         "rediscover_changed: removing deleted file {}",
                         path.display()
                     );
+                    self.import_graph.remove(path);
                     self.inputs.remove(path);
                 }
             }
@@ -103,6 +122,78 @@ impl Discoverer {
             .collect();
         debug!("rediscover_changed: {} tests after update", tests.len());
         tests
+    }
+
+    /// Returns module names for all files transitively affected by the given changed paths.
+    /// Used to reload Python modules in the worker pool.
+    pub fn affected_modules(&self, changed: &[PathBuf]) -> Vec<String> {
+        let affected = self.import_graph.affected_files(changed);
+        let mut modules: Vec<String> = affected
+            .iter()
+            .map(|p| crate::path_to_module(&self.root, p))
+            .collect();
+        modules.sort();
+        debug!(
+            "affected_modules: {:?} → {:?}",
+            changed
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>(),
+            modules
+        );
+        modules
+    }
+
+    /// Returns only tests whose source file is transitively affected by the changed paths.
+    pub fn tests_for_changed(&self, changed: &[PathBuf]) -> Vec<TestItem> {
+        let affected = self.import_graph.affected_files(changed);
+        let tests: Vec<TestItem> = self
+            .tests()
+            .into_iter()
+            .filter(|t| {
+                t.file_path
+                    .as_ref()
+                    .is_some_and(|rel| affected.contains(&self.root.join(rel)))
+            })
+            .collect();
+        debug!(
+            "tests_for_changed: {:?} → {} tests",
+            changed
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>(),
+            tests.len()
+        );
+        tests
+    }
+
+    /// Returns a sorted summary of the import graph for all known files.
+    pub fn import_graph_summary(&self) -> Vec<GraphEntry> {
+        let mut entries: Vec<GraphEntry> = self
+            .inputs
+            .keys()
+            .map(|file| {
+                let imports = self
+                    .import_graph
+                    .imports_for(file)
+                    .into_iter()
+                    .map(|p| p.strip_prefix(&self.root).unwrap_or(p).to_path_buf())
+                    .collect();
+                let imported_by = self
+                    .import_graph
+                    .imported_by_for(file)
+                    .into_iter()
+                    .map(|p| p.strip_prefix(&self.root).unwrap_or(p).to_path_buf())
+                    .collect();
+                GraphEntry {
+                    file: file.strip_prefix(&self.root).unwrap_or(file).to_path_buf(),
+                    imports,
+                    imported_by,
+                }
+            })
+            .collect();
+        entries.sort_by(|a, b| a.file.cmp(&b.file));
+        entries
     }
 }
 
@@ -250,5 +341,101 @@ mod tests {
         let mut names: Vec<_> = second.iter().map(|t| t.name.as_str()).collect();
         names.sort_unstable();
         assert_eq!(names, vec!["test_a", "test_new"]);
+    }
+
+    #[test]
+    fn tests_for_changed_returns_only_affected_tests() {
+        let utils_src = "def helper(): pass\n";
+        let test_foo_src = "from utils import helper\n@test\ndef test_foo():\n    pass\n";
+        let test_bar_src = "from utils import helper\n@test\ndef test_bar():\n    pass\n";
+        let isolated_src = "@test\ndef test_baz():\n    pass\n";
+        let dir = make_project(&[
+            ("utils.py", utils_src),
+            ("test_foo.py", test_foo_src),
+            ("test_bar.py", test_bar_src),
+            ("test_baz.py", isolated_src),
+        ]);
+        let mut discoverer = Discoverer::new(dir.path());
+        discoverer.rediscover();
+
+        let changed = vec![dir.path().join("utils.py")];
+        let mut tests = discoverer.tests_for_changed(&changed);
+        tests.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let names: Vec<&str> = tests.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"test_foo"), "test_foo should be affected");
+        assert!(names.contains(&"test_bar"), "test_bar should be affected");
+        assert!(
+            !names.contains(&"test_baz"),
+            "test_baz should not be affected"
+        );
+    }
+
+    #[test]
+    fn affected_modules_returns_module_names() {
+        let utils_src = "def helper(): pass\n";
+        let test_foo_src = "from utils import helper\n@test\ndef test_foo():\n    pass\n";
+        let dir = make_project(&[("utils.py", utils_src), ("test_foo.py", test_foo_src)]);
+        let mut discoverer = Discoverer::new(dir.path());
+        discoverer.rediscover();
+
+        let changed = vec![dir.path().join("utils.py")];
+        let mut modules = discoverer.affected_modules(&changed);
+        modules.sort();
+
+        assert!(modules.contains(&"test_foo".to_string()));
+        assert!(modules.contains(&"utils".to_string()));
+    }
+
+    #[test]
+    fn import_graph_summary_shows_edges() {
+        let utils_src = "def helper(): pass\n";
+        let test_foo_src = "from utils import helper\n@test\ndef test_foo():\n    pass\n";
+        let dir = make_project(&[("utils.py", utils_src), ("test_foo.py", test_foo_src)]);
+        let mut discoverer = Discoverer::new(dir.path());
+        discoverer.rediscover();
+
+        let summary = discoverer.import_graph_summary();
+        let utils_entry = summary
+            .iter()
+            .find(|e| e.file == Path::new("utils.py"))
+            .expect("utils.py entry");
+        assert!(utils_entry.imports.is_empty());
+        assert!(
+            utils_entry
+                .imported_by
+                .contains(&PathBuf::from("test_foo.py"))
+        );
+
+        let foo_entry = summary
+            .iter()
+            .find(|e| e.file == Path::new("test_foo.py"))
+            .expect("test_foo.py entry");
+        assert!(foo_entry.imports.contains(&PathBuf::from("utils.py")));
+        assert!(foo_entry.imported_by.is_empty());
+    }
+
+    #[test]
+    fn import_graph_summary_connected_only_filter() {
+        let utils_src = "def helper(): pass\n";
+        let test_foo_src = "from utils import helper\n@test\ndef test_foo():\n    pass\n";
+        let isolated_src = "@test\ndef test_isolated():\n    pass\n";
+        let dir = make_project(&[
+            ("utils.py", utils_src),
+            ("test_foo.py", test_foo_src),
+            ("test_isolated.py", isolated_src),
+        ]);
+        let mut discoverer = Discoverer::new(dir.path());
+        discoverer.rediscover();
+
+        let summary = discoverer.import_graph_summary();
+        let connected: Vec<_> = summary
+            .iter()
+            .filter(|e| !e.imports.is_empty() || !e.imported_by.is_empty())
+            .collect();
+        let files: Vec<&PathBuf> = connected.iter().map(|e| &e.file).collect();
+        assert!(files.contains(&&PathBuf::from("utils.py")));
+        assert!(files.contains(&&PathBuf::from("test_foo.py")));
+        assert!(!files.contains(&&PathBuf::from("test_isolated.py")));
     }
 }

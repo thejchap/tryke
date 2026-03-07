@@ -125,6 +125,7 @@ impl<W: io::Write> Reporter for TextReporter<W> {
         let _ = writeln!(self.writer);
     }
 
+    #[expect(clippy::too_many_lines)]
     fn on_test_complete(&mut self, result: &TestResult) {
         let file = result.test.file_path.as_ref();
         if file != self.current_file.as_ref() {
@@ -221,6 +222,25 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                     );
                 }
             }
+            TestOutcome::XFailed { .. } => {
+                if !matches!(self.verbosity, Verbosity::Quiet) {
+                    let _ = writeln!(self.writer, "{} {}", "~".dimmed(), display.dimmed());
+                }
+            }
+            TestOutcome::XPassed => {
+                let _ = writeln!(
+                    self.writer,
+                    "{} {} {}",
+                    "!".red(),
+                    display.bold(),
+                    "XPASS (unexpected pass)".red()
+                );
+            }
+            TestOutcome::Todo { .. } => {
+                if !matches!(self.verbosity, Verbosity::Quiet) {
+                    let _ = writeln!(self.writer, "{} {}", "T".cyan(), display.dimmed());
+                }
+            }
         }
     }
 
@@ -278,7 +298,25 @@ impl<W: io::Write> Reporter for TextReporter<W> {
             );
         }
 
-        let total = summary.passed + summary.failed + summary.skipped + summary.errors;
+        if summary.xfailed > 0 {
+            let _ = writeln!(
+                self.writer,
+                " {} {}",
+                summary.xfailed.dimmed(),
+                "xfail".dimmed()
+            );
+        }
+
+        if summary.todo > 0 {
+            let _ = writeln!(self.writer, " {} {}", summary.todo.cyan(), "todo".cyan());
+        }
+
+        let total = summary.passed
+            + summary.failed
+            + summary.skipped
+            + summary.errors
+            + summary.xfailed
+            + summary.todo;
         let _ = writeln!(
             self.writer,
             "Ran {} tests. [{}]",
@@ -322,18 +360,12 @@ mod tests {
             TestItem {
                 name: "test_a".into(),
                 module_path: "tests.m".into(),
-                file_path: None,
-                line_number: None,
-                display_name: None,
-                expected_assertions: vec![],
+                ..Default::default()
             },
             TestItem {
                 name: "test_b".into(),
                 module_path: "tests.m".into(),
-                file_path: None,
-                line_number: None,
-                display_name: None,
-                expected_assertions: vec![],
+                ..Default::default()
             },
         ];
 
@@ -349,10 +381,7 @@ mod tests {
             test: TestItem {
                 name: "test_add".into(),
                 module_path: "tests.math".into(),
-                file_path: None,
-                line_number: None,
-                display_name: None,
-                expected_assertions: vec![],
+                ..Default::default()
             },
             outcome: TestOutcome::Passed,
             duration: Duration::from_millis(12),
@@ -372,10 +401,7 @@ mod tests {
             test: TestItem {
                 name: "test_sub".into(),
                 module_path: "tests.math".into(),
-                file_path: None,
-                line_number: None,
-                display_name: None,
-                expected_assertions: vec![],
+                ..Default::default()
             },
             outcome: TestOutcome::Failed {
                 message: "bad".into(),
@@ -399,10 +425,7 @@ mod tests {
             test: TestItem {
                 name: "test_skip".into(),
                 module_path: "tests.misc".into(),
-                file_path: None,
-                line_number: None,
-                display_name: None,
-                expected_assertions: vec![],
+                ..Default::default()
             },
             outcome: TestOutcome::Skipped { reason: None },
             duration: Duration::from_millis(0),
@@ -423,6 +446,8 @@ mod tests {
             failed: 1,
             skipped: 2,
             errors: 0,
+            xfailed: 0,
+            todo: 0,
             duration: Duration::from_millis(100),
         });
 
@@ -444,6 +469,8 @@ mod tests {
             failed: 0,
             skipped: 0,
             errors: 0,
+            xfailed: 0,
+            todo: 0,
             duration: Duration::from_millis(50),
         });
 
@@ -460,10 +487,7 @@ mod tests {
         let tests = vec![TestItem {
             name: "test_one".into(),
             module_path: "tests.mod_a".into(),
-            file_path: None,
-            line_number: None,
-            display_name: None,
-            expected_assertions: vec![],
+            ..Default::default()
         }];
 
         r.on_run_start(&tests);
@@ -479,6 +503,8 @@ mod tests {
             failed: 0,
             skipped: 0,
             errors: 0,
+            xfailed: 0,
+            todo: 0,
             duration: Duration::from_millis(10),
         });
 
@@ -499,8 +525,7 @@ mod tests {
                 module_path: "tests.math".into(),
                 file_path: Some(PathBuf::from("tests/math.py")),
                 line_number: Some(10),
-                display_name: None,
-                expected_assertions: vec![],
+                ..Default::default()
             },
             outcome: TestOutcome::Failed {
                 message: "assertion failed".into(),
@@ -533,10 +558,7 @@ mod tests {
             test: TestItem {
                 name: "test_sub".into(),
                 module_path: "tests.math".into(),
-                file_path: None,
-                line_number: None,
-                display_name: None,
-                expected_assertions: vec![],
+                ..Default::default()
             },
             outcome: TestOutcome::Failed {
                 message: "bad".into(),
@@ -562,16 +584,14 @@ mod tests {
                 module_path: "tests.math".into(),
                 file_path: Some("tests/math.py".into()),
                 line_number: Some(5),
-                display_name: None,
-                expected_assertions: vec![],
+                ..Default::default()
             },
             TestItem {
                 name: "test_sub".into(),
                 module_path: "tests.math".into(),
                 file_path: Some("tests/math.py".into()),
                 line_number: Some(10),
-                display_name: None,
-                expected_assertions: vec![],
+                ..Default::default()
             },
         ];
         r.on_collect_complete(&tests);
@@ -594,9 +614,7 @@ mod tests {
             name: name.into(),
             module_path: "tests.m".into(),
             file_path: Some(PathBuf::from(file)),
-            line_number: None,
-            display_name: None,
-            expected_assertions: vec![],
+            ..Default::default()
         };
         r.on_collect_complete(&[
             make("test_a", "tests/a.py"),
@@ -624,9 +642,7 @@ mod tests {
                 name: name.into(),
                 module_path: "tests.m".into(),
                 file_path: Some(PathBuf::from(file)),
-                line_number: None,
-                display_name: None,
-                expected_assertions: vec![],
+                ..Default::default()
             },
             outcome: TestOutcome::Passed,
             duration: Duration::from_millis(1),
@@ -657,10 +673,8 @@ mod tests {
             test: TestItem {
                 name: name.into(),
                 module_path: "tests.m".into(),
-                file_path: None,
-                line_number: None,
-                display_name: None,
                 expected_assertions: assertions,
+                ..Default::default()
             },
             outcome: TestOutcome::Passed,
             duration: Duration::from_millis(1),
@@ -723,10 +737,7 @@ mod tests {
             test: TestItem {
                 name: "test_fail".into(),
                 module_path: "tests.m".into(),
-                file_path: None,
-                line_number: None,
-                display_name: None,
-                expected_assertions: vec![],
+                ..Default::default()
             },
             outcome: TestOutcome::Failed {
                 message: "oops".into(),
@@ -768,10 +779,8 @@ mod tests {
             test: TestItem {
                 name: "test_fn".into(),
                 module_path: "tests.m".into(),
-                file_path: None,
-                line_number: None,
                 display_name: Some("my fancy test".into()),
-                expected_assertions: vec![],
+                ..Default::default()
             },
             outcome: TestOutcome::Passed,
             duration: Duration::from_millis(1),
@@ -810,9 +819,6 @@ mod tests {
             test: TestItem {
                 name: "test_fail".into(),
                 module_path: "tests.m".into(),
-                file_path: None,
-                line_number: None,
-                display_name: None,
                 expected_assertions: vec![tryke_types::ExpectedAssertion {
                     subject: "x".into(),
                     matcher: "to_equal".into(),
@@ -821,6 +827,7 @@ mod tests {
                     line: 5,
                     label: None,
                 }],
+                ..Default::default()
             },
             outcome: TestOutcome::Failed {
                 message: "assertion failed".into(),
@@ -851,9 +858,6 @@ mod tests {
             test: TestItem {
                 name: "test_mixed".into(),
                 module_path: "tests.m".into(),
-                file_path: None,
-                line_number: None,
-                display_name: None,
                 expected_assertions: vec![
                     tryke_types::ExpectedAssertion {
                         subject: "a".into(),
@@ -872,6 +876,7 @@ mod tests {
                         label: None,
                     },
                 ],
+                ..Default::default()
             },
             outcome: TestOutcome::Failed {
                 message: "assertion failed".into(),

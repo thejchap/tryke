@@ -122,10 +122,7 @@ mod tests {
         let tests = vec![TestItem {
             name: "test_one".into(),
             module_path: "tests.mod_a".into(),
-            file_path: None,
-            line_number: None,
-            display_name: None,
-            expected_assertions: vec![],
+            ..Default::default()
         }];
 
         r.on_run_start(&tests);
@@ -144,10 +141,7 @@ mod tests {
             test: TestItem {
                 name: "test_add".into(),
                 module_path: "tests.math".into(),
-                file_path: None,
-                line_number: None,
-                display_name: None,
-                expected_assertions: vec![],
+                ..Default::default()
             },
             outcome: TestOutcome::Passed,
             duration: Duration::from_millis(42),
@@ -171,10 +165,7 @@ mod tests {
             test: TestItem {
                 name: "test_sub".into(),
                 module_path: "tests.math".into(),
-                file_path: None,
-                line_number: None,
-                display_name: None,
-                expected_assertions: vec![],
+                ..Default::default()
             },
             outcome: TestOutcome::Failed {
                 message: "expected 1, got 2".into(),
@@ -203,10 +194,7 @@ mod tests {
             test: TestItem {
                 name: "test_skip".into(),
                 module_path: "tests.misc".into(),
-                file_path: None,
-                line_number: None,
-                display_name: None,
-                expected_assertions: vec![],
+                ..Default::default()
             },
             outcome: TestOutcome::Skipped {
                 reason: Some("not implemented".into()),
@@ -234,6 +222,8 @@ mod tests {
             failed: 1,
             skipped: 2,
             errors: 0,
+            xfailed: 0,
+            todo: 0,
             duration: Duration::from_millis(100),
         };
 
@@ -255,18 +245,12 @@ mod tests {
             TestItem {
                 name: "test_a".into(),
                 module_path: "tests.m".into(),
-                file_path: None,
-                line_number: None,
-                display_name: None,
-                expected_assertions: vec![],
+                ..Default::default()
             },
             TestItem {
                 name: "test_b".into(),
                 module_path: "tests.m".into(),
-                file_path: None,
-                line_number: None,
-                display_name: None,
-                expected_assertions: vec![],
+                ..Default::default()
             },
         ];
 
@@ -297,6 +281,8 @@ mod tests {
             failed: 1,
             skipped: 0,
             errors: 0,
+            xfailed: 0,
+            todo: 0,
             duration: Duration::from_millis(15),
         });
 
@@ -315,18 +301,12 @@ mod tests {
             TestItem {
                 name: "test_add".into(),
                 module_path: "tests.math".into(),
-                file_path: None,
-                line_number: None,
-                display_name: None,
-                expected_assertions: vec![],
+                ..Default::default()
             },
             TestItem {
                 name: "test_sub".into(),
                 module_path: "tests.math".into(),
-                file_path: None,
-                line_number: None,
-                display_name: None,
-                expected_assertions: vec![],
+                ..Default::default()
             },
         ];
         r.on_collect_complete(&tests);
@@ -346,8 +326,7 @@ mod tests {
                 module_path: "tests.math".into(),
                 file_path: Some("tests/math.py".into()),
                 line_number: Some(10),
-                display_name: None,
-                expected_assertions: vec![],
+                ..Default::default()
             },
             outcome: TestOutcome::Failed {
                 message: "assertion failed".into(),

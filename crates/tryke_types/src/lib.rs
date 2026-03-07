@@ -42,7 +42,7 @@ pub struct Assertion {
     pub received: String,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TestItem {
     pub name: String,
     pub module_path: String,
@@ -50,6 +50,14 @@ pub struct TestItem {
     pub line_number: Option<u32>,
     pub display_name: Option<String>,
     pub expected_assertions: Vec<ExpectedAssertion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xfail: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 impl TestItem {
@@ -78,6 +86,13 @@ pub enum TestOutcome {
     Error {
         message: String,
     },
+    XFailed {
+        reason: Option<String>,
+    },
+    XPassed,
+    Todo {
+        description: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -96,6 +111,10 @@ pub struct RunSummary {
     pub skipped: usize,
     #[serde(default)]
     pub errors: usize,
+    #[serde(default)]
+    pub xfailed: usize,
+    #[serde(default)]
+    pub todo: usize,
     pub duration: Duration,
 }
 

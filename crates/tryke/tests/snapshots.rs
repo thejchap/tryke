@@ -10,8 +10,7 @@ fn make_test(name: &str, file: &str) -> TestItem {
         module_path: "tests.test_validation".into(),
         file_path: Some(PathBuf::from(file)),
         line_number: Some(1),
-        display_name: None,
-        expected_assertions: vec![],
+        ..Default::default()
     }
 }
 

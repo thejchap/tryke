@@ -20,6 +20,7 @@ pub enum FilterExpr {
 pub struct TestFilter {
     pub path_specs: Vec<PathSpec>,
     pub expr: Option<FilterExpr>,
+    pub marker_expr: Option<FilterExpr>,
 }
 
 #[derive(Debug)]
@@ -202,6 +203,20 @@ impl Parser {
 }
 
 impl FilterExpr {
+    /// Match against a set of tag strings instead of test identity fields.
+    #[must_use]
+    pub fn matches_tags(&self, tags: &[String]) -> bool {
+        match self {
+            Self::Substring(s) => {
+                let needle = s.to_lowercase();
+                tags.iter().any(|t| t.to_lowercase().contains(&needle))
+            }
+            Self::And(a, b) => a.matches_tags(tags) && b.matches_tags(tags),
+            Self::Or(a, b) => a.matches_tags(tags) || b.matches_tags(tags),
+            Self::Not(inner) => !inner.matches_tags(tags),
+        }
+    }
+
     /// # Errors
     /// Returns `FilterError::Parse` if the expression is malformed.
     pub fn parse(input: &str) -> Result<Self, FilterError> {
@@ -256,13 +271,22 @@ impl FilterExpr {
 impl TestFilter {
     /// # Errors
     /// Returns `FilterError` if any path spec or filter expression is invalid.
-    pub fn from_args(paths: &[String], filter: Option<&str>) -> Result<Self, FilterError> {
+    pub fn from_args(
+        paths: &[String],
+        filter: Option<&str>,
+        markers: Option<&str>,
+    ) -> Result<Self, FilterError> {
         let path_specs = paths
             .iter()
             .map(|s| PathSpec::parse(s))
             .collect::<Result<Vec<_>, _>>()?;
         let expr = filter.map(FilterExpr::parse).transpose()?;
-        Ok(Self { path_specs, expr })
+        let marker_expr = markers.map(FilterExpr::parse).transpose()?;
+        Ok(Self {
+            path_specs,
+            expr,
+            marker_expr,
+        })
     }
 
     #[must_use]
@@ -270,7 +294,11 @@ impl TestFilter {
         let path_ok =
             self.path_specs.is_empty() || self.path_specs.iter().any(|spec| spec.matches(test));
         let expr_ok = self.expr.as_ref().is_none_or(|expr| expr.matches(test));
-        path_ok && expr_ok
+        let marker_ok = self
+            .marker_expr
+            .as_ref()
+            .is_none_or(|expr| expr.matches_tags(&test.tags));
+        path_ok && expr_ok && marker_ok
     }
 
     #[must_use]
@@ -283,7 +311,7 @@ impl TestFilter {
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.path_specs.is_empty() && self.expr.is_none()
+        self.path_specs.is_empty() && self.expr.is_none() && self.marker_expr.is_none()
     }
 }
 
@@ -299,6 +327,7 @@ mod tests {
             line_number: Some(line),
             display_name: None,
             expected_assertions: vec![],
+            ..Default::default()
         }
     }
 
@@ -502,29 +531,32 @@ mod tests {
 
     #[test]
     fn filter_from_args_empty() {
-        let filter = TestFilter::from_args(&[], None).unwrap();
+        let filter = TestFilter::from_args(&[], None, None).unwrap();
         assert!(filter.is_empty());
     }
 
     #[test]
     fn filter_from_args_with_paths() {
-        let filter = TestFilter::from_args(&["tests/math.py".into()], None).unwrap();
+        let filter = TestFilter::from_args(&["tests/math.py".into()], None, None).unwrap();
         assert_eq!(filter.path_specs.len(), 1);
         assert!(filter.expr.is_none());
     }
 
     #[test]
     fn filter_from_args_with_expr() {
-        let filter = TestFilter::from_args(&[], Some("test_add")).unwrap();
+        let filter = TestFilter::from_args(&[], Some("test_add"), None).unwrap();
         assert!(filter.path_specs.is_empty());
         assert!(filter.expr.is_some());
     }
 
     #[test]
     fn filter_apply_paths_union() {
-        let filter =
-            TestFilter::from_args(&["tests/math.py".into(), "tests/utils.py".into()], None)
-                .unwrap();
+        let filter = TestFilter::from_args(
+            &["tests/math.py".into(), "tests/utils.py".into()],
+            None,
+            None,
+        )
+        .unwrap();
         let tests = vec![
             make_test("test_add", "tests/math.py", 10),
             make_test("test_helper", "tests/utils.py", 5),
@@ -536,7 +568,7 @@ mod tests {
 
     #[test]
     fn filter_apply_expr() {
-        let filter = TestFilter::from_args(&[], Some("add")).unwrap();
+        let filter = TestFilter::from_args(&[], Some("add"), None).unwrap();
         let tests = vec![
             make_test("test_add", "tests/math.py", 10),
             make_test("test_sub", "tests/math.py", 20),
@@ -548,7 +580,7 @@ mod tests {
 
     #[test]
     fn filter_apply_path_and_expr_intersect() {
-        let filter = TestFilter::from_args(&["tests/math.py".into()], Some("add")).unwrap();
+        let filter = TestFilter::from_args(&["tests/math.py".into()], Some("add"), None).unwrap();
         let tests = vec![
             make_test("test_add", "tests/math.py", 10),
             make_test("test_sub", "tests/math.py", 20),
@@ -565,7 +597,7 @@ mod tests {
 
     #[test]
     fn filter_empty_passes_all() {
-        let filter = TestFilter::from_args(&[], None).unwrap();
+        let filter = TestFilter::from_args(&[], None, None).unwrap();
         let tests = vec![
             make_test("test_add", "tests/math.py", 10),
             make_test("test_sub", "tests/math.py", 20),
@@ -598,7 +630,58 @@ mod tests {
             line_number: None,
             display_name: None,
             expected_assertions: vec![],
+            ..Default::default()
         };
         assert!(!spec.matches(&test));
+    }
+
+    // --- matches_tags tests ---
+
+    #[test]
+    fn matches_tags_substring() {
+        let expr = FilterExpr::Substring("slow".into());
+        assert!(expr.matches_tags(&["slow".into(), "db".into()]));
+        assert!(!expr.matches_tags(&["fast".into()]));
+    }
+
+    #[test]
+    fn matches_tags_case_insensitive() {
+        let expr = FilterExpr::Substring("SLOW".into());
+        assert!(expr.matches_tags(&["slow".into()]));
+    }
+
+    #[test]
+    fn matches_tags_and() {
+        let expr = FilterExpr::And(
+            Box::new(FilterExpr::Substring("slow".into())),
+            Box::new(FilterExpr::Substring("db".into())),
+        );
+        assert!(expr.matches_tags(&["slow".into(), "db".into()]));
+        assert!(!expr.matches_tags(&["slow".into()]));
+    }
+
+    #[test]
+    fn matches_tags_not() {
+        let expr = FilterExpr::Not(Box::new(FilterExpr::Substring("slow".into())));
+        assert!(expr.matches_tags(&["fast".into()]));
+        assert!(!expr.matches_tags(&["slow".into()]));
+    }
+
+    #[test]
+    fn filter_with_markers_restricts_by_tags() {
+        let filter = TestFilter::from_args(&[], None, Some("slow")).unwrap();
+        let mut t1 = make_test("test_a", "tests/a.py", 1);
+        t1.tags = vec!["slow".into()];
+        let mut t2 = make_test("test_b", "tests/b.py", 1);
+        t2.tags = vec!["fast".into()];
+        let filtered = filter.apply(vec![t1, t2]);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "test_a");
+    }
+
+    #[test]
+    fn filter_with_markers_is_not_empty() {
+        let filter = TestFilter::from_args(&[], None, Some("slow")).unwrap();
+        assert!(!filter.is_empty());
     }
 }

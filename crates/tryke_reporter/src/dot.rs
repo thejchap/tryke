@@ -60,6 +60,9 @@ impl<W: io::Write> Reporter for DotReporter<W> {
             TestOutcome::Failed { .. } => "F".red().to_string(),
             TestOutcome::Skipped { .. } => "s".yellow().dimmed().to_string(),
             TestOutcome::Error { .. } => "E".red().to_string(),
+            TestOutcome::XFailed { .. } => "x".yellow().dimmed().to_string(),
+            TestOutcome::XPassed => "X".red().to_string(),
+            TestOutcome::Todo { .. } => "T".cyan().dimmed().to_string(),
         };
         let _ = write!(self.writer, "{ch}");
         let _ = self.writer.flush();
@@ -93,7 +96,25 @@ impl<W: io::Write> Reporter for DotReporter<W> {
             );
         }
 
-        let total = summary.passed + summary.failed + summary.skipped + summary.errors;
+        if summary.xfailed > 0 {
+            let _ = writeln!(
+                self.writer,
+                " {} {}",
+                summary.xfailed.dimmed(),
+                "xfail".dimmed()
+            );
+        }
+
+        if summary.todo > 0 {
+            let _ = writeln!(self.writer, " {} {}", summary.todo.cyan(), "todo".cyan());
+        }
+
+        let total = summary.passed
+            + summary.failed
+            + summary.skipped
+            + summary.errors
+            + summary.xfailed
+            + summary.todo;
         let _ = writeln!(
             self.writer,
             "Ran {} tests. [{}]",
@@ -123,10 +144,7 @@ mod tests {
         TestItem {
             name: name.into(),
             module_path: "tests.mod".into(),
-            file_path: None,
-            line_number: None,
-            display_name: None,
-            expected_assertions: vec![],
+            ..Default::default()
         }
     }
 
@@ -181,6 +199,8 @@ mod tests {
             failed: 1,
             skipped: 2,
             errors: 0,
+            xfailed: 0,
+            todo: 0,
             duration: Duration::from_millis(100),
         });
         let out = output(&r);
@@ -208,6 +228,8 @@ mod tests {
             failed: 0,
             skipped: 0,
             errors: 0,
+            xfailed: 0,
+            todo: 0,
             duration: Duration::from_millis(10),
         });
 

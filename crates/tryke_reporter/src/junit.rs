@@ -61,7 +61,12 @@ impl<W: io::Write> Reporter for JUnitReporter<W> {
     }
 
     fn on_run_complete(&mut self, summary: &RunSummary) {
-        let total = summary.passed + summary.failed + summary.skipped + summary.errors;
+        let total = summary.passed
+            + summary.failed
+            + summary.skipped
+            + summary.errors
+            + summary.xfailed
+            + summary.todo;
         let suite_time = summary.duration.as_secs_f64();
 
         let _ = writeln!(self.writer, r#"<?xml version="1.0" encoding="UTF-8"?>"#);
@@ -98,7 +103,9 @@ impl<W: io::Write> Reporter for JUnitReporter<W> {
                     let _ = writeln!(self.writer, r#"    <failure message="{msg}"/>"#);
                     let _ = writeln!(self.writer, "  </testcase>");
                 }
-                TestOutcome::Skipped { .. } => {
+                TestOutcome::Skipped { .. }
+                | TestOutcome::XFailed { .. }
+                | TestOutcome::Todo { .. } => {
                     let _ = writeln!(
                         self.writer,
                         r#"  <testcase name="{name}" classname="{classname}" time="{time:.3}">"#,
@@ -113,6 +120,14 @@ impl<W: io::Write> Reporter for JUnitReporter<W> {
                         r#"  <testcase name="{name}" classname="{classname}" time="{time:.3}">"#,
                     );
                     let _ = writeln!(self.writer, r#"    <error message="{msg}"/>"#);
+                    let _ = writeln!(self.writer, "  </testcase>");
+                }
+                TestOutcome::XPassed => {
+                    let _ = writeln!(
+                        self.writer,
+                        r#"  <testcase name="{name}" classname="{classname}" time="{time:.3}">"#,
+                    );
+                    let _ = writeln!(self.writer, r#"    <failure message="unexpected pass"/>"#);
                     let _ = writeln!(self.writer, "  </testcase>");
                 }
             }
@@ -142,10 +157,7 @@ mod tests {
         TestItem {
             name: name.into(),
             module_path: module_path.into(),
-            file_path: None,
-            line_number: None,
-            display_name: None,
-            expected_assertions: vec![],
+            ..Default::default()
         }
     }
 
@@ -180,6 +192,8 @@ mod tests {
             failed: 1,
             skipped: 1,
             errors: 0,
+            xfailed: 0,
+            todo: 0,
             duration: Duration::from_millis(15),
         });
     }
@@ -244,6 +258,8 @@ mod tests {
             failed: 1,
             skipped: 0,
             errors: 0,
+            xfailed: 0,
+            todo: 0,
             duration: Duration::from_millis(1),
         });
         assert!(output(&r).contains("a &amp; b"));

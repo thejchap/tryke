@@ -28,6 +28,8 @@ pub struct RpcErrorDetail {
 pub struct RunTestParams {
     pub module: String,
     pub function: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub xfail: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -57,6 +59,27 @@ pub enum RunTestResultWire {
         duration_ms: u64,
         #[serde(default)]
         reason: Option<String>,
+        stdout: String,
+        stderr: String,
+    },
+    #[serde(rename = "xfailed")]
+    XFailed {
+        duration_ms: u64,
+        #[serde(default)]
+        reason: Option<String>,
+        stdout: String,
+        stderr: String,
+    },
+    #[serde(rename = "xpassed")]
+    XPassed {
+        duration_ms: u64,
+        stdout: String,
+        stderr: String,
+    },
+    Todo {
+        duration_ms: u64,
+        #[serde(default)]
+        description: Option<String>,
         stdout: String,
         stderr: String,
     },

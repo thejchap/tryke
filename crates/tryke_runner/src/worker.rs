@@ -88,6 +88,7 @@ impl WorkerProcess {
         let params = serde_json::to_value(RunTestParams {
             module: test.module_path.clone(),
             function: test.name.clone(),
+            xfail: test.xfail.clone(),
         })?;
         let wire: RunTestResultWire = self.call("run_test", Some(params)).await?;
         Ok(convert_result(test.clone(), wire))
@@ -230,6 +231,41 @@ fn convert_result(test: TestItem, wire: RunTestResultWire) -> TestResult {
             stdout,
             stderr,
         },
+        RunTestResultWire::XFailed {
+            duration_ms,
+            reason,
+            stdout,
+            stderr,
+        } => TestResult {
+            test,
+            outcome: TestOutcome::XFailed { reason },
+            duration: Duration::from_millis(duration_ms),
+            stdout,
+            stderr,
+        },
+        RunTestResultWire::XPassed {
+            duration_ms,
+            stdout,
+            stderr,
+        } => TestResult {
+            test,
+            outcome: TestOutcome::XPassed,
+            duration: Duration::from_millis(duration_ms),
+            stdout,
+            stderr,
+        },
+        RunTestResultWire::Todo {
+            duration_ms,
+            description,
+            stdout,
+            stderr,
+        } => TestResult {
+            test,
+            outcome: TestOutcome::Todo { description },
+            duration: Duration::from_millis(duration_ms),
+            stdout,
+            stderr,
+        },
     }
 }
 
@@ -247,6 +283,7 @@ mod tests {
             line_number: Some(5),
             display_name: None,
             expected_assertions: vec![],
+            ..Default::default()
         }
     }
 

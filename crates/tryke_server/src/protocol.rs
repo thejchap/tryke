@@ -22,6 +22,7 @@ pub struct RunParams {
     pub tests: Option<Vec<String>>,
     pub filter: Option<String>,
     pub paths: Option<Vec<String>>,
+    pub markers: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

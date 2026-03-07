@@ -63,14 +63,25 @@ def _dispatch(method: str, params: dict, modules: dict[str, object]) -> object:
     if method == "ping":
         return "pong"
     if method == "run_test":
-        return _run_test(params["module"], params["function"], modules)
+        return _run_test(
+            params["module"],
+            params["function"],
+            modules,
+            xfail=params.get("xfail"),
+        )
     if method == "reload":
         return _reload(params.get("modules", []), modules)
     msg = f"unknown method: {method}"
     raise ValueError(msg)
 
 
-def _run_test(module_name: str, function_name: str, modules: dict[str, object]) -> dict:
+def _run_test(  # noqa: C901, PLR0911, PLR0912
+    module_name: str,
+    function_name: str,
+    modules: dict[str, object],
+    *,
+    xfail: str | None = None,
+) -> dict:
     if module_name not in modules:
         mod = importlib.import_module(module_name)
         modules[module_name] = mod
@@ -78,6 +89,29 @@ def _run_test(module_name: str, function_name: str, modules: dict[str, object]) 
         mod = modules[module_name]
 
     fn = getattr(mod, function_name)
+
+    # Runtime skip/todo checks (handles skip_if resolved at import time)
+    if hasattr(fn, "__tryke_skip__"):
+        return {
+            "outcome": "skipped",
+            "reason": fn.__tryke_skip__,
+            "duration_ms": 0,
+            "stdout": "",
+            "stderr": "",
+        }
+
+    if hasattr(fn, "__tryke_todo__"):
+        return {
+            "outcome": "todo",
+            "description": fn.__tryke_todo__,
+            "duration_ms": 0,
+            "stdout": "",
+            "stderr": "",
+        }
+
+    # Determine if xfail — from wire param or runtime attribute
+    is_xfail = xfail is not None or hasattr(fn, "__tryke_xfail__")
+    xfail_reason = xfail if xfail is not None else getattr(fn, "__tryke_xfail__", None)
 
     stdout_buf = io.StringIO()
     stderr_buf = io.StringIO()
@@ -93,6 +127,14 @@ def _run_test(module_name: str, function_name: str, modules: dict[str, object]) 
             fn()
         if ctx.failures:
             duration_ms = int((time.monotonic() - start) * 1000)
+            if is_xfail:
+                return {
+                    "outcome": "xfailed",
+                    "reason": xfail_reason or None,
+                    "duration_ms": duration_ms,
+                    "stdout": stdout_buf.getvalue(),
+                    "stderr": stderr_buf.getvalue(),
+                }
             assertions = _extract_soft_failures(ctx.failures)
             return {
                 "outcome": "failed",
@@ -104,6 +146,14 @@ def _run_test(module_name: str, function_name: str, modules: dict[str, object]) 
                 "stderr": stderr_buf.getvalue(),
             }
         duration_ms = int((time.monotonic() - start) * 1000)
+        if is_xfail:
+            # Test passed but was expected to fail → xpassed (hard failure)
+            return {
+                "outcome": "xpassed",
+                "duration_ms": duration_ms,
+                "stdout": stdout_buf.getvalue(),
+                "stderr": stderr_buf.getvalue(),
+            }
         return {
             "outcome": "passed",
             "duration_ms": duration_ms,
@@ -120,8 +170,16 @@ def _run_test(module_name: str, function_name: str, modules: dict[str, object]) 
             "stderr": stderr_buf.getvalue(),
         }
     except ExpectationError as exc:
-        # .fatal() raised — include it plus any prior soft failures
         duration_ms = int((time.monotonic() - start) * 1000)
+        if is_xfail:
+            return {
+                "outcome": "xfailed",
+                "reason": xfail_reason or None,
+                "duration_ms": duration_ms,
+                "stdout": stdout_buf.getvalue(),
+                "stderr": stderr_buf.getvalue(),
+            }
+        # .fatal() raised — include it plus any prior soft failures
         assertions = _extract_soft_failures(ctx.failures)
         assertions.append(_extract_single(exc))
         return {
@@ -135,6 +193,14 @@ def _run_test(module_name: str, function_name: str, modules: dict[str, object]) 
         }
     except AssertionError as exc:
         duration_ms = int((time.monotonic() - start) * 1000)
+        if is_xfail:
+            return {
+                "outcome": "xfailed",
+                "reason": xfail_reason or None,
+                "duration_ms": duration_ms,
+                "stdout": stdout_buf.getvalue(),
+                "stderr": stderr_buf.getvalue(),
+            }
         assertions = _extract_assertions(exc)
         return {
             "outcome": "failed",
@@ -147,6 +213,14 @@ def _run_test(module_name: str, function_name: str, modules: dict[str, object]) 
         }
     except Exception as exc:  # noqa: BLE001
         duration_ms = int((time.monotonic() - start) * 1000)
+        if is_xfail:
+            return {
+                "outcome": "xfailed",
+                "reason": xfail_reason or None,
+                "duration_ms": duration_ms,
+                "stdout": stdout_buf.getvalue(),
+                "stderr": stderr_buf.getvalue(),
+            }
         return {
             "outcome": "failed",
             "message": f"{type(exc).__name__}: {exc}",

@@ -11,15 +11,22 @@ pub struct Client {
     port: u16,
     filter: Option<String>,
     paths: Vec<String>,
+    markers: Option<String>,
 }
 
 impl Client {
     #[must_use]
-    pub fn new(port: u16, filter: Option<String>, paths: Vec<String>) -> Self {
+    pub fn new(
+        port: u16,
+        filter: Option<String>,
+        paths: Vec<String>,
+        markers: Option<String>,
+    ) -> Self {
         Self {
             port,
             filter,
             paths,
+            markers,
         }
     }
 
@@ -34,7 +41,7 @@ impl Client {
             "jsonrpc": "2.0",
             "id": 1,
             "method": "run",
-            "params": { "root": root, "filter": self.filter, "paths": self.paths }
+            "params": { "root": root, "filter": self.filter, "paths": self.paths, "markers": self.markers }
         });
         writer.write_all(serde_json::to_vec(&req)?.as_slice())?;
         writer.write_all(b"\n")?;
@@ -144,7 +151,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let mut reporter = RecordingReporter::new();
-        Client::new(port, None, vec![])
+        Client::new(port, None, vec![], None)
             .run(dir.path(), &mut reporter)
             .unwrap();
 
@@ -157,7 +164,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut reporter = RecordingReporter::new();
         // port 1 is privileged and never has a server
-        let result = Client::new(1, None, vec![]).run(dir.path(), &mut reporter);
+        let result = Client::new(1, None, vec![], None).run(dir.path(), &mut reporter);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("no server running on port") || !msg.is_empty());

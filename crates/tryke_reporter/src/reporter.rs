@@ -54,18 +54,12 @@ mod tests {
             TestItem {
                 name: "test_add".into(),
                 module_path: "tests.math".into(),
-                file_path: None,
-                line_number: None,
-                display_name: None,
-                expected_assertions: vec![],
+                ..Default::default()
             },
             TestItem {
                 name: "test_sub".into(),
                 module_path: "tests.math".into(),
-                file_path: None,
-                line_number: None,
-                display_name: None,
-                expected_assertions: vec![],
+                ..Default::default()
             },
         ];
 
@@ -99,6 +93,8 @@ mod tests {
             failed: 1,
             skipped: 0,
             errors: 0,
+            xfailed: 0,
+            todo: 0,
             duration: Duration::from_millis(15),
         });
 

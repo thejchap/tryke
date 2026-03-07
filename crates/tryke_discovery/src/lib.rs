@@ -160,16 +160,124 @@ fn is_locally_defined(name: &str, body: &[Stmt]) -> bool {
     })
 }
 
+const MARKER_ATTRS: &[&str] = &["skip", "todo", "xfail", "skip_if"];
+
+/// Recognises bare `test` / `tryke.test` plus the marker attribute forms
+/// (`test.skip`, `test.xfail`, …) and their call wrappers.
 fn is_tryke_test_decorator(expr: &Expr, body: &[Stmt]) -> bool {
     match expr {
+        // tryke.test
+        Expr::Attribute(a) if a.attr.id.as_str() == "test" => {
+            matches!(&*a.value, Expr::Name(n) if n.id.as_str() == "tryke")
+        }
+        // test.skip, test.todo, test.xfail, test.skip_if
+        Expr::Attribute(a) if MARKER_ATTRS.contains(&a.attr.id.as_str()) => {
+            is_bare_test_or_qualified(&a.value, body)
+        }
+        // bare test
+        Expr::Name(n) => n.id.as_str() == "test" && !is_locally_defined("test", body),
+        // call wrapper: @test(), @test.skip("reason"), @test("name"), etc.
+        Expr::Call(c) => is_tryke_test_decorator(&c.func, body),
+        _ => false,
+    }
+}
+
+/// Returns true for `test` (Name) or `tryke.test` (Attribute).
+fn is_bare_test_or_qualified(expr: &Expr, body: &[Stmt]) -> bool {
+    match expr {
+        Expr::Name(n) => n.id.as_str() == "test" && !is_locally_defined("test", body),
         Expr::Attribute(a) => {
             a.attr.id.as_str() == "test"
                 && matches!(&*a.value, Expr::Name(n) if n.id.as_str() == "tryke")
         }
-        Expr::Name(n) => n.id.as_str() == "test" && !is_locally_defined("test", body),
-        Expr::Call(c) => is_tryke_test_decorator(&c.func, body),
         _ => false,
     }
+}
+
+/// What kind of lifecycle modifier is on the `@test` decorator?
+#[derive(Debug, Clone, PartialEq)]
+pub enum TestModifier {
+    None,
+    Skip(String),
+    Todo(String),
+    Xfail(String),
+    SkipIf,
+}
+
+/// Walk through Call / Attribute layers to extract the modifier.
+/// - `@test`              → None
+/// - `@test.skip`         → Skip("")
+/// - `@test.skip("r")`    → Skip("r")
+fn extract_test_modifier(expr: &Expr) -> TestModifier {
+    match expr {
+        Expr::Attribute(a) if MARKER_ATTRS.contains(&a.attr.id.as_str()) => {
+            match a.attr.id.as_str() {
+                "skip" => TestModifier::Skip(String::new()),
+                "todo" => TestModifier::Todo(String::new()),
+                "xfail" => TestModifier::Xfail(String::new()),
+                "skip_if" => TestModifier::SkipIf,
+                _ => TestModifier::None,
+            }
+        }
+        Expr::Attribute(a) if a.attr.id.as_str() == "test" => TestModifier::None,
+        Expr::Call(c) => {
+            let base = extract_test_modifier(&c.func);
+            match base {
+                TestModifier::Skip(_) => TestModifier::Skip(extract_first_string_arg(c)),
+                TestModifier::Todo(_) => TestModifier::Todo(extract_first_string_arg(c)),
+                TestModifier::Xfail(_) => TestModifier::Xfail(extract_first_string_arg(c)),
+                // @test("name") or @test(name="foo") — still plain
+                TestModifier::None => TestModifier::None,
+                other @ TestModifier::SkipIf => other,
+            }
+        }
+        _ => TestModifier::None,
+    }
+}
+
+/// Extract the first positional string arg or `reason=`/`description=` kwarg.
+fn extract_first_string_arg(call: &ruff_python_ast::ExprCall) -> String {
+    for kw in &call.arguments.keywords {
+        if let Some(k) = kw.arg.as_ref() {
+            let key = k.id.as_str();
+            if (key == "reason" || key == "description")
+                && let Expr::StringLiteral(s) = &kw.value
+            {
+                return s.value.to_str().to_owned();
+            }
+        }
+    }
+    if let Some(first) = call.arguments.args.first()
+        && let Expr::StringLiteral(s) = first
+    {
+        return s.value.to_str().to_owned();
+    }
+    String::new()
+}
+
+/// Extract `tags=[...]` kwarg from any call-form decorator.
+fn extract_decorator_tags(expr: &Expr) -> Vec<String> {
+    let Expr::Call(call) = expr else {
+        return vec![];
+    };
+    for kw in &call.arguments.keywords {
+        if kw.arg.as_ref().is_some_and(|k| k.id.as_str() == "tags")
+            && let Expr::List(list) = &kw.value
+        {
+            return list
+                .elts
+                .iter()
+                .filter_map(|e| {
+                    if let Expr::StringLiteral(s) = e {
+                        Some(s.value.to_str().to_owned())
+                    } else {
+                        Option::None
+                    }
+                })
+                .collect();
+        }
+    }
+    vec![]
 }
 
 fn extract_decorator_name(expr: &Expr) -> Option<String> {
@@ -395,17 +503,21 @@ pub(crate) fn parse_tests_from_source(root: &Path, file: &Path, source: &str) ->
     body.iter()
         .filter_map(|stmt| {
             if let Stmt::FunctionDef(func) = stmt
-                && func
-                    .decorator_list
-                    .iter()
-                    .any(|d| is_tryke_test_decorator(&d.expression, body))
-            {
-                let display_name = func
+                && let Some(dec) = func
                     .decorator_list
                     .iter()
                     .find(|d| is_tryke_test_decorator(&d.expression, body))
-                    .and_then(|d| extract_decorator_name(&d.expression))
+            {
+                let display_name = extract_decorator_name(&dec.expression)
                     .or_else(|| extract_docstring(&func.body));
+                let modifier = extract_test_modifier(&dec.expression);
+                let tags = extract_decorator_tags(&dec.expression);
+                let (skip, todo, xfail) = match modifier {
+                    TestModifier::Skip(r) => (Some(r), None, None),
+                    TestModifier::Todo(d) => (None, Some(d), None),
+                    TestModifier::Xfail(r) => (None, None, Some(r)),
+                    TestModifier::SkipIf | TestModifier::None => (None, None, None),
+                };
                 Some(TestItem {
                     name: func.name.id.as_str().to_owned(),
                     module_path: path_to_module(root, file),
@@ -418,6 +530,10 @@ pub(crate) fn parse_tests_from_source(root: &Path, file: &Path, source: &str) ->
                         source,
                         &line_index,
                     ),
+                    skip,
+                    todo,
+                    xfail,
+                    tags,
                 })
             } else {
                 None
@@ -996,5 +1112,123 @@ def test_fn():
         assert_eq!(a.subject, "x");
         assert_eq!(a.matcher, "to_be_none");
         assert!(a.negated);
+    }
+
+    // --- test.skip / test.todo / test.xfail decorator recognition ---
+
+    #[test]
+    fn recognizes_test_skip_bare() {
+        let source = "@test.skip\ndef test_fn(): pass\n";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].skip.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn recognizes_test_skip_with_reason() {
+        let source = "@test.skip(\"broken\")\ndef test_fn(): pass\n";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].skip.as_deref(), Some("broken"));
+    }
+
+    #[test]
+    fn recognizes_test_skip_reason_kwarg() {
+        let source = "@test.skip(reason=\"broken\")\ndef test_fn(): pass\n";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items[0].skip.as_deref(), Some("broken"));
+    }
+
+    #[test]
+    fn recognizes_test_todo_bare() {
+        let source = "@test.todo\ndef test_fn(): pass\n";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].todo.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn recognizes_test_todo_with_description() {
+        let source = "@test.todo(\"need caching\")\ndef test_fn(): pass\n";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items[0].todo.as_deref(), Some("need caching"));
+    }
+
+    #[test]
+    fn recognizes_test_xfail_bare() {
+        let source = "@test.xfail\ndef test_fn(): pass\n";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].xfail.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn recognizes_test_xfail_with_reason() {
+        let source = "@test.xfail(\"upstream bug\")\ndef test_fn(): pass\n";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items[0].xfail.as_deref(), Some("upstream bug"));
+    }
+
+    #[test]
+    fn recognizes_qualified_test_skip() {
+        let source = "import tryke\n@tryke.test.skip(\"broken\")\ndef test_fn(): pass\n";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].skip.as_deref(), Some("broken"));
+    }
+
+    #[test]
+    fn recognizes_test_skip_if() {
+        let source = "@test.skip_if(True, reason=\"always\")\ndef test_fn(): pass\n";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items.len(), 1);
+        // skip_if cannot be resolved statically
+        assert!(items[0].skip.is_none());
+    }
+
+    #[test]
+    fn extracts_tags_from_test_decorator() {
+        let source = "@test(tags=[\"slow\", \"network\"])\ndef test_fn(): pass\n";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].tags, vec!["slow", "network"]);
+    }
+
+    #[test]
+    fn extracts_tags_from_skip_decorator() {
+        let source = "@test.skip(\"broken\", tags=[\"admin\"])\ndef test_fn(): pass\n";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].tags, vec!["admin"]);
+        assert_eq!(items[0].skip.as_deref(), Some("broken"));
+    }
+
+    #[test]
+    fn no_tags_by_default() {
+        let source = "@test\ndef test_fn(): pass\n";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert!(items[0].tags.is_empty());
+    }
+
+    #[test]
+    fn plain_test_has_no_modifiers() {
+        let source = "@test\ndef test_fn(): pass\n";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert!(items[0].skip.is_none());
+        assert!(items[0].todo.is_none());
+        assert!(items[0].xfail.is_none());
     }
 }

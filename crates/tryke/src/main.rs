@@ -46,6 +46,9 @@ enum Commands {
         /// Filter expression (e.g. "math and not slow")
         #[arg(short = 'k', long = "filter")]
         filter: Option<String>,
+        /// Tag/marker filter expression (e.g. "slow and not network")
+        #[arg(short = 'm', long = "markers")]
+        markers: Option<String>,
         #[arg(long = "reporter", default_value = "text")]
         reporter: ReporterFormat,
         #[arg(long)]
@@ -55,15 +58,30 @@ enum Commands {
         /// Run only tests affected by files changed since HEAD (requires git)
         #[arg(long)]
         changed: bool,
+        /// Stop after first failure
+        #[arg(short = 'x', long = "fail-fast")]
+        fail_fast: bool,
+        /// Stop after N failures
+        #[arg(long)]
+        maxfail: Option<usize>,
     },
     Watch {
         /// Filter expression (e.g. "math and not slow")
         #[arg(short = 'k', long = "filter")]
         filter: Option<String>,
+        /// Tag/marker filter expression (e.g. "slow and not network")
+        #[arg(short = 'm', long = "markers")]
+        markers: Option<String>,
         #[arg(long = "reporter", default_value = "text")]
         reporter: ReporterFormat,
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Stop after first failure
+        #[arg(short = 'x', long = "fail-fast")]
+        fail_fast: bool,
+        /// Stop after N failures
+        #[arg(long)]
+        maxfail: Option<usize>,
     },
     Server {
         #[arg(long, default_value = "2337")]
@@ -113,11 +131,12 @@ async fn run_tests(
     reporter: &mut dyn Reporter,
     root: &Path,
     tests: Vec<tryke_types::TestItem>,
+    maxfail: Option<usize>,
 ) -> Result<()> {
     let python = resolve_python(root);
     let pool = WorkerPool::new(worker_pool_size(), &python, root);
     pool.warm().await;
-    report_cycle(reporter, tests, &pool).await?;
+    report_cycle(reporter, tests, &pool, maxfail).await?;
     pool.shutdown();
     Ok(())
 }
@@ -126,6 +145,7 @@ async fn report_cycle(
     reporter: &mut dyn Reporter,
     tests: Vec<tryke_types::TestItem>,
     pool: &WorkerPool,
+    maxfail: Option<usize>,
 ) -> Result<()> {
     let start = Instant::now();
     reporter.on_run_start(&tests);
@@ -134,16 +154,52 @@ async fn report_cycle(
     let mut failed = 0usize;
     let mut skipped = 0usize;
     let mut errors = 0usize;
+    let mut xfailed = 0usize;
+    let mut todo = 0usize;
 
-    let mut stream = pool.run(tests);
+    // Short-circuit skip/todo tests — no worker needed
+    let (run_tests, shortcircuit): (Vec<_>, Vec<_>) = tests
+        .into_iter()
+        .partition(|t| t.skip.is_none() && t.todo.is_none());
+
+    for t in shortcircuit {
+        let outcome = if t.todo.is_some() {
+            todo += 1;
+            TestOutcome::Todo {
+                description: t.todo.clone(),
+            }
+        } else {
+            skipped += 1;
+            TestOutcome::Skipped {
+                reason: t.skip.clone(),
+            }
+        };
+        let result = tryke_types::TestResult {
+            test: t,
+            outcome,
+            duration: std::time::Duration::ZERO,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        reporter.on_test_complete(&result);
+    }
+
+    let mut stream = pool.run(run_tests);
     while let Some(result) = stream.next().await {
         match &result.outcome {
             TestOutcome::Passed => passed += 1,
-            TestOutcome::Failed { .. } => failed += 1,
+            TestOutcome::Failed { .. } | TestOutcome::XPassed => failed += 1,
             TestOutcome::Skipped { .. } => skipped += 1,
             TestOutcome::Error { .. } => errors += 1,
+            TestOutcome::XFailed { .. } => xfailed += 1,
+            TestOutcome::Todo { .. } => todo += 1,
         }
         reporter.on_test_complete(&result);
+        if let Some(max) = maxfail
+            && failed >= max
+        {
+            break;
+        }
     }
 
     reporter.on_run_complete(&RunSummary {
@@ -151,6 +207,8 @@ async fn report_cycle(
         failed,
         skipped,
         errors,
+        xfailed,
+        todo,
         duration: start.elapsed(),
     });
 
@@ -168,6 +226,7 @@ async fn run_watch(
     reporter: &mut dyn Reporter,
     root: Option<&Path>,
     test_filter: &TestFilter,
+    maxfail: Option<usize>,
 ) -> Result<()> {
     let cwd = env::current_dir()?;
     let root = root.unwrap_or(&cwd);
@@ -179,7 +238,7 @@ async fn run_watch(
 
     clear_if_tty();
     let tests = test_filter.apply(discoverer.rediscover());
-    report_cycle(reporter, tests, &pool).await?;
+    report_cycle(reporter, tests, &pool, maxfail).await?;
 
     let (tx, rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
     let _debouncer = tryke_server::watcher::spawn_watcher(root, tx)?;
@@ -192,7 +251,7 @@ async fn run_watch(
         discoverer.rediscover_changed(&paths);
         clear_if_tty();
         let tests = test_filter.apply(discoverer.tests_for_changed(&paths));
-        report_cycle(reporter, tests, &pool).await?;
+        report_cycle(reporter, tests, &pool, maxfail).await?;
     }
 
     pool.shutdown();
@@ -287,22 +346,31 @@ fn main() -> Result<()> {
             paths,
             collect_only,
             filter,
+            markers,
             reporter,
             root,
             port,
             changed,
+            fail_fast,
+            maxfail,
         } => {
+            let resolved_maxfail = if *fail_fast { Some(1) } else { *maxfail };
             let mut rep = build_reporter(reporter, verbosity);
             if let Some(p) = port {
                 let root_path = root.clone().unwrap_or(env::current_dir()?);
-                return tryke_server::Client::new(*p, filter.clone(), paths.clone())
-                    .run(&root_path, &mut *rep);
+                return tryke_server::Client::new(
+                    *p,
+                    filter.clone(),
+                    paths.clone(),
+                    markers.clone(),
+                )
+                .run(&root_path, &mut *rep);
             }
 
             let cwd = env::current_dir()?;
             let root_path = root.as_deref().unwrap_or(&cwd);
-            let test_filter =
-                TestFilter::from_args(paths, filter.as_deref()).map_err(|e| anyhow::anyhow!(e))?;
+            let test_filter = TestFilter::from_args(paths, filter.as_deref(), markers.as_deref())
+                .map_err(|e| anyhow::anyhow!(e))?;
 
             let tests = discover_tests(root_path, *changed);
             let tests = test_filter.apply(tests);
@@ -311,18 +379,27 @@ fn main() -> Result<()> {
                 rep.on_collect_complete(&tests);
                 Ok(())
             } else {
-                rt.block_on(run_tests(&mut *rep, root_path, tests))
+                rt.block_on(run_tests(&mut *rep, root_path, tests, resolved_maxfail))
             }
         }
         Commands::Watch {
             filter,
+            markers,
             reporter,
             root,
+            fail_fast,
+            maxfail,
         } => {
+            let resolved_maxfail = if *fail_fast { Some(1) } else { *maxfail };
             let mut rep = build_reporter(reporter, verbosity);
-            let test_filter =
-                TestFilter::from_args(&[], filter.as_deref()).map_err(|e| anyhow::anyhow!(e))?;
-            rt.block_on(run_watch(&mut *rep, root.as_deref(), &test_filter))
+            let test_filter = TestFilter::from_args(&[], filter.as_deref(), markers.as_deref())
+                .map_err(|e| anyhow::anyhow!(e))?;
+            rt.block_on(run_watch(
+                &mut *rep,
+                root.as_deref(),
+                &test_filter,
+                resolved_maxfail,
+            ))
         }
         Commands::Server { port, root } => {
             let root_path = root.clone().unwrap_or(env::current_dir()?);
@@ -371,7 +448,7 @@ mod tests {
         discoverer: &mut Discoverer,
         pool: &WorkerPool,
     ) -> Result<()> {
-        report_cycle(reporter, discoverer.rediscover(), pool).await
+        report_cycle(reporter, discoverer.rediscover(), pool, None).await
     }
 
     #[tokio::test]
@@ -379,7 +456,7 @@ mod tests {
         let mut reporter = TextReporter::new();
         let root = cwd();
         let tests = discover_tests(&root, false);
-        assert!(run_tests(&mut reporter, &root, tests).await.is_ok());
+        assert!(run_tests(&mut reporter, &root, tests, None).await.is_ok());
     }
 
     #[tokio::test]
@@ -387,7 +464,7 @@ mod tests {
         let mut reporter = JSONReporter::new();
         let root = cwd();
         let tests = discover_tests(&root, false);
-        assert!(run_tests(&mut reporter, &root, tests).await.is_ok());
+        assert!(run_tests(&mut reporter, &root, tests, None).await.is_ok());
     }
 
     #[tokio::test]
@@ -395,7 +472,7 @@ mod tests {
         let mut reporter = DotReporter::new();
         let root = cwd();
         let tests = discover_tests(&root, false);
-        assert!(run_tests(&mut reporter, &root, tests).await.is_ok());
+        assert!(run_tests(&mut reporter, &root, tests, None).await.is_ok());
     }
 
     #[tokio::test]
@@ -403,7 +480,7 @@ mod tests {
         let mut reporter = JUnitReporter::new();
         let root = cwd();
         let tests = discover_tests(&root, false);
-        assert!(run_tests(&mut reporter, &root, tests).await.is_ok());
+        assert!(run_tests(&mut reporter, &root, tests, None).await.is_ok());
     }
 
     #[test]
@@ -507,6 +584,7 @@ mod tests {
             line_number: Some(10),
             display_name: None,
             expected_assertions: vec![],
+            ..Default::default()
         };
         assert_eq!(item.id(), "tests/math.py::test_add");
     }
@@ -520,6 +598,7 @@ mod tests {
             line_number: None,
             display_name: None,
             expected_assertions: vec![],
+            ..Default::default()
         };
         assert_eq!(item.id(), "tests.math::test_add");
     }
@@ -534,6 +613,7 @@ mod tests {
                 line_number: None,
                 display_name: None,
                 expected_assertions: vec![],
+                ..Default::default()
             },
             TestItem {
                 name: "test_b".into(),
@@ -542,6 +622,7 @@ mod tests {
                 line_number: None,
                 display_name: None,
                 expected_assertions: vec![],
+                ..Default::default()
             },
             TestItem {
                 name: "test_a2".into(),
@@ -550,6 +631,7 @@ mod tests {
                 line_number: None,
                 display_name: None,
                 expected_assertions: vec![],
+                ..Default::default()
             },
         ];
         let groups = group_tests_by_file(tests);
@@ -708,7 +790,11 @@ mod tests {
         let mut reporter = TextReporter::new();
         // non-git directory → git_changed_files returns None → discover_tests runs all (0 here)
         let tests = discover_tests(dir.path(), true);
-        assert!(run_tests(&mut reporter, dir.path(), tests).await.is_ok());
+        assert!(
+            run_tests(&mut reporter, dir.path(), tests, None)
+                .await
+                .is_ok()
+        );
     }
 
     #[test]

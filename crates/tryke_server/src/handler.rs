@@ -166,7 +166,9 @@ pub async fn handle_request(
             };
 
             let paths = rp.paths.unwrap_or_default();
-            if let Ok(tf) = TestFilter::from_args(&paths, rp.filter.as_deref()) {
+            if let Ok(tf) =
+                TestFilter::from_args(&paths, rp.filter.as_deref(), rp.markers.as_deref())
+            {
                 tests = tf.apply(tests);
             }
 
@@ -184,13 +186,17 @@ pub async fn handle_request(
             let mut failed = 0usize;
             let mut skipped = 0usize;
             let mut errors = 0usize;
+            let mut xfailed = 0usize;
+            let mut todo = 0usize;
 
             while let Some(result) = stream.next().await {
                 match &result.outcome {
                     TestOutcome::Passed => passed += 1,
-                    TestOutcome::Failed { .. } => failed += 1,
+                    TestOutcome::Failed { .. } | TestOutcome::XPassed => failed += 1,
                     TestOutcome::Skipped { .. } => skipped += 1,
                     TestOutcome::Error { .. } => errors += 1,
+                    TestOutcome::XFailed { .. } => xfailed += 1,
+                    TestOutcome::Todo { .. } => todo += 1,
                 }
                 broadcast_notification(
                     bcast_tx,
@@ -206,6 +212,8 @@ pub async fn handle_request(
                 failed,
                 skipped,
                 errors,
+                xfailed,
+                todo,
                 duration: start.elapsed(),
             };
             broadcast_notification(

@@ -8,23 +8,119 @@ from typing import TYPE_CHECKING, overload
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-
-@overload
-def test(fn: Callable[[], None], /) -> Callable[[], None]: ...
-@overload
-def test(name: str, /) -> Callable[[Callable[[], None]], Callable[[], None]]: ...
-@overload
-def test(*, name: str) -> Callable[[Callable[[], None]], Callable[[], None]]: ...
+type _Fn = Callable[[], None]
+type _Decorator = Callable[[_Fn], _Fn]
 
 
-def test(fn=None, /, *, name=None):  # noqa: PT028, ARG001
-    if callable(fn):
-        return fn
+class _SkipMarker:
+    def __get__(self, obj: object, objtype: type | None = None) -> _SkipMarker:
+        return self
 
-    def decorator(f: Callable[[], None]) -> Callable[[], None]:
-        return f
+    def __call__(
+        self,
+        fn_or_reason: _Fn | str | None = None,
+        /,
+        *,
+        reason: str | None = None,
+        tags: list[str] | None = None,  # noqa: ARG002
+    ) -> _Fn | _Decorator:
+        if callable(fn_or_reason):
+            fn_or_reason.__tryke_skip__ = ""  # type: ignore[attr-defined]
+            return fn_or_reason
+        actual_reason = fn_or_reason or reason or ""
 
-    return decorator
+        def decorator(f: _Fn) -> _Fn:
+            f.__tryke_skip__ = actual_reason  # type: ignore[attr-defined]
+            return f
+
+        return decorator
+
+
+class _TodoMarker:
+    def __get__(self, obj: object, objtype: type | None = None) -> _TodoMarker:
+        return self
+
+    def __call__(
+        self,
+        fn_or_desc: _Fn | str | None = None,
+        /,
+        *,
+        description: str | None = None,
+        tags: list[str] | None = None,  # noqa: ARG002
+    ) -> _Fn | _Decorator:
+        if callable(fn_or_desc):
+            fn_or_desc.__tryke_todo__ = ""  # type: ignore[attr-defined]
+            return fn_or_desc
+        actual_desc = fn_or_desc or description or ""
+
+        def decorator(f: _Fn) -> _Fn:
+            f.__tryke_todo__ = actual_desc  # type: ignore[attr-defined]
+            return f
+
+        return decorator
+
+
+class _XfailMarker:
+    def __get__(self, obj: object, objtype: type | None = None) -> _XfailMarker:
+        return self
+
+    def __call__(
+        self,
+        fn_or_reason: _Fn | str | None = None,
+        /,
+        *,
+        reason: str | None = None,
+        tags: list[str] | None = None,  # noqa: ARG002
+    ) -> _Fn | _Decorator:
+        if callable(fn_or_reason):
+            fn_or_reason.__tryke_xfail__ = ""  # type: ignore[attr-defined]
+            return fn_or_reason
+        actual_reason = fn_or_reason or reason or ""
+
+        def decorator(f: _Fn) -> _Fn:
+            f.__tryke_xfail__ = actual_reason  # type: ignore[attr-defined]
+            return f
+
+        return decorator
+
+
+class _TestBuilder:
+    skip = _SkipMarker()
+    todo = _TodoMarker()
+    xfail = _XfailMarker()
+
+    @overload
+    def __call__(self, fn: Callable[[], None], /) -> Callable[[], None]: ...
+    @overload
+    def __call__(
+        self, name: str, /
+    ) -> Callable[[Callable[[], None]], Callable[[], None]]: ...
+    @overload
+    def __call__(
+        self, *, name: str
+    ) -> Callable[[Callable[[], None]], Callable[[], None]]: ...
+
+    def __call__(self, fn=None, /, *, name=None, tags=None):  # noqa: ARG002
+        if callable(fn):
+            return fn
+
+        def decorator(f: Callable[[], None]) -> Callable[[], None]:
+            return f
+
+        return decorator
+
+    def skip_if(self, condition: bool, *, reason: str = "") -> _Decorator:  # noqa: FBT001
+        """Conditional skip, evaluated at import time."""
+
+        def decorator(f: _Fn) -> _Fn:
+            if condition:
+                f.__tryke_skip__ = reason  # type: ignore[attr-defined]
+            return f
+
+        return decorator
+
+
+test = _TestBuilder()
 
 
 class ExpectationError(AssertionError):
@@ -188,6 +284,51 @@ class Expectation[T]:
             f"{self._value!r} to match pattern {pattern!r}",
             expected=f"matches {pattern!r}",
             received=repr(self._value),
+        )
+
+    def to_raise(
+        self,
+        exc_type: type[BaseException] | None = None,
+        *,
+        match: str | None = None,
+    ) -> MatchResult:
+        if not callable(self._value):
+            msg = "to_raise() requires a callable; wrap the expression in a lambda"
+            raise TypeError(msg)
+
+        try:
+            self._value()
+        except BaseException as exc:  # noqa: BLE001
+            caught = exc
+        else:
+            caught = None
+
+        raised = caught is not None
+        type_ok = exc_type is None or (
+            caught is not None and isinstance(caught, exc_type)
+        )
+        match_ok = match is None or (
+            caught is not None and bool(re.search(match, str(caught)))
+        )
+        passed = raised and type_ok and match_ok
+
+        if exc_type is not None:
+            expected_str = exc_type.__name__
+            if match:
+                expected_str += f" matching {match!r}"
+        else:
+            expected_str = "any exception"
+
+        if caught is not None:
+            received_str = f"{type(caught).__name__}: {caught}"
+        else:
+            received_str = "no exception"
+
+        return self._assert(
+            passed,
+            f"callable to raise {expected_str}",
+            expected=expected_str,
+            received=received_str,
         )
 
 
@@ -386,3 +527,165 @@ def test_soft_context_captures_caller_frame() -> None:
     frame = ctx.failures[0][1]
     expect(frame).not_.to_be_none()
     expect(frame.filename).to_contain("expect.py")
+
+
+# --- to_raise tests ---
+
+
+@test
+def test_to_raise_catches_matching_type() -> None:
+    expect(lambda: (_ for _ in ()).throw(ValueError("boom"))).to_raise(ValueError)
+
+
+@test
+def test_to_raise_catches_any_exception() -> None:
+    def raises() -> None:
+        msg = "oops"
+        raise RuntimeError(msg)
+
+    expect(raises).to_raise()
+
+
+@test
+def test_to_raise_with_match_pattern() -> None:
+    def raises() -> None:
+        msg = "file not found: /tmp/foo"
+        raise OSError(msg)
+
+    expect(raises).to_raise(OSError, match=r"not found")
+
+
+@test
+def test_to_raise_fails_when_no_exception() -> None:
+    try:
+        expect(lambda: None).to_raise(ValueError)
+    except ExpectationError as exc:
+        expect(exc.received).to_equal("no exception")
+    else:
+        msg = "ExpectationError was not raised"
+        raise AssertionError(msg)
+
+
+@test
+def test_to_raise_fails_when_wrong_type() -> None:
+    def raises() -> None:
+        msg = "oops"
+        raise TypeError(msg)
+
+    try:
+        expect(raises).to_raise(ValueError)
+    except ExpectationError as exc:
+        expect(exc.received).to_contain("TypeError")
+    else:
+        msg = "ExpectationError was not raised"
+        raise AssertionError(msg)
+
+
+@test
+def test_not_to_raise_passes_when_no_exception() -> None:
+    expect(lambda: None).not_.to_raise()
+
+
+@test
+def test_not_to_raise_fails_when_exception() -> None:
+    def raises() -> None:
+        msg = "oops"
+        raise RuntimeError(msg)
+
+    try:
+        expect(raises).not_.to_raise()
+    except ExpectationError as exc:
+        expect(exc.received).to_contain("RuntimeError")
+    else:
+        msg = "ExpectationError was not raised"
+        raise AssertionError(msg)
+
+
+@test
+def test_to_raise_raises_type_error_for_non_callable() -> None:
+    try:
+        expect(42).to_raise(ValueError)
+    except TypeError as exc:
+        expect(str(exc)).to_contain("callable")
+    else:
+        msg = "TypeError was not raised"
+        raise AssertionError(msg)
+
+
+# --- _TestBuilder marker tests ---
+
+
+@test
+def test_skip_marker_stamps_dunder() -> None:
+    @test.skip
+    def skipped() -> None:
+        pass
+
+    expect(hasattr(skipped, "__tryke_skip__")).to_be_truthy()
+    expect(skipped.__tryke_skip__).to_equal("")
+
+
+@test
+def test_skip_marker_with_reason() -> None:
+    @test.skip("broken")
+    def skipped() -> None:
+        pass
+
+    expect(skipped.__tryke_skip__).to_equal("broken")
+
+
+@test
+def test_todo_marker_stamps_dunder() -> None:
+    @test.todo
+    def pending() -> None:
+        pass
+
+    expect(hasattr(pending, "__tryke_todo__")).to_be_truthy()
+    expect(pending.__tryke_todo__).to_equal("")
+
+
+@test
+def test_todo_marker_with_description() -> None:
+    @test.todo("need caching")
+    def pending() -> None:
+        pass
+
+    expect(pending.__tryke_todo__).to_equal("need caching")
+
+
+@test
+def test_xfail_marker_stamps_dunder() -> None:
+    @test.xfail
+    def expected_fail() -> None:
+        pass
+
+    expect(hasattr(expected_fail, "__tryke_xfail__")).to_be_truthy()
+    expect(expected_fail.__tryke_xfail__).to_equal("")
+
+
+@test
+def test_xfail_marker_with_reason() -> None:
+    @test.xfail("upstream bug")
+    def expected_fail() -> None:
+        pass
+
+    expect(expected_fail.__tryke_xfail__).to_equal("upstream bug")
+
+
+@test
+def test_skip_if_true_stamps_dunder() -> None:
+    @test.skip_if(True, reason="always skip")  # noqa: FBT003
+    def skipped() -> None:
+        pass
+
+    expect(hasattr(skipped, "__tryke_skip__")).to_be_truthy()
+    expect(skipped.__tryke_skip__).to_equal("always skip")
+
+
+@test
+def test_skip_if_false_does_not_stamp() -> None:
+    @test.skip_if(False, reason="never skip")  # noqa: FBT003
+    def not_skipped() -> None:
+        pass
+
+    expect(hasattr(not_skipped, "__tryke_skip__")).to_be_falsy()

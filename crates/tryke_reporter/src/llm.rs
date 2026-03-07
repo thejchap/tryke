@@ -64,7 +64,10 @@ impl<W: io::Write> Reporter for LlmReporter<W> {
             .unwrap_or(&result.test.name);
 
         match &result.outcome {
-            TestOutcome::Passed | TestOutcome::Skipped { .. } => {}
+            TestOutcome::Passed
+            | TestOutcome::Skipped { .. }
+            | TestOutcome::XFailed { .. }
+            | TestOutcome::Todo { .. } => {}
             TestOutcome::Failed {
                 message,
                 traceback,
@@ -107,6 +110,12 @@ impl<W: io::Write> Reporter for LlmReporter<W> {
                     }
                 }
             }
+            TestOutcome::XPassed => {
+                let _ = write!(self.writer, "XPASS {display}");
+                write_location(&mut self.writer, result);
+                let _ = writeln!(self.writer);
+                let _ = writeln!(self.writer, "  unexpected pass");
+            }
             TestOutcome::Error { message } => {
                 let _ = write!(self.writer, "ERROR {display}");
                 write_location(&mut self.writer, result);
@@ -136,6 +145,12 @@ impl<W: io::Write> Reporter for LlmReporter<W> {
         }
         if summary.skipped > 0 {
             parts.push(format!("{} skipped", summary.skipped));
+        }
+        if summary.xfailed > 0 {
+            parts.push(format!("{} xfailed", summary.xfailed));
+        }
+        if summary.todo > 0 {
+            parts.push(format!("{} todo", summary.todo));
         }
         if parts.is_empty() {
             parts.push("0 passed".into());
@@ -183,10 +198,7 @@ mod tests {
         TestItem {
             name: name.into(),
             module_path: "tests.mod".into(),
-            file_path: None,
-            line_number: None,
-            display_name: None,
-            expected_assertions: vec![],
+            ..Default::default()
         }
     }
 
@@ -196,8 +208,7 @@ mod tests {
             module_path: "tests.mod".into(),
             file_path: Some(PathBuf::from(file)),
             line_number: Some(line),
-            display_name: None,
-            expected_assertions: vec![],
+            ..Default::default()
         }
     }
 
@@ -345,6 +356,8 @@ mod tests {
             failed: 0,
             skipped: 0,
             errors: 0,
+            xfailed: 0,
+            todo: 0,
             duration: Duration::from_millis(35),
         });
         let out = output(&r);
@@ -359,6 +372,8 @@ mod tests {
             failed: 2,
             skipped: 3,
             errors: 1,
+            xfailed: 0,
+            todo: 0,
             duration: Duration::from_millis(35),
         });
         let out = output(&r);
@@ -388,6 +403,8 @@ mod tests {
             failed: 1,
             skipped: 0,
             errors: 0,
+            xfailed: 0,
+            todo: 0,
             duration: Duration::from_millis(1),
         });
         let out = output(&r);
@@ -479,6 +496,8 @@ mod tests {
             failed: 1,
             skipped: 1,
             errors: 0,
+            xfailed: 0,
+            todo: 0,
             duration: Duration::from_millis(15),
         });
 

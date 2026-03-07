@@ -10,8 +10,11 @@ import traceback
 import unittest
 from pathlib import Path
 
-import tryke.expect as _expect_mod
 from tryke.expect import ExpectationError
+
+# Use sys.modules to get the actual module — `tryke.expect` the attribute
+# is shadowed by the `expect` function re-exported in tryke/__init__.py.
+_expect_mod = sys.modules["tryke.expect"]
 
 _TRYKE_PKG = str(Path(__file__).resolve().parent)
 

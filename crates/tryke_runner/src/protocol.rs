@@ -20,6 +20,8 @@ pub struct RpcResponse {
 pub struct RpcErrorDetail {
     pub code: i32,
     pub message: String,
+    #[serde(default)]
+    pub traceback: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -44,6 +46,8 @@ pub enum RunTestResultWire {
     Failed {
         duration_ms: u64,
         message: String,
+        #[serde(default)]
+        traceback: Option<String>,
         #[serde(default)]
         assertions: Vec<AssertionWire>,
         stdout: String,

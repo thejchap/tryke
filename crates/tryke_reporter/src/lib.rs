@@ -1,4 +1,4 @@
-mod diagnostic;
+pub mod diagnostic;
 pub mod dot;
 pub mod json;
 pub mod junit;

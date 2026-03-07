@@ -1,13 +1,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use log::debug;
 
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::Stream;
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tryke_types::{TestItem, TestResult};
+use tryke_types::{TestItem, TestOutcome, TestResult};
 
 use crate::worker::WorkerProcess;
 
@@ -109,26 +110,54 @@ async fn worker_task(
                 debug!("worker_task: running test {}", test.name);
                 if worker.is_none() {
                     debug!("worker_task: spawning process");
-                    worker = WorkerProcess::spawn(&python_bin, &path_refs).ok();
+                    match WorkerProcess::spawn(&python_bin, &path_refs) {
+                        Ok(w) => worker = Some(w),
+                        Err(e) => {
+                            let msg = format!("worker spawn failed: {e}");
+                            debug!("worker_task: {msg}");
+                            let _ = result_tx.send(TestResult {
+                                test,
+                                outcome: TestOutcome::Error { message: msg },
+                                duration: Duration::ZERO,
+                                stdout: String::new(),
+                                stderr: String::new(),
+                            });
+                            continue;
+                        }
+                    }
                 }
                 let Some(w) = worker.as_mut() else {
-                    debug!("worker_task: spawn failed, dropping test {}", test.name);
-                    continue;
+                    unreachable!("worker is always Some after the spawn block above");
                 };
-                if let Ok(result) = w.run_test(&test).await {
-                    debug!("worker_task: test {} done", test.name);
-                    let _ = result_tx.send(result);
-                } else {
-                    debug!("worker_task: run_test error, respawning for retry");
-                    // worker died; respawn and retry once
-                    worker = WorkerProcess::spawn(&python_bin, &path_refs).ok();
-                    if let Some(w) = worker.as_mut()
-                        && let Ok(result) = w.run_test(&test).await
-                    {
-                        debug!("worker_task: retry succeeded for {}", test.name);
+                match w.run_test(&test).await {
+                    Ok(result) => {
+                        debug!("worker_task: test {} done", test.name);
                         let _ = result_tx.send(result);
-                    } else {
-                        debug!("worker_task: retry failed, dropping test {}", test.name);
+                    }
+                    Err(first_err) => {
+                        debug!("worker_task: run_test error, respawning for retry");
+                        let stderr_output = w.drain_stderr().await;
+                        worker = WorkerProcess::spawn(&python_bin, &path_refs).ok();
+                        if let Some(w) = worker.as_mut()
+                            && let Ok(result) = w.run_test(&test).await
+                        {
+                            debug!("worker_task: retry succeeded for {}", test.name);
+                            let _ = result_tx.send(result);
+                        } else {
+                            let mut msg = format!("worker error: {first_err}");
+                            if !stderr_output.is_empty() {
+                                msg.push_str("\nworker stderr:\n");
+                                msg.push_str(&stderr_output);
+                            }
+                            debug!("worker_task: retry failed for {}", test.name);
+                            let _ = result_tx.send(TestResult {
+                                test,
+                                outcome: TestOutcome::Error { message: msg },
+                                duration: Duration::ZERO,
+                                stdout: String::new(),
+                                stderr: stderr_output,
+                            });
+                        }
                     }
                 }
             }

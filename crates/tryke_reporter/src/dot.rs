@@ -59,6 +59,7 @@ impl<W: io::Write> Reporter for DotReporter<W> {
             TestOutcome::Passed => ".".green().to_string(),
             TestOutcome::Failed { .. } => "F".red().to_string(),
             TestOutcome::Skipped { .. } => "s".yellow().dimmed().to_string(),
+            TestOutcome::Error { .. } => "E".red().to_string(),
         };
         let _ = write!(self.writer, "{ch}");
         let _ = self.writer.flush();
@@ -79,6 +80,10 @@ impl<W: io::Write> Reporter for DotReporter<W> {
             let _ = writeln!(self.writer, " {} {}", summary.failed.red(), "fail".red());
         }
 
+        if summary.errors > 0 {
+            let _ = writeln!(self.writer, " {} {}", summary.errors.red(), "error".red());
+        }
+
         if summary.skipped > 0 {
             let _ = writeln!(
                 self.writer,
@@ -88,7 +93,7 @@ impl<W: io::Write> Reporter for DotReporter<W> {
             );
         }
 
-        let total = summary.passed + summary.failed + summary.skipped;
+        let total = summary.passed + summary.failed + summary.skipped + summary.errors;
         let _ = writeln!(
             self.writer,
             "Ran {} tests. [{}]",
@@ -145,6 +150,7 @@ mod tests {
             test: test_item("t"),
             outcome: TestOutcome::Failed {
                 message: "bad".into(),
+                traceback: None,
                 assertions: vec![],
             },
             duration: Duration::from_millis(1),
@@ -174,6 +180,7 @@ mod tests {
             passed: 3,
             failed: 1,
             skipped: 2,
+            errors: 0,
             duration: Duration::from_millis(100),
         });
         let out = output(&r);
@@ -200,6 +207,7 @@ mod tests {
             passed: 1,
             failed: 0,
             skipped: 0,
+            errors: 0,
             duration: Duration::from_millis(10),
         });
 

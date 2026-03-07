@@ -178,6 +178,7 @@ mod tests {
             },
             outcome: TestOutcome::Failed {
                 message: "expected 1, got 2".into(),
+                traceback: None,
                 assertions: vec![],
             },
             duration: Duration::from_millis(5),
@@ -232,6 +233,7 @@ mod tests {
             passed: 5,
             failed: 1,
             skipped: 2,
+            errors: 0,
             duration: Duration::from_millis(100),
         };
 
@@ -282,6 +284,7 @@ mod tests {
             test: tests[1].clone(),
             outcome: TestOutcome::Failed {
                 message: "boom".into(),
+                traceback: None,
                 assertions: vec![],
             },
             duration: Duration::from_millis(5),
@@ -293,6 +296,7 @@ mod tests {
             passed: 1,
             failed: 1,
             skipped: 0,
+            errors: 0,
             duration: Duration::from_millis(15),
         });
 
@@ -347,6 +351,7 @@ mod tests {
             },
             outcome: TestOutcome::Failed {
                 message: "assertion failed".into(),
+                traceback: None,
                 assertions: vec![Assertion {
                     expression: "assert_eq!(a, 2)".into(),
                     file: None,

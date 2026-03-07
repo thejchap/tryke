@@ -1,10 +1,11 @@
-use tryke_types::{RunSummary, TestItem, TestResult};
+use tryke_types::{DiscoveryError, RunSummary, TestItem, TestResult};
 
 pub trait Reporter {
     fn on_run_start(&mut self, tests: &[TestItem]);
     fn on_test_complete(&mut self, result: &TestResult);
     fn on_run_complete(&mut self, summary: &RunSummary);
     fn on_collect_complete(&mut self, _tests: &[TestItem]) {}
+    fn on_discovery_error(&mut self, _error: &DiscoveryError) {}
 }
 
 #[cfg(test)]
@@ -83,6 +84,7 @@ mod tests {
             test: tests[1].clone(),
             outcome: TestOutcome::Failed {
                 message: "expected 1, got 2".into(),
+                traceback: None,
                 assertions: vec![],
             },
             duration: Duration::from_millis(5),
@@ -96,6 +98,7 @@ mod tests {
             passed: 1,
             failed: 1,
             skipped: 0,
+            errors: 0,
             duration: Duration::from_millis(15),
         });
 

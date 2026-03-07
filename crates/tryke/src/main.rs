@@ -136,6 +136,7 @@ async fn run_tests(
     let mut passed = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;
+    let mut errors = 0usize;
 
     for (_file, file_tests) in group_tests_by_file(tests) {
         let mut stream = pool.run(file_tests);
@@ -144,6 +145,7 @@ async fn run_tests(
                 TestOutcome::Passed => passed += 1,
                 TestOutcome::Failed { .. } => failed += 1,
                 TestOutcome::Skipped { .. } => skipped += 1,
+                TestOutcome::Error { .. } => errors += 1,
             }
             reporter.on_test_complete(&result);
         }
@@ -153,6 +155,7 @@ async fn run_tests(
         passed,
         failed,
         skipped,
+        errors,
         duration: start.elapsed(),
     });
 
@@ -171,6 +174,7 @@ async fn report_cycle(
     let mut passed = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;
+    let mut errors = 0usize;
 
     for (_file, file_tests) in group_tests_by_file(tests) {
         let mut stream = pool.run(file_tests);
@@ -179,6 +183,7 @@ async fn report_cycle(
                 TestOutcome::Passed => passed += 1,
                 TestOutcome::Failed { .. } => failed += 1,
                 TestOutcome::Skipped { .. } => skipped += 1,
+                TestOutcome::Error { .. } => errors += 1,
             }
             reporter.on_test_complete(&result);
         }
@@ -188,6 +193,7 @@ async fn report_cycle(
         passed,
         failed,
         skipped,
+        errors,
         duration: start.elapsed(),
     });
 

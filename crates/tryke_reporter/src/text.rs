@@ -6,8 +6,12 @@ use std::time::Duration;
 use owo_colors::OwoColorize;
 use tryke_types::{RunSummary, TestItem, TestOutcome, TestResult};
 
+use tryke_types::DiscoveryError;
+
 use crate::Reporter;
-use crate::diagnostic::render_assertions;
+use crate::diagnostic::{
+    render_assertions, render_captured_output, render_error_message, render_failure_message,
+};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub enum Verbosity {
@@ -94,6 +98,12 @@ fn write_expected_assertions<W: io::Write>(writer: &mut W, result: &TestResult) 
     }
 }
 
+fn write_captured<W: io::Write>(writer: &mut W, label: &str, content: &str) {
+    let mut buf = String::new();
+    render_captured_output(label, content, &mut buf);
+    let _ = write!(writer, "{buf}");
+}
+
 fn format_duration(d: Duration) -> String {
     let ms = d.as_secs_f64() * 1000.0;
     if ms < 1000.0 {
@@ -149,7 +159,11 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                     }
                 }
             }
-            TestOutcome::Failed { assertions, .. } => {
+            TestOutcome::Failed {
+                message,
+                traceback,
+                assertions,
+            } => {
                 let _ = writeln!(
                     self.writer,
                     "{} {} {}",
@@ -169,6 +183,32 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                     let mut buf = String::new();
                     render_assertions(test_file.as_deref(), assertions, &mut buf);
                     let _ = write!(self.writer, "{buf}");
+                } else if !message.is_empty() {
+                    let verbose = matches!(self.verbosity, Verbosity::Verbose);
+                    let mut buf = String::new();
+                    render_failure_message(message, traceback.as_deref(), verbose, &mut buf);
+                    let _ = write!(self.writer, "{buf}");
+                }
+                if !result.stdout.is_empty() {
+                    write_captured(&mut self.writer, "stdout", &result.stdout);
+                }
+                if !result.stderr.is_empty() {
+                    write_captured(&mut self.writer, "stderr", &result.stderr);
+                }
+            }
+            TestOutcome::Error { message } => {
+                let _ = writeln!(
+                    self.writer,
+                    "{} {} {}",
+                    "!".red(),
+                    display.bold(),
+                    "[error]".red()
+                );
+                let mut buf = String::new();
+                render_error_message(message, &mut buf);
+                let _ = write!(self.writer, "{buf}");
+                if !result.stderr.is_empty() {
+                    write_captured(&mut self.writer, "stderr", &result.stderr);
                 }
             }
             TestOutcome::Skipped { .. } => {
@@ -225,6 +265,10 @@ impl<W: io::Write> Reporter for TextReporter<W> {
             let _ = writeln!(self.writer, " {} {}", summary.failed.red(), "fail".red());
         }
 
+        if summary.errors > 0 {
+            let _ = writeln!(self.writer, " {} {}", summary.errors.red(), "error".red());
+        }
+
         if summary.skipped > 0 {
             let _ = writeln!(
                 self.writer,
@@ -234,12 +278,22 @@ impl<W: io::Write> Reporter for TextReporter<W> {
             );
         }
 
-        let total = summary.passed + summary.failed + summary.skipped;
+        let total = summary.passed + summary.failed + summary.skipped + summary.errors;
         let _ = writeln!(
             self.writer,
             "Ran {} tests. [{}]",
             total,
             format_duration(summary.duration)
+        );
+    }
+
+    fn on_discovery_error(&mut self, error: &DiscoveryError) {
+        let _ = writeln!(
+            self.writer,
+            "{} {}: {}",
+            "!".red(),
+            error.file_path.display().to_string().yellow(),
+            error.message
         );
     }
 }
@@ -325,6 +379,7 @@ mod tests {
             },
             outcome: TestOutcome::Failed {
                 message: "bad".into(),
+                traceback: None,
                 assertions: vec![],
             },
             duration: Duration::from_millis(5),
@@ -367,6 +422,7 @@ mod tests {
             passed: 3,
             failed: 1,
             skipped: 2,
+            errors: 0,
             duration: Duration::from_millis(100),
         });
 
@@ -387,6 +443,7 @@ mod tests {
             passed: 5,
             failed: 0,
             skipped: 0,
+            errors: 0,
             duration: Duration::from_millis(50),
         });
 
@@ -421,6 +478,7 @@ mod tests {
             passed: 1,
             failed: 0,
             skipped: 0,
+            errors: 0,
             duration: Duration::from_millis(10),
         });
 
@@ -446,6 +504,7 @@ mod tests {
             },
             outcome: TestOutcome::Failed {
                 message: "assertion failed".into(),
+                traceback: None,
                 assertions: vec![Assertion {
                     expression: "assert_eq!(a, 2)".into(),
                     file: None,
@@ -481,6 +540,7 @@ mod tests {
             },
             outcome: TestOutcome::Failed {
                 message: "bad".into(),
+                traceback: None,
                 assertions: vec![],
             },
             duration: Duration::from_millis(5),
@@ -670,6 +730,7 @@ mod tests {
             },
             outcome: TestOutcome::Failed {
                 message: "oops".into(),
+                traceback: None,
                 assertions: vec![],
             },
             duration: Duration::from_millis(1),
@@ -763,6 +824,7 @@ mod tests {
             },
             outcome: TestOutcome::Failed {
                 message: "assertion failed".into(),
+                traceback: None,
                 assertions: vec![Assertion {
                     expression: "expect(x).to_equal(1)".into(),
                     file: None,
@@ -813,6 +875,7 @@ mod tests {
             },
             outcome: TestOutcome::Failed {
                 message: "assertion failed".into(),
+                traceback: None,
                 assertions: vec![Assertion {
                     expression: "expect(b).to_equal(2)".into(),
                     file: None,

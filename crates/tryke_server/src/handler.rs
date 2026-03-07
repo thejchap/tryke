@@ -178,12 +178,14 @@ pub async fn handle_request(
             let mut passed = 0usize;
             let mut failed = 0usize;
             let mut skipped = 0usize;
+            let mut errors = 0usize;
 
             while let Some(result) = stream.next().await {
                 match &result.outcome {
                     TestOutcome::Passed => passed += 1,
                     TestOutcome::Failed { .. } => failed += 1,
                     TestOutcome::Skipped { .. } => skipped += 1,
+                    TestOutcome::Error { .. } => errors += 1,
                 }
                 broadcast_notification(
                     bcast_tx,
@@ -198,6 +200,7 @@ pub async fn handle_request(
                 passed,
                 failed,
                 skipped,
+                errors,
                 duration: start.elapsed(),
             };
             broadcast_notification(

@@ -84,6 +84,65 @@ pub fn render_assertions(test_file: Option<&str>, assertions: &[Assertion], buf:
     let _ = writeln!(buf, "  {failed}/{} assertions failed", assertions.len());
 }
 
+/// Extract the last frame from a Python traceback string.
+/// Returns from the last `File "..."` line to the end of the traceback.
+#[must_use]
+pub fn extract_last_frame(traceback: &str) -> String {
+    let lines: Vec<&str> = traceback.lines().collect();
+    let mut last_file_idx = None;
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim_start().starts_with("File \"") {
+            last_file_idx = Some(i);
+        }
+    }
+    match last_file_idx {
+        Some(idx) => lines[idx..].join("\n"),
+        None => traceback.to_string(),
+    }
+}
+
+/// Render a failure message with optional traceback via miette.
+/// At normal verbosity, shows only the last frame. At verbose, shows full traceback.
+pub fn render_failure_message(
+    message: &str,
+    traceback: Option<&str>,
+    verbose: bool,
+    buf: &mut String,
+) {
+    use fmt::Write;
+
+    let _ = writeln!(buf, "  {message}");
+    if let Some(tb) = traceback {
+        let display_tb = if verbose {
+            tb.to_string()
+        } else {
+            extract_last_frame(tb)
+        };
+        for line in display_tb.lines() {
+            let _ = writeln!(buf, "    {line}");
+        }
+    }
+}
+
+/// Render an error message for worker/infrastructure errors.
+pub fn render_error_message(message: &str, buf: &mut String) {
+    use fmt::Write;
+
+    for line in message.lines() {
+        let _ = writeln!(buf, "    {line}");
+    }
+}
+
+/// Render captured stdout or stderr with a label header.
+pub fn render_captured_output(label: &str, content: &str, buf: &mut String) {
+    use fmt::Write;
+
+    let _ = writeln!(buf, "  ── {label} ──");
+    for line in content.lines() {
+        let _ = writeln!(buf, "    {line}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,5 +217,98 @@ mod tests {
 
         assert!(buf.contains("helpers/utils.py"));
         assert!(!buf.contains("tests/math.py"));
+    }
+
+    #[test]
+    fn extract_last_frame_simple() {
+        let tb = "\
+Traceback (most recent call last):
+  File \"tests/test_math.py\", line 5, in test_add
+    assert 1 + 1 == 3
+AssertionError";
+        let result = extract_last_frame(tb);
+        assert!(result.starts_with("  File \"tests/test_math.py\""));
+        assert!(result.contains("AssertionError"));
+    }
+
+    #[test]
+    fn extract_last_frame_multiple_frames() {
+        let tb = "\
+Traceback (most recent call last):
+  File \"tests/test_math.py\", line 10, in test_div
+    result = divide(1, 0)
+  File \"math_utils.py\", line 3, in divide
+    return a / b
+ZeroDivisionError: division by zero";
+        let result = extract_last_frame(tb);
+        assert!(result.starts_with("  File \"math_utils.py\""));
+        assert!(result.contains("ZeroDivisionError"));
+        assert!(!result.contains("test_math.py"));
+    }
+
+    #[test]
+    fn extract_last_frame_no_file_lines() {
+        let tb = "SomeError: something went wrong";
+        let result = extract_last_frame(tb);
+        assert_eq!(result, tb);
+    }
+
+    #[test]
+    fn render_failure_message_with_traceback_normal() {
+        let mut buf = String::new();
+        let tb = "\
+Traceback (most recent call last):
+  File \"tests/test_math.py\", line 5, in test_add
+    assert 1 + 1 == 3
+AssertionError";
+        render_failure_message("AssertionError", Some(tb), false, &mut buf);
+        assert!(buf.contains("AssertionError"));
+        // normal mode shows only last frame
+        assert!(buf.contains("File \"tests/test_math.py\""));
+    }
+
+    #[test]
+    fn render_failure_message_with_traceback_verbose() {
+        let mut buf = String::new();
+        let tb = "\
+Traceback (most recent call last):
+  File \"tests/test_math.py\", line 10, in test_div
+    result = divide(1, 0)
+  File \"math_utils.py\", line 3, in divide
+    return a / b
+ZeroDivisionError: division by zero";
+        render_failure_message(
+            "ZeroDivisionError: division by zero",
+            Some(tb),
+            true,
+            &mut buf,
+        );
+        assert!(buf.contains("test_math.py"));
+        assert!(buf.contains("math_utils.py"));
+        assert!(buf.contains("Traceback"));
+    }
+
+    #[test]
+    fn render_failure_message_without_traceback() {
+        let mut buf = String::new();
+        render_failure_message("assertion failed", None, false, &mut buf);
+        assert!(buf.contains("assertion failed"));
+    }
+
+    #[test]
+    fn render_error_message_multiline() {
+        let mut buf = String::new();
+        render_error_message("worker spawn failed: No such file\ndetails here", &mut buf);
+        assert!(buf.contains("worker spawn failed"));
+        assert!(buf.contains("details here"));
+    }
+
+    #[test]
+    fn render_captured_output_formats_content() {
+        let mut buf = String::new();
+        render_captured_output("stdout", "hello\nworld", &mut buf);
+        assert!(buf.contains("── stdout ──"));
+        assert!(buf.contains("hello"));
+        assert!(buf.contains("world"));
     }
 }

@@ -61,14 +61,14 @@ impl<W: io::Write> Reporter for JUnitReporter<W> {
     }
 
     fn on_run_complete(&mut self, summary: &RunSummary) {
-        let total = summary.passed + summary.failed + summary.skipped;
+        let total = summary.passed + summary.failed + summary.skipped + summary.errors;
         let suite_time = summary.duration.as_secs_f64();
 
         let _ = writeln!(self.writer, r#"<?xml version="1.0" encoding="UTF-8"?>"#);
         let _ = writeln!(
             self.writer,
-            r#"<testsuite name="tryke" tests="{}" failures="{}" skipped="{}" time="{:.3}">"#,
-            total, summary.failed, summary.skipped, suite_time
+            r#"<testsuite name="tryke" tests="{}" failures="{}" errors="{}" skipped="{}" time="{:.3}">"#,
+            total, summary.failed, summary.errors, summary.skipped, suite_time
         );
 
         for result in &self.results {
@@ -104,6 +104,15 @@ impl<W: io::Write> Reporter for JUnitReporter<W> {
                         r#"  <testcase name="{name}" classname="{classname}" time="{time:.3}">"#,
                     );
                     let _ = writeln!(self.writer, "    <skipped/>");
+                    let _ = writeln!(self.writer, "  </testcase>");
+                }
+                TestOutcome::Error { message } => {
+                    let msg = xml_escape(message);
+                    let _ = writeln!(
+                        self.writer,
+                        r#"  <testcase name="{name}" classname="{classname}" time="{time:.3}">"#,
+                    );
+                    let _ = writeln!(self.writer, r#"    <error message="{msg}"/>"#);
                     let _ = writeln!(self.writer, "  </testcase>");
                 }
             }
@@ -152,6 +161,7 @@ mod tests {
             test: test_item("test_sub", "tests.math"),
             outcome: TestOutcome::Failed {
                 message: "assertion failed: 3 - 1 == 3".into(),
+                traceback: None,
                 assertions: vec![],
             },
             duration: Duration::from_millis(5),
@@ -169,6 +179,7 @@ mod tests {
             passed: 1,
             failed: 1,
             skipped: 1,
+            errors: 0,
             duration: Duration::from_millis(15),
         });
     }
@@ -221,6 +232,7 @@ mod tests {
             test: test_item("test_amp", "tests.misc"),
             outcome: TestOutcome::Failed {
                 message: "a & b".into(),
+                traceback: None,
                 assertions: vec![],
             },
             duration: Duration::from_millis(1),
@@ -231,6 +243,7 @@ mod tests {
             passed: 0,
             failed: 1,
             skipped: 0,
+            errors: 0,
             duration: Duration::from_millis(1),
         });
         assert!(output(&r).contains("a &amp; b"));

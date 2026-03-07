@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use log::debug;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tryke_types::{Assertion, TestItem, TestOutcome, TestResult};
 
 use crate::protocol::{
@@ -15,6 +15,7 @@ pub struct WorkerProcess {
     child: Child,
     stdin: BufWriter<ChildStdin>,
     stdout: BufReader<ChildStdout>,
+    stderr: Option<ChildStderr>,
     next_id: u64,
 }
 
@@ -28,15 +29,17 @@ impl WorkerProcess {
             .env("PYTHONPATH", &pythonpath)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .spawn()?;
         let stdin = BufWriter::new(child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?);
         let stdout = BufReader::new(child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?);
+        let stderr = child.stderr.take();
         debug!("worker spawned (pid {:?})", child.id());
         Ok(Self {
             child,
             stdin,
             stdout,
+            stderr,
             next_id: 1,
         })
     }
@@ -69,7 +72,12 @@ impl WorkerProcess {
         debug!("worker rpc <- {}", resp_line.trim());
         let resp: RpcResponse = serde_json::from_str(resp_line.trim())?;
         if let Some(err) = resp.error {
-            return Err(anyhow!("rpc error {}: {}", err.code, err.message));
+            let detail = if let Some(tb) = &err.traceback {
+                format!("rpc error {}: {}\n{tb}", err.code, err.message)
+            } else {
+                format!("rpc error {}: {}", err.code, err.message)
+            };
+            return Err(anyhow!(detail));
         }
         let val = resp.result.unwrap_or(serde_json::Value::Null);
         Ok(serde_json::from_value(val)?)
@@ -103,6 +111,22 @@ impl WorkerProcess {
         } else {
             Err(anyhow!("unexpected ping response: {result}"))
         }
+    }
+
+    pub async fn drain_stderr(&mut self) -> String {
+        let Some(stderr) = self.stderr.take() else {
+            return String::new();
+        };
+        let mut buf = Vec::new();
+        let result = tokio::time::timeout(Duration::from_secs(1), async {
+            let mut reader = stderr;
+            reader.read_to_end(&mut buf).await
+        })
+        .await;
+        if result.is_err() {
+            debug!("drain_stderr: timed out");
+        }
+        String::from_utf8_lossy(&buf).into_owned()
     }
 
     pub async fn shutdown(&mut self) {
@@ -150,6 +174,7 @@ fn convert_result(test: TestItem, wire: RunTestResultWire) -> TestResult {
         RunTestResultWire::Failed {
             duration_ms,
             message,
+            traceback,
             assertions,
             stdout,
             stderr,
@@ -157,6 +182,7 @@ fn convert_result(test: TestItem, wire: RunTestResultWire) -> TestResult {
             test,
             outcome: TestOutcome::Failed {
                 message,
+                traceback,
                 assertions: assertions.into_iter().map(convert_assertion).collect(),
             },
             duration: Duration::from_millis(duration_ms),
@@ -216,6 +242,7 @@ mod tests {
         let wire = RunTestResultWire::Failed {
             duration_ms: 5,
             message: "expected 1 got 2".into(),
+            traceback: None,
             assertions: vec![],
             stdout: String::new(),
             stderr: String::new(),

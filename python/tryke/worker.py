@@ -6,6 +6,7 @@ import io
 import json
 import sys
 import time
+import traceback
 import unittest
 
 
@@ -39,7 +40,11 @@ def main() -> None:
                 {
                     "jsonrpc": "2.0",
                     "id": id_,
-                    "error": {"code": -32603, "message": str(exc)},
+                    "error": {
+                        "code": -32603,
+                        "message": str(exc),
+                        "traceback": traceback.format_exc(),
+                    },
                 }
             )
 
@@ -99,6 +104,7 @@ def _run_test(module_name: str, function_name: str, modules: dict[str, object]) 
         return {
             "outcome": "failed",
             "message": str(exc) or "assertion failed",
+            "traceback": traceback.format_exc(),
             "assertions": [],
             "duration_ms": duration_ms,
             "stdout": stdout_buf.getvalue(),
@@ -109,6 +115,7 @@ def _run_test(module_name: str, function_name: str, modules: dict[str, object]) 
         return {
             "outcome": "failed",
             "message": f"{type(exc).__name__}: {exc}",
+            "traceback": traceback.format_exc(),
             "assertions": [],
             "duration_ms": duration_ms,
             "stdout": stdout_buf.getvalue(),

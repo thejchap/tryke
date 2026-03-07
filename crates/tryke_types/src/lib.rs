@@ -50,10 +50,15 @@ pub enum TestOutcome {
     Passed,
     Failed {
         message: String,
+        #[serde(default)]
+        traceback: Option<String>,
         assertions: Vec<Assertion>,
     },
     Skipped {
         reason: Option<String>,
+    },
+    Error {
+        message: String,
     },
 }
 
@@ -71,6 +76,8 @@ pub struct RunSummary {
     pub passed: usize,
     pub failed: usize,
     pub skipped: usize,
+    #[serde(default)]
+    pub errors: usize,
     pub duration: Duration,
 }
 

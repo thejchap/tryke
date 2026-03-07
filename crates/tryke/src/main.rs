@@ -85,24 +85,6 @@ fn worker_pool_size() -> usize {
     std::thread::available_parallelism().map_or(4, std::num::NonZero::get)
 }
 
-fn group_tests_by_file(
-    tests: Vec<tryke_types::TestItem>,
-) -> Vec<(Option<PathBuf>, Vec<tryke_types::TestItem>)> {
-    let mut index: std::collections::HashMap<Option<PathBuf>, usize> =
-        std::collections::HashMap::new();
-    let mut groups: Vec<(Option<PathBuf>, Vec<tryke_types::TestItem>)> = Vec::new();
-    for test in tests {
-        let key = test.file_path.clone();
-        if let Some(&idx) = index.get(&key) {
-            groups[idx].1.push(test);
-        } else {
-            index.insert(key.clone(), groups.len());
-            groups.push((key, vec![test]));
-        }
-    }
-    groups
-}
-
 /// Discover tests, optionally restricting to changed files.
 fn discover_tests(root: &Path, changed: bool) -> Vec<tryke_types::TestItem> {
     if changed {
@@ -152,17 +134,15 @@ async fn report_cycle(
     let mut skipped = 0usize;
     let mut errors = 0usize;
 
-    for (_file, file_tests) in group_tests_by_file(tests) {
-        let mut stream = pool.run(file_tests);
-        while let Some(result) = stream.next().await {
-            match &result.outcome {
-                TestOutcome::Passed => passed += 1,
-                TestOutcome::Failed { .. } => failed += 1,
-                TestOutcome::Skipped { .. } => skipped += 1,
-                TestOutcome::Error { .. } => errors += 1,
-            }
-            reporter.on_test_complete(&result);
+    let mut stream = pool.run(tests);
+    while let Some(result) = stream.next().await {
+        match &result.outcome {
+            TestOutcome::Passed => passed += 1,
+            TestOutcome::Failed { .. } => failed += 1,
+            TestOutcome::Skipped { .. } => skipped += 1,
+            TestOutcome::Error { .. } => errors += 1,
         }
+        reporter.on_test_complete(&result);
     }
 
     reporter.on_run_complete(&RunSummary {
@@ -362,6 +342,24 @@ mod tests {
     use tryke_types::TestItem;
 
     use super::*;
+
+    fn group_tests_by_file(
+        tests: Vec<TestItem>,
+    ) -> Vec<(Option<PathBuf>, Vec<TestItem>)> {
+        let mut index: std::collections::HashMap<Option<PathBuf>, usize> =
+            std::collections::HashMap::new();
+        let mut groups: Vec<(Option<PathBuf>, Vec<TestItem>)> = Vec::new();
+        for test in tests {
+            let key = test.file_path.clone();
+            if let Some(&idx) = index.get(&key) {
+                groups[idx].1.push(test);
+            } else {
+                index.insert(key.clone(), groups.len());
+                groups.push((key, vec![test]));
+            }
+        }
+        groups
+    }
 
     fn cwd() -> PathBuf {
         env::current_dir().unwrap_or_else(|_| PathBuf::from("."))

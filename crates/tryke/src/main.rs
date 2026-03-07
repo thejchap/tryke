@@ -64,6 +64,9 @@ enum Commands {
         /// Stop after N failures
         #[arg(long)]
         maxfail: Option<usize>,
+        /// Number of worker processes (default: min(test_count, cpu_count))
+        #[arg(short = 'j', long = "workers")]
+        workers: Option<usize>,
     },
     Watch {
         /// Filter expression (e.g. "math and not slow")
@@ -82,6 +85,9 @@ enum Commands {
         /// Stop after N failures
         #[arg(long)]
         maxfail: Option<usize>,
+        /// Number of worker processes (default: cpu_count)
+        #[arg(short = 'j', long = "workers")]
+        workers: Option<usize>,
     },
     Server {
         #[arg(long, default_value = "2337")]
@@ -132,9 +138,11 @@ async fn run_tests(
     root: &Path,
     tests: Vec<tryke_types::TestItem>,
     maxfail: Option<usize>,
+    workers: Option<usize>,
 ) -> Result<()> {
     let python = resolve_python(root);
-    let pool = WorkerPool::new(worker_pool_size(), &python, root);
+    let pool_size = workers.unwrap_or_else(|| tests.len().min(worker_pool_size()));
+    let pool = WorkerPool::new(pool_size, &python, root);
     pool.warm().await;
     report_cycle(reporter, tests, &pool, maxfail).await?;
     pool.shutdown();
@@ -227,13 +235,15 @@ async fn run_watch(
     root: Option<&Path>,
     test_filter: &TestFilter,
     maxfail: Option<usize>,
+    workers: Option<usize>,
 ) -> Result<()> {
     let cwd = env::current_dir()?;
     let root = root.unwrap_or(&cwd);
     let mut discoverer = Discoverer::new(root);
 
     let python = resolve_python(root);
-    let pool = WorkerPool::new(worker_pool_size(), &python, root);
+    let pool_size = workers.unwrap_or_else(worker_pool_size);
+    let pool = WorkerPool::new(pool_size, &python, root);
     pool.warm().await;
 
     clear_if_tty();
@@ -353,6 +363,7 @@ fn main() -> Result<()> {
             changed,
             fail_fast,
             maxfail,
+            workers,
         } => {
             let resolved_maxfail = if *fail_fast { Some(1) } else { *maxfail };
             let mut rep = build_reporter(reporter, verbosity);
@@ -379,7 +390,13 @@ fn main() -> Result<()> {
                 rep.on_collect_complete(&tests);
                 Ok(())
             } else {
-                rt.block_on(run_tests(&mut *rep, root_path, tests, resolved_maxfail))
+                rt.block_on(run_tests(
+                    &mut *rep,
+                    root_path,
+                    tests,
+                    resolved_maxfail,
+                    *workers,
+                ))
             }
         }
         Commands::Watch {
@@ -389,6 +406,7 @@ fn main() -> Result<()> {
             root,
             fail_fast,
             maxfail,
+            workers,
         } => {
             let resolved_maxfail = if *fail_fast { Some(1) } else { *maxfail };
             let mut rep = build_reporter(reporter, verbosity);
@@ -399,6 +417,7 @@ fn main() -> Result<()> {
                 root.as_deref(),
                 &test_filter,
                 resolved_maxfail,
+                *workers,
             ))
         }
         Commands::Server { port, root } => {
@@ -456,7 +475,11 @@ mod tests {
         let mut reporter = TextReporter::new();
         let root = cwd();
         let tests = discover_tests(&root, false);
-        assert!(run_tests(&mut reporter, &root, tests, None).await.is_ok());
+        assert!(
+            run_tests(&mut reporter, &root, tests, None, None)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -464,7 +487,11 @@ mod tests {
         let mut reporter = JSONReporter::new();
         let root = cwd();
         let tests = discover_tests(&root, false);
-        assert!(run_tests(&mut reporter, &root, tests, None).await.is_ok());
+        assert!(
+            run_tests(&mut reporter, &root, tests, None, None)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -472,7 +499,11 @@ mod tests {
         let mut reporter = DotReporter::new();
         let root = cwd();
         let tests = discover_tests(&root, false);
-        assert!(run_tests(&mut reporter, &root, tests, None).await.is_ok());
+        assert!(
+            run_tests(&mut reporter, &root, tests, None, None)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -480,7 +511,11 @@ mod tests {
         let mut reporter = JUnitReporter::new();
         let root = cwd();
         let tests = discover_tests(&root, false);
-        assert!(run_tests(&mut reporter, &root, tests, None).await.is_ok());
+        assert!(
+            run_tests(&mut reporter, &root, tests, None, None)
+                .await
+                .is_ok()
+        );
     }
 
     #[test]
@@ -792,7 +827,7 @@ mod tests {
         // non-git directory → git_changed_files returns None → discover_tests runs all (0 here)
         let tests = discover_tests(dir.path(), true);
         assert!(
-            run_tests(&mut reporter, dir.path(), tests, None)
+            run_tests(&mut reporter, dir.path(), tests, None, None)
                 .await
                 .is_ok()
         );
@@ -855,6 +890,48 @@ mod tests {
                 filter: Some(f),
                 ..
             } if f == "test_add"
+        ));
+    }
+
+    #[test]
+    fn test_workers_short_flag_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "test", "-j", "4"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Test {
+                workers: Some(4),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_workers_long_flag_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "test", "--workers", "8"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Test {
+                workers: Some(8),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_workers_default_is_none() {
+        let cli = Cli::try_parse_from(["tryke", "test"]).unwrap();
+        assert!(matches!(cli.command, Commands::Test { workers: None, .. }));
+    }
+
+    #[test]
+    fn watch_workers_flag_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "watch", "-j", "2"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Watch {
+                workers: Some(2),
+                ..
+            }
         ));
     }
 

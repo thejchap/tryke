@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 
 from tryke import expect, test
@@ -375,3 +376,17 @@ def test_skip_if_false_does_not_stamp() -> None:
         pass
 
     expect(hasattr(not_skipped, "__tryke_skip__")).to_be_falsy()
+
+
+# --- async test support ---
+
+
+@test
+async def test_async_basic() -> None:
+    expect(1 + 1).to_equal(2)
+
+
+@test
+async def test_async_with_await() -> None:
+    await asyncio.sleep(0)
+    expect(True).to_be_truthy()  # noqa: FBT003

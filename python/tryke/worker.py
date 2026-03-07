@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import importlib
+import inspect
 import io
 import json
 import sys
@@ -127,7 +129,10 @@ def _run_test(  # noqa: C901, PLR0911, PLR0912
             contextlib.redirect_stdout(stdout_buf),
             contextlib.redirect_stderr(stderr_buf),
         ):
-            fn()
+            if inspect.iscoroutinefunction(fn):
+                asyncio.run(fn())
+            else:
+                fn()
         if ctx.failures:
             duration_ms = int((time.monotonic() - start) * 1000)
             if is_xfail:

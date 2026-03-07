@@ -488,6 +488,71 @@ fn extract_expected_assertions(
     out
 }
 
+/// Returns `true` if any expression in the tree is a dynamic import call:
+/// `importlib.import_module(...)` or `__import__(...)`.
+fn expr_has_dynamic_import(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call(call) => {
+            let is_dynamic = match call.func.as_ref() {
+                // __import__(...)
+                Expr::Name(n) => n.id.as_str() == "__import__",
+                // importlib.import_module(...)
+                Expr::Attribute(a) => {
+                    a.attr.id.as_str() == "import_module"
+                        && matches!(&*a.value, Expr::Name(n) if n.id.as_str() == "importlib")
+                }
+                _ => false,
+            };
+            if is_dynamic {
+                return true;
+            }
+            expr_has_dynamic_import(&call.func)
+                || call.arguments.args.iter().any(expr_has_dynamic_import)
+        }
+        _ => false,
+    }
+}
+
+fn stmt_has_dynamic_import(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Expr(s) => expr_has_dynamic_import(&s.value),
+        Stmt::Return(s) => s.value.as_ref().is_some_and(|v| expr_has_dynamic_import(v)),
+        Stmt::Assign(s) => expr_has_dynamic_import(&s.value),
+        Stmt::AnnAssign(s) => s.value.as_ref().is_some_and(|v| expr_has_dynamic_import(v)),
+        Stmt::FunctionDef(f) => f.body.iter().any(stmt_has_dynamic_import),
+        Stmt::If(s) => {
+            s.body.iter().any(stmt_has_dynamic_import)
+                || s.elif_else_clauses
+                    .iter()
+                    .any(|c| c.body.iter().any(stmt_has_dynamic_import))
+        }
+        Stmt::For(s) => s
+            .body
+            .iter()
+            .chain(s.orelse.iter())
+            .any(stmt_has_dynamic_import),
+        Stmt::While(s) => s
+            .body
+            .iter()
+            .chain(s.orelse.iter())
+            .any(stmt_has_dynamic_import),
+        Stmt::With(s) => s.body.iter().any(stmt_has_dynamic_import),
+        Stmt::Try(s) => s
+            .body
+            .iter()
+            .chain(s.orelse.iter())
+            .chain(s.finalbody.iter())
+            .any(stmt_has_dynamic_import),
+        _ => false,
+    }
+}
+
+/// Returns `true` if the module body contains any dynamic import calls
+/// (`importlib.import_module(...)` or `__import__(...)`).
+pub(crate) fn has_dynamic_imports(body: &[Stmt]) -> bool {
+    body.iter().any(stmt_has_dynamic_import)
+}
+
 pub(crate) fn parse_tests_from_source(root: &Path, file: &Path, source: &str) -> Vec<TestItem> {
     trace!(
         "parsing {}",
@@ -1230,5 +1295,47 @@ def test_fn():
         assert!(items[0].skip.is_none());
         assert!(items[0].todo.is_none());
         assert!(items[0].xfail.is_none());
+    }
+
+    // --- has_dynamic_imports tests ---
+
+    fn parse_body(source: &str) -> Vec<Stmt> {
+        parse_module(source).expect("parse").into_syntax().body
+    }
+
+    #[test]
+    fn detects_importlib_import_module() {
+        let body = parse_body("import importlib\nmod = importlib.import_module('foo')\n");
+        assert!(has_dynamic_imports(&body));
+    }
+
+    #[test]
+    fn detects_dunder_import() {
+        let body = parse_body("mod = __import__('foo')\n");
+        assert!(has_dynamic_imports(&body));
+    }
+
+    #[test]
+    fn no_dynamic_imports_in_static_code() {
+        let body = parse_body("import os\nfrom pathlib import Path\n");
+        assert!(!has_dynamic_imports(&body));
+    }
+
+    #[test]
+    fn detects_dynamic_import_inside_function() {
+        let body = parse_body("def load():\n    importlib.import_module('bar')\n");
+        assert!(has_dynamic_imports(&body));
+    }
+
+    #[test]
+    fn detects_dynamic_import_inside_if() {
+        let body = parse_body("if True:\n    __import__('baz')\n");
+        assert!(has_dynamic_imports(&body));
+    }
+
+    #[test]
+    fn detects_dynamic_import_inside_try() {
+        let body = parse_body("try:\n    importlib.import_module('x')\nexcept:\n    pass\n");
+        assert!(has_dynamic_imports(&body));
     }
 }

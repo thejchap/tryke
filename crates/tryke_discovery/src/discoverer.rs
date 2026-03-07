@@ -43,10 +43,14 @@ impl Discoverer {
         );
         for path in &paths {
             let text = std::fs::read_to_string(path).unwrap_or_default();
-            let imports = if let Ok(parsed) = parse_module(&text) {
-                crate::extract_local_imports(&self.root, path, &parsed.syntax().body)
+            let (imports, dynamic) = if let Ok(parsed) = parse_module(&text) {
+                let body = &parsed.syntax().body;
+                (
+                    crate::extract_local_imports(&self.root, path, body),
+                    crate::has_dynamic_imports(body),
+                )
             } else {
-                vec![]
+                (vec![], false)
             };
             if let Some(file) = self.inputs.get(path) {
                 if file.text(&self.db) != &text {
@@ -59,6 +63,11 @@ impl Discoverer {
                 self.inputs.insert(path.clone(), file);
             }
             self.import_graph.update(path.clone(), imports);
+            if dynamic {
+                self.import_graph.mark_always_dirty(path.clone());
+            } else {
+                self.import_graph.clear_always_dirty(path);
+            }
         }
         let path_set: HashSet<&PathBuf> = paths.iter().collect();
         let removed: Vec<PathBuf> = self
@@ -97,10 +106,14 @@ impl Discoverer {
             if path.extension().is_some_and(|ext| ext == "py") {
                 if path.exists() {
                     let text = std::fs::read_to_string(path).unwrap_or_default();
-                    let imports = if let Ok(parsed) = parse_module(&text) {
-                        crate::extract_local_imports(&self.root, path, &parsed.syntax().body)
+                    let (imports, dynamic) = if let Ok(parsed) = parse_module(&text) {
+                        let body = &parsed.syntax().body;
+                        (
+                            crate::extract_local_imports(&self.root, path, body),
+                            crate::has_dynamic_imports(body),
+                        )
                     } else {
-                        vec![]
+                        (vec![], false)
                     };
                     if let Some(file) = self.inputs.get(path) {
                         if file.text(&self.db) != &text {
@@ -116,6 +129,11 @@ impl Discoverer {
                         self.inputs.insert(path.clone(), file);
                     }
                     self.import_graph.update(path.clone(), imports);
+                    if dynamic {
+                        self.import_graph.mark_always_dirty(path.clone());
+                    } else {
+                        self.import_graph.clear_always_dirty(path);
+                    }
                 } else {
                     trace!(
                         "rediscover_changed: removing deleted file {}",
@@ -524,5 +542,54 @@ mod tests {
         assert!(files.contains(&&PathBuf::from("utils.py")));
         assert!(files.contains(&&PathBuf::from("test_foo.py")));
         assert!(!files.contains(&&PathBuf::from("test_isolated.py")));
+    }
+
+    #[test]
+    fn dynamic_import_file_always_included_in_tests_for_changed() {
+        let dynamic_src = "import importlib\nmod = importlib.import_module('utils')\n@test\ndef test_dyn():\n    pass\n";
+        let static_src = "@test\ndef test_static():\n    pass\n";
+        let utils_src = "def helper(): pass\n";
+        let dir = make_project(&[
+            ("test_dynamic.py", dynamic_src),
+            ("test_static.py", static_src),
+            ("utils.py", utils_src),
+        ]);
+        let mut discoverer = Discoverer::new(dir.path());
+        discoverer.rediscover();
+
+        // Change only utils.py — test_dynamic should be included because it has dynamic imports
+        let changed = vec![dir.path().join("utils.py")];
+        let tests = discoverer.tests_for_changed(&changed);
+        let names: Vec<&str> = tests.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            names.contains(&"test_dyn"),
+            "test_dyn should be included (always-dirty), got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"test_static"),
+            "test_static should not be affected"
+        );
+    }
+
+    #[test]
+    fn dynamic_import_cleared_when_removed_from_source() {
+        let dynamic_src = "import importlib\nmod = importlib.import_module('foo')\n@test\ndef test_dyn():\n    pass\n";
+        let dir = make_project(&[("test_dynamic.py", dynamic_src)]);
+        let mut discoverer = Discoverer::new(dir.path());
+        discoverer.rediscover();
+
+        // Rewrite without dynamic import
+        let static_src = "@test\ndef test_dyn():\n    pass\n";
+        fs::write(dir.path().join("test_dynamic.py"), static_src).expect("write");
+        discoverer.rediscover_changed(&[dir.path().join("test_dynamic.py")]);
+
+        // Now changing an unrelated file should NOT include test_dynamic
+        let changed = vec![dir.path().join("unrelated.py")];
+        let tests = discoverer.tests_for_changed(&changed);
+        let names: Vec<&str> = tests.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            !names.contains(&"test_dyn"),
+            "test_dyn should no longer be always-dirty, got: {names:?}"
+        );
     }
 }

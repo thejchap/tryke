@@ -9,6 +9,7 @@ use log::trace;
 pub struct ImportGraph {
     forward: HashMap<PathBuf, HashSet<PathBuf>>,
     reverse: HashMap<PathBuf, HashSet<PathBuf>>,
+    always_dirty: HashSet<PathBuf>,
 }
 
 pub struct GraphEntry {
@@ -46,11 +47,20 @@ impl ImportGraph {
                 }
             }
         }
+        self.always_dirty.remove(file);
         // Keep reverse[file] intact so affected_files can still find importers of a deleted file
     }
 
+    pub fn mark_always_dirty(&mut self, file: PathBuf) {
+        self.always_dirty.insert(file);
+    }
+
+    pub fn clear_always_dirty(&mut self, file: &Path) {
+        self.always_dirty.remove(file);
+    }
+
     /// BFS over the reverse index: returns all files that transitively depend on `changed`.
-    /// Includes the changed files themselves.
+    /// Includes the changed files themselves and any always-dirty files.
     pub fn affected_files(&self, changed: &[PathBuf]) -> HashSet<PathBuf> {
         let mut visited: HashSet<PathBuf> = HashSet::new();
         let mut queue: VecDeque<PathBuf> = VecDeque::new();
@@ -76,6 +86,7 @@ impl ImportGraph {
             }
         }
 
+        visited.extend(self.always_dirty.iter().cloned());
         visited
     }
 
@@ -214,5 +225,37 @@ mod tests {
         // utils.py has no forward edges (it never had any), reverse is unchanged
         let affected = g.affected_files(&[p("/proj/utils.py")]);
         assert!(affected.contains(&p("/proj/test_foo.py")));
+    }
+
+    #[test]
+    fn always_dirty_included_in_affected_files() {
+        let mut g = ImportGraph::default();
+        g.update(p("/proj/test_foo.py"), vec![]);
+        g.mark_always_dirty(p("/proj/test_dyn.py"));
+
+        let affected = g.affected_files(&[p("/proj/utils.py")]);
+        assert!(affected.contains(&p("/proj/test_dyn.py")));
+        assert!(affected.contains(&p("/proj/utils.py")));
+    }
+
+    #[test]
+    fn clear_always_dirty_removes_file() {
+        let mut g = ImportGraph::default();
+        g.mark_always_dirty(p("/proj/test_dyn.py"));
+        g.clear_always_dirty(&p("/proj/test_dyn.py"));
+
+        let affected = g.affected_files(&[p("/proj/utils.py")]);
+        assert!(!affected.contains(&p("/proj/test_dyn.py")));
+    }
+
+    #[test]
+    fn remove_clears_always_dirty() {
+        let mut g = ImportGraph::default();
+        g.update(p("/proj/test_dyn.py"), vec![]);
+        g.mark_always_dirty(p("/proj/test_dyn.py"));
+        g.remove(&p("/proj/test_dyn.py"));
+
+        let affected = g.affected_files(&[p("/proj/other.py")]);
+        assert!(!affected.contains(&p("/proj/test_dyn.py")));
     }
 }

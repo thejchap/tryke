@@ -963,8 +963,12 @@ def test_failing():
         let tests = discover_tests(dir.path(), false);
         assert_eq!(tests.len(), 2);
 
-        let pool =
-            WorkerPool::with_python_path(1, "python3", &[dir.path().to_path_buf(), python_dir]);
+        let pool = WorkerPool::with_python_path(
+            1,
+            "python3",
+            dir.path(),
+            &[dir.path().to_path_buf(), python_dir],
+        );
         pool.warm().await;
         let mut results: Vec<_> = pool.run(tests).collect().await;
         results.sort_by(|a, b| a.test.name.cmp(&b.test.name));

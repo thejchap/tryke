@@ -21,12 +21,13 @@ pub struct WorkerProcess {
 
 impl WorkerProcess {
     #[expect(clippy::missing_errors_doc)]
-    pub fn spawn(python_bin: &str, python_path: &[&Path]) -> Result<Self> {
+    pub fn spawn(python_bin: &str, python_path: &[&Path], root: &Path) -> Result<Self> {
         debug!("spawning worker: {python_bin} -m tryke.worker");
         let pythonpath = build_pythonpath(python_path);
         let mut child = Command::new(python_bin)
             .args(["-m", "tryke.worker"])
             .env("PYTHONPATH", &pythonpath)
+            .current_dir(root)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -148,7 +149,12 @@ fn build_pythonpath(extra: &[&Path]) -> String {
     let existing = std::env::var("PYTHONPATH").unwrap_or_default();
     let mut parts: Vec<String> = extra
         .iter()
-        .map(|p| p.to_string_lossy().into_owned())
+        .map(|p| {
+            p.canonicalize()
+                .unwrap_or_else(|_| p.to_path_buf())
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect();
     if !existing.is_empty() {
         parts.push(existing);

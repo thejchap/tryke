@@ -5,6 +5,10 @@
 run `maturin develop` to build the rust extension and install it into the active
 virtualenv so you can import and test the python bindings locally.
 
+## python tests
+
+run `cargo run test` to test tryke's own python code, using tryke
+
 ## updating snapshot tests
 
 1. run `cargo test` — new or changed snapshots are written to

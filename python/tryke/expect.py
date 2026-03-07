@@ -22,6 +22,7 @@ class _SkipMarker:
         /,
         *,
         reason: str | None = None,
+        name: str | None = None,  # noqa: ARG002
         tags: list[str] | None = None,  # noqa: ARG002
     ) -> _Fn | _Decorator:
         if callable(fn_or_reason):
@@ -46,6 +47,7 @@ class _TodoMarker:
         /,
         *,
         description: str | None = None,
+        name: str | None = None,  # noqa: ARG002
         tags: list[str] | None = None,  # noqa: ARG002
     ) -> _Fn | _Decorator:
         if callable(fn_or_desc):
@@ -70,6 +72,7 @@ class _XfailMarker:
         /,
         *,
         reason: str | None = None,
+        name: str | None = None,  # noqa: ARG002
         tags: list[str] | None = None,  # noqa: ARG002
     ) -> _Fn | _Decorator:
         if callable(fn_or_reason):

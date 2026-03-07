@@ -27,18 +27,24 @@ pub struct WorkerPool {
 impl WorkerPool {
     #[must_use]
     pub fn new(size: usize, python_bin: &str, root: &Path) -> Self {
-        Self::with_python_path(size, python_bin, &[root.to_path_buf()])
+        Self::with_python_path(size, python_bin, root, &[root.to_path_buf()])
     }
 
     #[must_use]
-    pub fn with_python_path(size: usize, python_bin: &str, python_path: &[PathBuf]) -> Self {
+    pub fn with_python_path(
+        size: usize,
+        python_bin: &str,
+        root: &Path,
+        python_path: &[PathBuf],
+    ) -> Self {
         let size = size.max(1);
         let mut worker_txs = Vec::with_capacity(size);
         let python_path = python_path.to_vec();
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         for _ in 0..size {
             let (tx, rx) = mpsc::unbounded_channel();
             let bin = python_bin.to_owned();
-            tokio::spawn(worker_task(bin, python_path.clone(), rx));
+            tokio::spawn(worker_task(bin, python_path.clone(), root.clone(), rx));
             worker_txs.push(tx);
         }
         Self {
@@ -105,6 +111,7 @@ pub use tryke_types::path_to_module;
 async fn worker_task(
     python_bin: String,
     python_path: Vec<std::path::PathBuf>,
+    root: PathBuf,
     mut rx: mpsc::UnboundedReceiver<WorkerMsg>,
 ) {
     let path_refs: Vec<&Path> = python_path.iter().map(PathBuf::as_path).collect();
@@ -116,7 +123,7 @@ async fn worker_task(
                 trace!("worker_task: ping (pre-warm)");
                 if worker.is_none() {
                     trace!("worker_task: spawning process for warm-up");
-                    match WorkerProcess::spawn(&python_bin, &path_refs) {
+                    match WorkerProcess::spawn(&python_bin, &path_refs, &root) {
                         Ok(w) => worker = Some(w),
                         Err(e) => {
                             debug!("worker_task: warm-up spawn failed: {e}");
@@ -129,7 +136,7 @@ async fn worker_task(
                 trace!("worker_task: running test {}", test.name);
                 if worker.is_none() {
                     trace!("worker_task: spawning process");
-                    match WorkerProcess::spawn(&python_bin, &path_refs) {
+                    match WorkerProcess::spawn(&python_bin, &path_refs, &root) {
                         Ok(w) => worker = Some(w),
                         Err(e) => {
                             let msg = format!("worker spawn failed: {e}");
@@ -167,7 +174,7 @@ async fn worker_task(
                     Err(first_err) => {
                         debug!("worker_task: run_test error, respawning for retry");
                         let stderr_output = w.drain_stderr().await;
-                        worker = WorkerProcess::spawn(&python_bin, &path_refs).ok();
+                        worker = WorkerProcess::spawn(&python_bin, &path_refs, &root).ok();
                         if let Some(w) = worker.as_mut()
                             && let Ok(result) = w.run_test(&test).await
                         {

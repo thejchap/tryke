@@ -10,7 +10,9 @@ use clap_verbosity_flag::{Verbosity as LogVerbosity, WarnLevel};
 use log::{debug, warn};
 use tokio_stream::StreamExt;
 use tryke_discovery::Discoverer;
-use tryke_reporter::{DotReporter, JSONReporter, JUnitReporter, Reporter, TextReporter, Verbosity};
+use tryke_reporter::{
+    DotReporter, JSONReporter, JUnitReporter, LlmReporter, Reporter, TextReporter, Verbosity,
+};
 use tryke_runner::{WorkerPool, resolve_python};
 use tryke_types::filter::TestFilter;
 use tryke_types::{RunSummary, TestOutcome};
@@ -31,6 +33,7 @@ enum ReporterFormat {
     Json,
     Dot,
     Junit,
+    Llm,
 }
 
 #[derive(Debug, Subcommand)]
@@ -307,6 +310,7 @@ fn build_reporter(format: &ReporterFormat, verbosity: Verbosity) -> Box<dyn Repo
         ReporterFormat::Json => Box::new(JSONReporter::new()),
         ReporterFormat::Dot => Box::new(DotReporter::new()),
         ReporterFormat::Junit => Box::new(JUnitReporter::new()),
+        ReporterFormat::Llm => Box::new(LlmReporter::new()),
     }
 }
 

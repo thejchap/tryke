@@ -1,6 +1,8 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+use log::debug;
 
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::Stream;
@@ -22,13 +24,14 @@ pub struct WorkerPool {
 
 impl WorkerPool {
     #[must_use]
-    pub fn new(size: usize, python_bin: &str) -> Self {
+    pub fn new(size: usize, python_bin: &str, root: &Path) -> Self {
         let size = size.max(1);
         let mut worker_txs = Vec::with_capacity(size);
+        let python_path = vec![root.to_owned()];
         for _ in 0..size {
             let (tx, rx) = mpsc::unbounded_channel();
             let bin = python_bin.to_owned();
-            tokio::spawn(worker_task(bin, rx));
+            tokio::spawn(worker_task(bin, python_path.clone(), rx));
             worker_txs.push(tx);
         }
         Self {
@@ -92,37 +95,54 @@ pub fn path_to_module(root: &Path, path: &Path) -> Option<String> {
     Some(parts.join("."))
 }
 
-async fn worker_task(python_bin: String, mut rx: mpsc::UnboundedReceiver<WorkerMsg>) {
+async fn worker_task(
+    python_bin: String,
+    python_path: Vec<std::path::PathBuf>,
+    mut rx: mpsc::UnboundedReceiver<WorkerMsg>,
+) {
+    let path_refs: Vec<&Path> = python_path.iter().map(PathBuf::as_path).collect();
     let mut worker: Option<WorkerProcess> = None;
 
     while let Some(msg) = rx.recv().await {
         match msg {
             WorkerMsg::Test(test, result_tx) => {
+                debug!("worker_task: running test {}", test.name);
                 if worker.is_none() {
-                    worker = WorkerProcess::spawn(&python_bin).ok();
+                    debug!("worker_task: spawning process");
+                    worker = WorkerProcess::spawn(&python_bin, &path_refs).ok();
                 }
                 let Some(w) = worker.as_mut() else {
+                    debug!("worker_task: spawn failed, dropping test {}", test.name);
                     continue;
                 };
                 if let Ok(result) = w.run_test(&test).await {
+                    debug!("worker_task: test {} done", test.name);
                     let _ = result_tx.send(result);
                 } else {
+                    debug!("worker_task: run_test error, respawning for retry");
                     // worker died; respawn and retry once
-                    worker = WorkerProcess::spawn(&python_bin).ok();
+                    worker = WorkerProcess::spawn(&python_bin, &path_refs).ok();
                     if let Some(w) = worker.as_mut()
                         && let Ok(result) = w.run_test(&test).await
                     {
+                        debug!("worker_task: retry succeeded for {}", test.name);
                         let _ = result_tx.send(result);
+                    } else {
+                        debug!("worker_task: retry failed, dropping test {}", test.name);
                     }
                 }
             }
             WorkerMsg::Reload(modules, ack_tx) => {
+                debug!("worker_task: reload {modules:?}");
                 if let Some(w) = worker.as_mut() {
                     let _ = w.reload(&modules).await;
                 }
                 let _ = ack_tx.send(());
             }
-            WorkerMsg::Shutdown => break,
+            WorkerMsg::Shutdown => {
+                debug!("worker_task: shutdown");
+                break;
+            }
         }
     }
 

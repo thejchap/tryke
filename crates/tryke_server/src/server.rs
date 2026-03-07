@@ -7,7 +7,7 @@ use bytes::Bytes;
 use log::debug;
 use tokio::{net::TcpListener, sync::broadcast};
 use tryke_discovery::Discoverer;
-use tryke_runner::WorkerPool;
+use tryke_runner::{WorkerPool, resolve_python};
 
 use crate::{
     handler::ConnectionHandler,
@@ -36,7 +36,8 @@ impl Server {
     #[expect(clippy::missing_panics_doc)]
     pub async fn run_on_listener(self, listener: TcpListener) -> anyhow::Result<()> {
         let size = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
-        let pool = Arc::new(WorkerPool::new(size, "python3"));
+        let python = resolve_python(&self.root);
+        let pool = Arc::new(WorkerPool::new(size, &python, &self.root));
 
         let (bcast_tx, _) = broadcast::channel::<Bytes>(256);
         let disc = Arc::new(Mutex::new(Discoverer::new(&self.root)));

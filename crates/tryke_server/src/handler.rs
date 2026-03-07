@@ -243,7 +243,7 @@ mod tests {
     }
 
     fn make_pool() -> Arc<WorkerPool> {
-        Arc::new(WorkerPool::new(1, "python3"))
+        Arc::new(WorkerPool::new(1, "python3", std::path::Path::new(".")))
     }
 
     #[tokio::test]
@@ -379,7 +379,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let dir = make_root();
         let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
-        let pool = Arc::new(WorkerPool::new(1, "python3"));
+        let pool = Arc::new(WorkerPool::new(1, "python3", std::path::Path::new(".")));
 
         let (bcast_tx, _) = broadcast::channel::<Bytes>(64);
         let bcast_tx_clone = bcast_tx.clone();

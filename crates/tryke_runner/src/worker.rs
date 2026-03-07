@@ -1,6 +1,8 @@
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
+use log::debug;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tryke_types::{Assertion, TestItem, TestOutcome, TestResult};
@@ -18,15 +20,19 @@ pub struct WorkerProcess {
 
 impl WorkerProcess {
     #[expect(clippy::missing_errors_doc)]
-    pub fn spawn(python_bin: &str) -> Result<Self> {
+    pub fn spawn(python_bin: &str, python_path: &[&Path]) -> Result<Self> {
+        debug!("spawning worker: {python_bin} -m tryke.worker");
+        let pythonpath = build_pythonpath(python_path);
         let mut child = Command::new(python_bin)
             .args(["-m", "tryke.worker"])
+            .env("PYTHONPATH", &pythonpath)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()?;
         let stdin = BufWriter::new(child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?);
         let stdout = BufReader::new(child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?);
+        debug!("worker spawned (pid {:?})", child.id());
         Ok(Self {
             child,
             stdin,
@@ -50,13 +56,17 @@ impl WorkerProcess {
         };
         let mut line = serde_json::to_string(&req)?;
         line.push('\n');
+        debug!("worker rpc -> {}", line.trim());
         self.stdin.write_all(line.as_bytes()).await?;
         self.stdin.flush().await?;
+        debug!("worker rpc: waiting for response");
         let mut resp_line = String::new();
         let n = self.stdout.read_line(&mut resp_line).await?;
         if n == 0 {
+            debug!("worker rpc: stdout EOF");
             return Err(anyhow!("worker process closed stdout"));
         }
+        debug!("worker rpc <- {}", resp_line.trim());
         let resp: RpcResponse = serde_json::from_str(resp_line.trim())?;
         if let Some(err) = resp.error {
             return Err(anyhow!("rpc error {}: {}", err.code, err.message));
@@ -98,6 +108,18 @@ impl WorkerProcess {
     pub async fn shutdown(&mut self) {
         let _ = self.child.kill().await;
     }
+}
+
+fn build_pythonpath(extra: &[&Path]) -> String {
+    let existing = std::env::var("PYTHONPATH").unwrap_or_default();
+    let mut parts: Vec<String> = extra
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    if !existing.is_empty() {
+        parts.push(existing);
+    }
+    parts.join(":")
 }
 
 fn convert_assertion(wire: AssertionWire) -> Assertion {

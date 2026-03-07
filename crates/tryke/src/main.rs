@@ -11,7 +11,7 @@ use log::debug;
 use tokio_stream::StreamExt;
 use tryke_discovery::Discoverer;
 use tryke_reporter::{DotReporter, JSONReporter, JUnitReporter, Reporter, TextReporter, Verbosity};
-use tryke_runner::{WorkerPool, path_to_module};
+use tryke_runner::{WorkerPool, path_to_module, resolve_python};
 use tryke_types::{RunSummary, TestOutcome};
 
 #[derive(Debug, Parser)]
@@ -64,13 +64,13 @@ fn worker_pool_size() -> usize {
 
 async fn run_test(reporter: &mut dyn Reporter, root: Option<&Path>) -> Result<()> {
     let start = Instant::now();
-    let tests = match root {
-        Some(r) => tryke_discovery::discover_from(r),
-        None => tryke_discovery::discover(),
-    };
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let root_path = root.unwrap_or(&cwd);
+    let tests = tryke_discovery::discover_from(root_path);
     reporter.on_run_start(&tests);
 
-    let pool = WorkerPool::new(worker_pool_size(), "python3");
+    let python = resolve_python(root_path);
+    let pool = WorkerPool::new(worker_pool_size(), &python, root_path);
     let mut stream = pool.run(tests);
     let mut passed = 0usize;
     let mut failed = 0usize;
@@ -157,7 +157,8 @@ async fn run_watch(reporter: &mut dyn Reporter, root: Option<&Path>) -> Result<(
     let root = root.unwrap_or(&cwd);
     let mut discoverer = Discoverer::new(root);
 
-    let pool = WorkerPool::new(worker_pool_size(), "python3");
+    let python = resolve_python(root);
+    let pool = WorkerPool::new(worker_pool_size(), &python, root);
 
     clear_if_tty();
     run_cycle(reporter, &mut discoverer, &pool).await?;
@@ -453,7 +454,7 @@ mod tests {
             .expect("write test file");
         let mut discoverer = Discoverer::new(dir.path());
         let mut reporter = TextReporter::new();
-        let pool = WorkerPool::new(1, "python3");
+        let pool = WorkerPool::new(1, "python3", dir.path());
         assert!(
             run_cycle(&mut reporter, &mut discoverer, &pool)
                 .await
@@ -467,7 +468,7 @@ mod tests {
         std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
         let mut discoverer = Discoverer::new(dir.path());
         let mut reporter = JSONReporter::with_writer(Vec::new());
-        let pool = WorkerPool::new(1, "python3");
+        let pool = WorkerPool::new(1, "python3", dir.path());
         assert!(
             run_cycle(&mut reporter, &mut discoverer, &pool)
                 .await

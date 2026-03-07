@@ -1,0 +1,147 @@
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
+
+use bytes::Bytes;
+use log::debug;
+use tokio::{net::TcpListener, sync::broadcast};
+use tryke_discovery::Discoverer;
+
+use crate::{
+    handler::ConnectionHandler,
+    protocol::{DiscoverCompleteParams, Notification},
+    watcher::spawn_watcher,
+};
+
+pub struct Server {
+    port: u16,
+    root: PathBuf,
+}
+
+impl Server {
+    #[must_use]
+    pub fn new(port: u16, root: PathBuf) -> Self {
+        Self { port, root }
+    }
+
+    #[expect(clippy::missing_errors_doc)]
+    pub async fn run(self) -> anyhow::Result<()> {
+        let listener = TcpListener::bind(("0.0.0.0", self.port)).await?;
+        self.run_on_listener(listener).await
+    }
+
+    #[expect(clippy::missing_errors_doc)]
+    #[expect(clippy::missing_panics_doc)]
+    pub async fn run_on_listener(self, listener: TcpListener) -> anyhow::Result<()> {
+        let (bcast_tx, _) = broadcast::channel::<Bytes>(256);
+        let disc = Arc::new(Mutex::new(Discoverer::new(&self.root)));
+
+        let (std_tx, std_rx) = std::sync::mpsc::channel::<Vec<std::path::PathBuf>>();
+        let _debouncer = spawn_watcher(&self.root, std_tx)?;
+
+        let disc_for_watcher = Arc::clone(&disc);
+        let bcast_for_watcher = bcast_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            while let Ok(paths) = std_rx.recv() {
+                let tests = disc_for_watcher.lock().unwrap().rediscover_changed(&paths);
+                debug!("file change: rediscovered {} tests", tests.len());
+                let notif = Notification {
+                    jsonrpc: "2.0".to_string(),
+                    method: "discover_complete".to_string(),
+                    params: DiscoverCompleteParams { tests },
+                };
+                if let Ok(mut bytes) = serde_json::to_vec(&notif) {
+                    bytes.push(b'\n');
+                    let _ = bcast_for_watcher.send(Bytes::from(bytes));
+                }
+            }
+        });
+
+        loop {
+            let (stream, addr) = listener.accept().await?;
+            debug!("accepted connection from {addr}");
+            let bcast_rx = bcast_tx.subscribe();
+            let bcast_tx_conn = bcast_tx.clone();
+            let disc_conn = Arc::clone(&disc);
+            tokio::spawn(async move {
+                ConnectionHandler::new(stream, disc_conn, bcast_rx, bcast_tx_conn)
+                    .run()
+                    .await;
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use std::time::Duration;
+
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+        net::{TcpListener, TcpStream},
+        time,
+    };
+
+    use super::*;
+
+    async fn start_server() -> (u16, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let root = dir.path().to_path_buf();
+        tokio::spawn(async move {
+            Server::new(port, root)
+                .run_on_listener(listener)
+                .await
+                .unwrap();
+        });
+        (port, dir)
+    }
+
+    #[tokio::test]
+    async fn ping_pong() {
+        let (port, _dir) = start_server().await;
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        stream
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n")
+            .await
+            .unwrap();
+        let mut reader = BufReader::new(&mut stream);
+        let mut line = String::new();
+        time::timeout(Duration::from_secs(2), reader.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(val["result"], "pong");
+    }
+
+    #[tokio::test]
+    async fn multi_client_both_receive_broadcast() {
+        let (port, dir) = start_server().await;
+        fs::write(dir.path().join("test_m.py"), "@test\ndef test_m(): pass\n")
+            .expect("write test file");
+
+        let mut c1 = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let mut c2 = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+        let run_req = format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"run\",\"params\":{{\"root\":\"{}\",\"tests\":null}}}}\n",
+            dir.path().display()
+        );
+        c1.write_all(run_req.as_bytes()).await.unwrap();
+
+        let mut r2 = BufReader::new(&mut c2);
+        let mut line2 = String::new();
+        time::timeout(Duration::from_secs(2), r2.read_line(&mut line2))
+            .await
+            .unwrap()
+            .unwrap();
+        let v2: serde_json::Value = serde_json::from_str(line2.trim()).unwrap();
+        assert!(v2.get("method").is_some(), "c2 should receive a broadcast");
+    }
+}

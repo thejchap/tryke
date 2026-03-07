@@ -3,6 +3,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub(crate) mod db;
+mod discoverer;
+pub use discoverer::Discoverer;
+
 use ignore::WalkBuilder;
 use ruff_python_ast::{Expr, Stmt};
 use ruff_python_parser::parse_module;
@@ -10,14 +14,14 @@ use ruff_source_file::LineIndex;
 use ruff_text_size::Ranged;
 use tryke_types::{ExpectedAssertion, TestItem};
 
-fn find_project_root(start: &Path) -> Option<PathBuf> {
+pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
     start
         .ancestors()
         .find(|dir| dir.join("pyproject.toml").exists())
         .map(Path::to_path_buf)
 }
 
-fn collect_python_files(root: &Path) -> Vec<PathBuf> {
+pub(crate) fn collect_python_files(root: &Path) -> Vec<PathBuf> {
     WalkBuilder::new(root)
         .build()
         .filter_map(Result::ok)
@@ -262,14 +266,11 @@ fn extract_expected_assertions(
     out
 }
 
-fn parse_tests_from_file(root: &Path, file: &Path) -> Vec<TestItem> {
-    let Ok(source) = fs::read_to_string(file) else {
+pub(crate) fn parse_tests_from_source(root: &Path, file: &Path, source: &str) -> Vec<TestItem> {
+    let Ok(parsed) = parse_module(source) else {
         return vec![];
     };
-    let Ok(parsed) = parse_module(&source) else {
-        return vec![];
-    };
-    let line_index = LineIndex::from_source_text(&source);
+    let line_index = LineIndex::from_source_text(source);
     let module = parsed.syntax();
     let body = &module.body;
     body.iter()
@@ -295,7 +296,7 @@ fn parse_tests_from_file(root: &Path, file: &Path) -> Vec<TestItem> {
                     display_name,
                     expected_assertions: extract_expected_assertions(
                         &func.body,
-                        &source,
+                        source,
                         &line_index,
                     ),
                 })
@@ -306,16 +307,28 @@ fn parse_tests_from_file(root: &Path, file: &Path) -> Vec<TestItem> {
         .collect()
 }
 
+fn parse_tests_from_file(root: &Path, file: &Path) -> Vec<TestItem> {
+    let Ok(source) = fs::read_to_string(file) else {
+        return vec![];
+    };
+    parse_tests_from_source(root, file, &source)
+}
+
 #[must_use]
-pub fn discover() -> Vec<TestItem> {
-    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let root = find_project_root(&cwd).unwrap_or_else(|| cwd.clone());
+pub fn discover_from(start: &Path) -> Vec<TestItem> {
+    let root = find_project_root(start).unwrap_or_else(|| start.to_path_buf());
     let mut files = collect_python_files(&root);
     files.sort();
     files
         .iter()
         .flat_map(|f| parse_tests_from_file(&root, f))
         .collect()
+}
+
+#[must_use]
+pub fn discover() -> Vec<TestItem> {
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    discover_from(&cwd)
 }
 
 #[cfg(test)]
@@ -701,6 +714,20 @@ def test_fn():
         let (dir, file) = write_source(source);
         let items = parse_tests_from_file(dir.path(), &file);
         assert_eq!(items[0].expected_assertions[0].label, None);
+    }
+
+    #[test]
+    fn discover_from_finds_tests_in_given_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        fs::write(
+            dir.path().join("test_example.py"),
+            "@test\ndef test_hello():\n    pass\n",
+        )
+        .expect("write test file");
+        let items = discover_from(dir.path());
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "test_hello");
     }
 
     #[test]

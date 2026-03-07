@@ -15,6 +15,7 @@ authors = ["Justin Chapman <commonmodestudio@gmail.com>"]
 license = "MIT"
 
 [workspace.dependencies]
+salsa = "0.26"
 ignore = "0.4"
 ruff_python_ast = { git = "https://github.com/astral-sh/ruff", tag = "0.15.4" }
 ruff_python_parser = { git = "https://github.com/astral-sh/ruff", tag = "0.15.4" }
@@ -24,7 +25,11 @@ miette = { version = "7", features = ["fancy"] }
 owo-colors = { version = "4", features = ["supports-color"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time"] }
+notify = "6"
+notify-debouncer-mini = "0.4"
 tryke = { path = "crates/tryke" }
 tryke_discovery = { path = "crates/tryke_discovery" }
 tryke_reporter = { path = "crates/tryke_reporter" }
+tryke_server = { path = "crates/tryke_server" }
 tryke_types = { path = "crates/tryke_types" }

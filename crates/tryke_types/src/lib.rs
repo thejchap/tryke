@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExpectedAssertion {
     pub subject: String,
     pub matcher: String,
@@ -11,7 +11,7 @@ pub struct ExpectedAssertion {
     pub label: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Assertion {
     pub expression: String,
     pub file: Option<String>,
@@ -22,7 +22,7 @@ pub struct Assertion {
     pub received: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TestItem {
     pub name: String,
     pub module_path: String,
@@ -42,7 +42,7 @@ impl TestItem {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "status", content = "detail")]
 pub enum TestOutcome {
     Passed,
@@ -55,7 +55,7 @@ pub enum TestOutcome {
     },
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TestResult {
     pub test: TestItem,
     pub outcome: TestOutcome,
@@ -64,7 +64,7 @@ pub struct TestResult {
     pub stderr: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RunSummary {
     pub passed: usize,
     pub failed: usize,

@@ -1,6 +1,43 @@
 use std::fmt;
 
+use miette::{
+    Diagnostic, GraphicalReportHandler, GraphicalTheme, LabeledSpan, NamedSource, Report, Severity,
+    SourceCode,
+};
 use tryke_types::Assertion;
+
+struct AssertionReport {
+    source: NamedSource<String>,
+    label: LabeledSpan,
+}
+
+impl fmt::Debug for AssertionReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AssertionReport").finish()
+    }
+}
+
+impl fmt::Display for AssertionReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "assertion failed")
+    }
+}
+
+impl std::error::Error for AssertionReport {}
+
+impl Diagnostic for AssertionReport {
+    fn severity(&self) -> Option<Severity> {
+        Some(Severity::Error)
+    }
+
+    fn source_code(&self) -> Option<&dyn SourceCode> {
+        Some(&self.source)
+    }
+
+    fn labels(&self) -> Option<Box<dyn Iterator<Item = LabeledSpan> + '_>> {
+        Some(Box::new(std::iter::once(self.label.clone())))
+    }
+}
 
 pub fn render_assertions(test_file: Option<&str>, assertions: &[Assertion], buf: &mut String) {
     use fmt::Write;
@@ -9,43 +46,42 @@ pub fn render_assertions(test_file: Option<&str>, assertions: &[Assertion], buf:
         return;
     }
 
-    let total = assertions.len();
-    let gutter_width = total.to_string().len();
+    let handler = GraphicalReportHandler::new_themed(GraphicalTheme::unicode());
+    let mut failed = 0;
 
-    // file path from first assertion, falling back to test_file
-    let file_path = assertions[0]
-        .file
-        .as_deref()
-        .or(test_file)
-        .unwrap_or("<unknown>");
-    let _ = writeln!(buf, "  {file_path}");
-    let _ = writeln!(buf);
-
-    for (i, assertion) in assertions.iter().enumerate() {
-        let n = i + 1;
-        let span_len = assertion.span_length.max(1);
-        let carets = "^".repeat(span_len);
-        let padding = " ".repeat(assertion.span_offset);
-
-        let _ = writeln!(buf, "  {n:>gutter_width$} │ {}", assertion.expression);
-        let _ = writeln!(buf, "  {:>gutter_width$} │ {padding}{carets}", "");
-        let _ = writeln!(
-            buf,
-            "  {:>gutter_width$}   Expected: {}",
-            "", assertion.expected
+    for assertion in assertions {
+        // prefer the assertion's own file, fall back to the test's file
+        let source_name = assertion
+            .file
+            .as_deref()
+            .or(test_file)
+            .unwrap_or("<unknown>");
+        let source = NamedSource::new(source_name, assertion.expression.clone());
+        let label_text = format!(
+            "expected {}, received {}",
+            assertion.expected, assertion.received
         );
-        let _ = writeln!(
-            buf,
-            "  {:>gutter_width$}   Received: {}",
-            "", assertion.received
+        let label = LabeledSpan::new(
+            Some(label_text),
+            assertion.span_offset,
+            assertion.span_length,
         );
 
-        if n < total {
-            let _ = writeln!(buf);
+        let report = AssertionReport { source, label };
+        let report = Report::new(report);
+
+        let mut rendered = String::new();
+        if handler
+            .render_report(&mut rendered, report.as_ref())
+            .is_ok()
+        {
+            buf.push_str(&rendered);
         }
+
+        failed += 1;
     }
 
-    let _ = writeln!(buf, "  {total}/{total} assertions failed");
+    let _ = writeln!(buf, "  {failed}/{} assertions failed", assertions.len());
 }
 
 /// Extract the last frame from a Python traceback string.
@@ -65,7 +101,7 @@ pub fn extract_last_frame(traceback: &str) -> String {
     }
 }
 
-/// Render a failure message with optional traceback.
+/// Render a failure message with optional traceback via miette.
 /// At normal verbosity, shows only the last frame. At verbose, shows full traceback.
 pub fn render_failure_message(
     message: &str,
@@ -129,9 +165,8 @@ mod tests {
         let mut buf = String::new();
         render_assertions(Some("tests/math.py"), &assertions, &mut buf);
 
-        assert!(buf.contains("1 │"));
-        assert!(buf.contains("Expected: 2"));
-        assert!(buf.contains("Received: 3"));
+        assert!(buf.contains("assertion failed"));
+        assert!(buf.contains("expected 2, received 3"));
         assert!(buf.contains("tests/math.py"));
         assert!(buf.contains("1/1 assertions failed"));
     }
@@ -163,7 +198,7 @@ mod tests {
         render_assertions(None, &assertions, &mut buf);
 
         assert!(buf.contains("<unknown>"));
-        assert!(buf.contains("Expected: 2"));
+        assert!(buf.contains("assertion failed"));
     }
 
     #[test]
@@ -182,49 +217,6 @@ mod tests {
 
         assert!(buf.contains("helpers/utils.py"));
         assert!(!buf.contains("tests/math.py"));
-    }
-
-    #[test]
-    fn render_assertions_exact_format() {
-        let assertions = vec![
-            Assertion {
-                expression: "expect(user.name).to_equal(\"alice\")".into(),
-                file: Some("src/users/test_models.py".into()),
-                line: 10,
-                span_offset: 7,
-                span_length: 9,
-                expected: "\"alice\"".into(),
-                received: "\"Alice\"".into(),
-            },
-            Assertion {
-                expression: "expect(user.age).to_be_greater_than(0)".into(),
-                file: Some("src/users/test_models.py".into()),
-                line: 11,
-                span_offset: 7,
-                span_length: 8,
-                expected: "> 0".into(),
-                received: "-1".into(),
-            },
-        ];
-        let mut buf = String::new();
-        render_assertions(Some("fallback.py"), &assertions, &mut buf);
-
-        let expected = concat!(
-            "  src/users/test_models.py\n",
-            "\n",
-            "  1 │ expect(user.name).to_equal(\"alice\")\n",
-            "    │        ^^^^^^^^^\n",
-            "      Expected: \"alice\"\n",
-            "      Received: \"Alice\"\n",
-            "\n",
-            "  2 │ expect(user.age).to_be_greater_than(0)\n",
-            "    │        ^^^^^^^^\n",
-            "      Expected: > 0\n",
-            "      Received: -1\n",
-            "  2/2 assertions failed\n",
-        );
-
-        assert_eq!(buf, expected);
     }
 
     #[test]

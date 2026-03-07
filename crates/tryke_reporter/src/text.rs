@@ -522,8 +522,8 @@ mod tests {
 
         let out = output(&r);
         assert!(out.contains("✗"));
-        assert!(out.contains("Expected: 2"));
-        assert!(out.contains("Received: 3"));
+        assert!(out.contains("assertion failed"));
+        assert!(out.contains("expected 2, received 3"));
     }
 
     #[test]

@@ -4,15 +4,25 @@ use std::{
     time::Duration,
 };
 
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use log::debug;
 use notify::RecommendedWatcher;
 use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
+
+fn build_gitignore(root: &Path) -> Gitignore {
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut builder = GitignoreBuilder::new(&canonical);
+    let _ = builder.add(canonical.join(".gitignore"));
+    let _ = builder.add(canonical.join(".ignore"));
+    builder.build().unwrap_or_else(|_| Gitignore::empty())
+}
 
 #[expect(clippy::missing_errors_doc)]
 pub fn spawn_watcher(
     root: &Path,
     tx: mpsc::Sender<Vec<PathBuf>>,
 ) -> anyhow::Result<Debouncer<RecommendedWatcher>> {
+    let gitignore = build_gitignore(root);
     let mut debouncer = new_debouncer(
         Duration::from_millis(200),
         move |res: DebounceEventResult| {
@@ -20,6 +30,11 @@ pub fn spawn_watcher(
                 let paths: Vec<PathBuf> = events
                     .iter()
                     .filter(|e| e.path.extension().is_some_and(|ext| ext == "py"))
+                    .filter(|e| {
+                        !gitignore
+                            .matched_path_or_any_parents(&e.path, false)
+                            .is_ignore()
+                    })
                     .map(|e| e.path.clone())
                     .collect();
                 if !paths.is_empty() {
@@ -84,6 +99,28 @@ mod tests {
         assert!(
             rx.recv_timeout(Duration::from_millis(500)).is_err(),
             "should not fire for non-py files"
+        );
+    }
+
+    #[test]
+    fn watcher_ignores_gitignored_py_files() {
+        let dir = make_project();
+        let venv_dir = dir.path().join(".venv");
+        fs::create_dir_all(&venv_dir).expect("create .venv");
+        fs::write(dir.path().join(".gitignore"), ".venv/\n").expect("write .gitignore");
+        let ignored_file = venv_dir.join("lib.py");
+        fs::write(&ignored_file, "x = 1").expect("write ignored py file");
+
+        let (tx, rx) = mpsc::channel();
+        let _debouncer = spawn_watcher(dir.path(), tx).expect("spawn watcher");
+
+        thread::sleep(Duration::from_millis(100));
+
+        fs::write(&ignored_file, "x = 2").expect("update ignored py file");
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(500)).is_err(),
+            "should not fire for gitignored py files"
         );
     }
 

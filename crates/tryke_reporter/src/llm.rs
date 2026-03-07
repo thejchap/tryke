@@ -3,6 +3,7 @@ use std::io;
 use tryke_types::{DiscoveryError, RunSummary, TestItem, TestOutcome, TestResult};
 
 use crate::Reporter;
+use crate::diagnostic::render_assertions_plain;
 
 pub struct LlmReporter<W: io::Write = io::Stdout> {
     writer: W,
@@ -73,15 +74,16 @@ impl<W: io::Write> Reporter for LlmReporter<W> {
                 write_location(&mut self.writer, result);
                 let _ = writeln!(self.writer);
 
-                for assertion in assertions {
-                    let _ = writeln!(
-                        self.writer,
-                        "  {}: expected {}, received {}",
-                        assertion.expression, assertion.expected, assertion.received
-                    );
-                }
-
-                if assertions.is_empty() && !message.is_empty() {
+                if !assertions.is_empty() {
+                    let test_file = result
+                        .test
+                        .file_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().into_owned());
+                    let mut buf = String::new();
+                    render_assertions_plain(test_file.as_deref(), assertions, &mut buf);
+                    let _ = write!(self.writer, "{buf}");
+                } else if !message.is_empty() {
                     let _ = writeln!(self.writer, "  {message}");
                 }
 
@@ -255,10 +257,10 @@ mod tests {
                 message: "assertion failed".into(),
                 traceback: None,
                 assertions: vec![Assertion {
-                    expression: "assert_eq!(a, 2)".into(),
+                    expression: "expect(a).to_equal(2)".into(),
                     file: None,
                     line: 10,
-                    span_offset: 14,
+                    span_offset: 7,
                     span_length: 1,
                     expected: "2".into(),
                     received: "3".into(),
@@ -270,7 +272,8 @@ mod tests {
         });
         let out = output(&r);
         assert!(out.contains("FAIL test_add"));
-        assert!(out.contains("assert_eq!(a, 2): expected 2, received 3"));
+        assert!(out.contains("expected 2, received 3"));
+        assert!(out.contains("1/1 assertions failed"));
     }
 
     #[test]

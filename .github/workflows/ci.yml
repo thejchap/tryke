@@ -54,3 +54,13 @@ jobs:
       - run: cargo build --verbose
       - run: cargo test --verbose
       - run: cargo run -- test
+
+  ci:
+    if: always()
+    needs: [fmt, clippy, ruff, ty, test]
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          if [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
+            exit 1
+          fi

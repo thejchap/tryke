@@ -2,10 +2,11 @@
 
 a modern, delightful test framework for python
 
+<img width="612" height="321" alt="Screenshot 2026-03-07 at 23 56 30" src="https://github.com/user-attachments/assets/0a01ab75-a276-4a43-a015-c72d9b28912b" />
+
 ## quickstart
 
 ```python
-# test_math.py
 from tryke import expect, test
 
 @test

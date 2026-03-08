@@ -43,9 +43,14 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
       - run: rustup show
       - uses: Swatinem/rust-cache@v2.8.2
       - run: cargo build --verbose
       - run: cargo test --verbose
+      - run: cargo run -- test

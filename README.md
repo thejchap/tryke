@@ -1,8 +1,17 @@
 # tryke
 
+
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![PyPI](https://img.shields.io/pypi/v/tryke)](https://pypi.org/project/tryke/)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![python](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue.svg)](https://python.org)
+[![CI](https://github.com/thejchap/tryke/actions/workflows/ci.yml/badge.svg)](https://github.com/thejchap/tryke/actions/workflows/ci.yml)
+
 a test framework for python that is modern, fast, and fun
 
 <img width="612" height="321" alt="Screenshot 2026-03-07 at 23 56 30" src="https://github.com/user-attachments/assets/0a01ab75-a276-4a43-a015-c72d9b28912b" />
+a modern, delightful test framework for python
+>>>>>>> f0ed394 (badges)
 
 ## quickstart
 

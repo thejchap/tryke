@@ -20,6 +20,7 @@ uvx tryke test
 ## features
 
 - per-assertion diagnostic output
+- in-source testing
 - concurrent test execution
 - watch mode with live reload
 - changed-files mode (only run tests affected by git changes)

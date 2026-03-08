@@ -12,7 +12,7 @@ jobs:
         with:
           manylinux: auto
           args: --release --out dist
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: wheels-ubuntu-latest
           path: dist/*.whl
@@ -30,7 +30,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2.8.2
       - uses: astral-sh/setup-uv@v5
       - run: uv build --wheel --out-dir dist
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.os }}
           path: dist/*.whl

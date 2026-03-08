@@ -1,6 +1,6 @@
 # tryke
 
-A modern Python test runner, written in Rust.
+a modern, delightful test framework for python
 
 ## quickstart
 

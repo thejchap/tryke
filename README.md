@@ -13,20 +13,21 @@ def test_addition():
     expect(1 + 1).to_equal(2)
 ```
 
-```
-$ tryke test
+```bash
+uvx tryke test
 ```
 
 ## features
 
 - per-assertion diagnostic output
-- concurrent test execution across worker processes
+- concurrent test execution
 - watch mode with live reload
 - changed-files mode (only run tests affected by git changes)
 - filter by name (`-k`) or marker (`-m`)
 - multiple reporters: text, json, junit, dot, llm
-- async test support
-- import dependency graph (`tryke graph`)
+- llm reporter with compact output
+- native async test support
+- client/server mode
 
 ## expect API
 

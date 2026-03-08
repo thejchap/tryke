@@ -1885,7 +1885,7 @@ dependencies = [
 
 [[package]]
 name = "tryke"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -1908,7 +1908,7 @@ dependencies = [
 
 [[package]]
 name = "tryke_discovery"
-version = "0.1.0"
+version = "0.0.5"
 dependencies = [
  "ignore",
  "log",
@@ -1924,7 +1924,7 @@ dependencies = [
 
 [[package]]
 name = "tryke_reporter"
-version = "0.1.0"
+version = "0.0.5"
 dependencies = [
  "miette",
  "owo-colors",
@@ -1935,7 +1935,7 @@ dependencies = [
 
 [[package]]
 name = "tryke_runner"
-version = "0.1.0"
+version = "0.0.5"
 dependencies = [
  "anyhow",
  "log",
@@ -1948,7 +1948,7 @@ dependencies = [
 
 [[package]]
 name = "tryke_server"
-version = "0.1.0"
+version = "0.0.5"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1969,7 +1969,7 @@ dependencies = [
 
 [[package]]
 name = "tryke_types"
-version = "0.1.0"
+version = "0.0.5"
 dependencies = [
  "serde",
 ]

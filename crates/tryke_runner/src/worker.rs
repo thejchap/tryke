@@ -150,10 +150,16 @@ fn build_pythonpath(extra: &[&Path]) -> String {
     let mut parts: Vec<String> = extra
         .iter()
         .map(|p| {
-            p.canonicalize()
+            let s = p
+                .canonicalize()
                 .unwrap_or_else(|_| p.to_path_buf())
                 .to_string_lossy()
-                .into_owned()
+                .into_owned();
+            // std::fs::canonicalize on windows produces \\?\ extended-length
+            // paths that python doesn't understand
+            #[cfg(windows)]
+            let s = s.strip_prefix(r"\\?\").unwrap_or(&s).to_string();
+            s
         })
         .collect();
     if !existing.is_empty() {
@@ -344,10 +350,13 @@ mod tests {
 
     #[test]
     fn build_pythonpath_joins_paths() {
-        let paths = vec![Path::new("/a"), Path::new("/b")];
-        let result = build_pythonpath(&paths);
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let a = build_pythonpath(&[dir_a.path()]);
+        let b = build_pythonpath(&[dir_b.path()]);
+        let result = build_pythonpath(&[dir_a.path(), dir_b.path()]);
         let sep = if cfg!(windows) { ";" } else { ":" };
-        assert_eq!(result, format!("/a{sep}/b"));
+        assert_eq!(result, format!("{a}{sep}{b}"));
     }
 
     #[test]

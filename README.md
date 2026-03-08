@@ -29,7 +29,7 @@ uvx tryke test
 - native async test support
 - client/server mode
 
-## expect API
+## expect api
 
 ```python
 expect(value).to_equal(other)          # == equality
@@ -84,7 +84,7 @@ async def test_async_fetch():
     expect(result).to_be_truthy()
 ```
 
-## CLI usage
+## cli usage
 
 ```
 tryke test                     # run all tests
@@ -117,3 +117,8 @@ Or run directly without installing:
 ```
 uvx tryke test
 ```
+
+## ide support
+
+- [neotest](https://github.com/thejchap/neotest-tryke)
+- [vscode](https://github.com/thejchap/tryke-vscode)

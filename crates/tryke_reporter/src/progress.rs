@@ -192,6 +192,10 @@ mod tests {
             xfailed: 0,
             todo: 0,
             duration: Duration::from_millis(15),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
         });
         assert!(reporter.inner.completed);
         assert_eq!(reporter.inner.results.len(), 2);
@@ -213,6 +217,10 @@ mod tests {
             xfailed: 0,
             todo: 0,
             duration: Duration::from_millis(0),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
         });
         assert!(reporter.inner.completed);
     }

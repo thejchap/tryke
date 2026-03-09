@@ -5,6 +5,7 @@ pub mod junit;
 pub mod llm;
 pub mod progress;
 pub mod reporter;
+pub mod summary;
 pub mod text;
 
 pub use dot::DotReporter;

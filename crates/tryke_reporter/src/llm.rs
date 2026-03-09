@@ -359,6 +359,10 @@ mod tests {
             xfailed: 0,
             todo: 0,
             duration: Duration::from_millis(35),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
         });
         let out = output(&r);
         assert_eq!(out.trim(), "47 passed [35.00ms]");
@@ -375,6 +379,10 @@ mod tests {
             xfailed: 0,
             todo: 0,
             duration: Duration::from_millis(35),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
         });
         let out = output(&r);
         assert_eq!(
@@ -406,6 +414,10 @@ mod tests {
             xfailed: 0,
             todo: 0,
             duration: Duration::from_millis(1),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
         });
         let out = output(&r);
         assert!(
@@ -499,6 +511,10 @@ mod tests {
             xfailed: 0,
             todo: 0,
             duration: Duration::from_millis(15),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
         });
 
         let out = output(&r);

@@ -116,6 +116,14 @@ pub struct RunSummary {
     #[serde(default)]
     pub todo: usize,
     pub duration: Duration,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_duration: Option<Duration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_duration: Option<Duration>,
+    #[serde(default)]
+    pub file_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

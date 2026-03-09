@@ -215,6 +215,10 @@ pub async fn handle_request(
                 xfailed,
                 todo,
                 duration: start.elapsed(),
+                discovery_duration: None,
+                test_duration: None,
+                file_count: 0,
+                start_time: None,
             };
             broadcast_notification(
                 bcast_tx,

@@ -1,7 +1,7 @@
 use std::{
     env,
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
@@ -140,12 +140,13 @@ async fn run_tests(
     tests: Vec<tryke_types::TestItem>,
     maxfail: Option<usize>,
     workers: Option<usize>,
+    discovery_duration: Option<Duration>,
 ) -> Result<()> {
     let python = resolve_python(root);
     let pool_size = workers.unwrap_or_else(|| tests.len().min(worker_pool_size()));
     let pool = WorkerPool::new(pool_size, &python, root);
     pool.warm().await;
-    report_cycle(reporter, tests, &pool, maxfail).await?;
+    report_cycle(reporter, tests, &pool, maxfail, discovery_duration).await?;
     pool.shutdown();
     Ok(())
 }
@@ -155,7 +156,18 @@ async fn report_cycle(
     tests: Vec<tryke_types::TestItem>,
     pool: &WorkerPool,
     maxfail: Option<usize>,
+    discovery_duration: Option<Duration>,
 ) -> Result<()> {
+    use std::collections::HashSet;
+
+    let file_count = tests
+        .iter()
+        .filter_map(|t| t.file_path.as_ref())
+        .collect::<HashSet<_>>()
+        .len();
+
+    let start_time = chrono::Local::now().format("%H:%M:%S").to_string();
+
     let start = Instant::now();
     reporter.on_run_start(&tests);
 
@@ -218,7 +230,11 @@ async fn report_cycle(
         errors,
         xfailed,
         todo,
-        duration: start.elapsed(),
+        duration: discovery_duration.unwrap_or_default() + start.elapsed(),
+        discovery_duration,
+        test_duration: Some(start.elapsed()),
+        file_count,
+        start_time: Some(start_time),
     });
 
     Ok(())
@@ -248,8 +264,10 @@ async fn run_watch(
     pool.warm().await;
 
     clear_if_tty();
+    let disc_start = Instant::now();
     let tests = test_filter.apply(discoverer.rediscover());
-    report_cycle(reporter, tests, &pool, maxfail).await?;
+    let disc_dur = Some(disc_start.elapsed());
+    report_cycle(reporter, tests, &pool, maxfail, disc_dur).await?;
 
     let (tx, rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
     let _debouncer = tryke_server::watcher::spawn_watcher(root, tx)?;
@@ -261,8 +279,10 @@ async fn run_watch(
         }
         discoverer.rediscover_changed(&paths);
         clear_if_tty();
+        let disc_start = Instant::now();
         let tests = test_filter.apply(discoverer.tests_for_changed(&paths));
-        report_cycle(reporter, tests, &pool, maxfail).await?;
+        let disc_dur = Some(disc_start.elapsed());
+        report_cycle(reporter, tests, &pool, maxfail, disc_dur).await?;
     }
 
     pool.shutdown();
@@ -391,8 +411,10 @@ fn main() -> Result<()> {
             let test_filter = TestFilter::from_args(paths, filter.as_deref(), markers.as_deref())
                 .map_err(|e| anyhow::anyhow!(e))?;
 
+            let discovery_start = Instant::now();
             let tests = discover_tests(root_path, *changed);
             let tests = test_filter.apply(tests);
+            let discovery_duration = discovery_start.elapsed();
 
             if *collect_only {
                 rep.on_collect_complete(&tests);
@@ -404,6 +426,7 @@ fn main() -> Result<()> {
                     tests,
                     resolved_maxfail,
                     *workers,
+                    Some(discovery_duration),
                 ))
             }
         }
@@ -483,7 +506,7 @@ mod tests {
         discoverer: &mut Discoverer,
         pool: &WorkerPool,
     ) -> Result<()> {
-        report_cycle(reporter, discoverer.rediscover(), pool, None).await
+        report_cycle(reporter, discoverer.rediscover(), pool, None, None).await
     }
 
     #[tokio::test]
@@ -492,7 +515,7 @@ mod tests {
         let root = cwd();
         let tests = discover_tests(&root, false);
         assert!(
-            run_tests(&mut reporter, &root, tests, None, None)
+            run_tests(&mut reporter, &root, tests, None, None, None)
                 .await
                 .is_ok()
         );
@@ -504,7 +527,7 @@ mod tests {
         let root = cwd();
         let tests = discover_tests(&root, false);
         assert!(
-            run_tests(&mut reporter, &root, tests, None, None)
+            run_tests(&mut reporter, &root, tests, None, None, None)
                 .await
                 .is_ok()
         );
@@ -516,7 +539,7 @@ mod tests {
         let root = cwd();
         let tests = discover_tests(&root, false);
         assert!(
-            run_tests(&mut reporter, &root, tests, None, None)
+            run_tests(&mut reporter, &root, tests, None, None, None)
                 .await
                 .is_ok()
         );
@@ -528,7 +551,7 @@ mod tests {
         let root = cwd();
         let tests = discover_tests(&root, false);
         assert!(
-            run_tests(&mut reporter, &root, tests, None, None)
+            run_tests(&mut reporter, &root, tests, None, None, None)
                 .await
                 .is_ok()
         );
@@ -843,7 +866,7 @@ mod tests {
         // non-git directory → git_changed_files returns None → discover_tests runs all (0 here)
         let tests = discover_tests(dir.path(), true);
         assert!(
-            run_tests(&mut reporter, dir.path(), tests, None, None)
+            run_tests(&mut reporter, dir.path(), tests, None, None, None)
                 .await
                 .is_ok()
         );

@@ -96,6 +96,10 @@ mod tests {
             xfailed: 0,
             todo: 0,
             duration: Duration::from_millis(15),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
         });
 
         let summary = reporter.summary.as_ref().expect("summary should be set");

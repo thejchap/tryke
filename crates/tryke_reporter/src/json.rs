@@ -225,6 +225,10 @@ mod tests {
             xfailed: 0,
             todo: 0,
             duration: Duration::from_millis(100),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
         };
 
         r.on_run_complete(&summary);
@@ -284,6 +288,10 @@ mod tests {
             xfailed: 0,
             todo: 0,
             duration: Duration::from_millis(15),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
         });
 
         let lines = output_lines(&r);

@@ -152,7 +152,7 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                         self.writer,
                         "{} {} {}",
                         "✓".green(),
-                        display.bold(),
+                        display,
                         format!("[{}]", format_duration(result.duration)).dimmed()
                     );
                     if matches!(self.verbosity, Verbosity::Verbose) {
@@ -169,7 +169,7 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                     self.writer,
                     "{} {} {}",
                     "✗".red(),
-                    display.bold(),
+                    display,
                     format!("[{}]", format_duration(result.duration)).dimmed()
                 );
                 if matches!(self.verbosity, Verbosity::Verbose) {
@@ -198,13 +198,7 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                 }
             }
             TestOutcome::Error { message } => {
-                let _ = writeln!(
-                    self.writer,
-                    "{} {} {}",
-                    "!".red(),
-                    display.bold(),
-                    "[error]".red()
-                );
+                let _ = writeln!(self.writer, "{} {} {}", "!".red(), display, "[error]".red());
                 let mut buf = String::new();
                 render_error_message(message, &mut buf);
                 let _ = write!(self.writer, "{buf}");
@@ -232,7 +226,7 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                     self.writer,
                     "{} {} {}",
                     "!".red(),
-                    display.bold(),
+                    display,
                     "XPASS (unexpected pass)".red()
                 );
             }
@@ -272,57 +266,7 @@ impl<W: io::Write> Reporter for TextReporter<W> {
     }
 
     fn on_run_complete(&mut self, summary: &RunSummary) {
-        let _ = writeln!(self.writer);
-
-        let _ = writeln!(
-            self.writer,
-            " {} {}",
-            summary.passed.green(),
-            "pass".green()
-        );
-
-        if summary.failed > 0 {
-            let _ = writeln!(self.writer, " {} {}", summary.failed.red(), "fail".red());
-        }
-
-        if summary.errors > 0 {
-            let _ = writeln!(self.writer, " {} {}", summary.errors.red(), "error".red());
-        }
-
-        if summary.skipped > 0 {
-            let _ = writeln!(
-                self.writer,
-                " {} {}",
-                summary.skipped.yellow(),
-                "skip".yellow()
-            );
-        }
-
-        if summary.xfailed > 0 {
-            let _ = writeln!(
-                self.writer,
-                " {} {}",
-                summary.xfailed.dimmed(),
-                "xfail".dimmed()
-            );
-        }
-
-        if summary.todo > 0 {
-            let _ = writeln!(self.writer, " {} {}", summary.todo.cyan(), "todo".cyan());
-        }
-
-        let total = summary.passed
-            + summary.failed
-            + summary.skipped
-            + summary.errors
-            + summary.xfailed
-            + summary.todo;
-        let _ = writeln!(
-            self.writer,
-            "Ran {} tests. [{}]",
-            total,
-            format_duration(summary.duration)
-        );
+        crate::summary::write_summary(&mut self.writer, summary);
     }
 
     fn on_discovery_error(&mut self, error: &DiscoveryError) {
@@ -449,16 +393,20 @@ mod tests {
             xfailed: 0,
             todo: 0,
             duration: Duration::from_millis(100),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
         });
 
         let out = output(&r);
-        assert!(out.contains('3'));
-        assert!(out.contains("pass"));
-        assert!(out.contains('1'));
-        assert!(out.contains("fail"));
-        assert!(out.contains('2'));
-        assert!(out.contains("skip"));
-        assert!(out.contains("Ran 6 tests"));
+        assert!(out.contains("FAIL"));
+        assert!(out.contains("Tests"));
+        assert!(out.contains("1 failed"));
+        assert!(out.contains("3 passed"));
+        assert!(out.contains("2 skipped"));
+        assert!(out.contains("(6)"));
+        assert!(out.contains("Duration"));
     }
 
     #[test]
@@ -472,13 +420,18 @@ mod tests {
             xfailed: 0,
             todo: 0,
             duration: Duration::from_millis(50),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
         });
 
         let out = output(&r);
-        assert!(out.contains("pass"));
-        assert!(!out.contains("fail"));
-        assert!(!out.contains("skip"));
-        assert!(out.contains("Ran 5 tests"));
+        assert!(out.contains("PASS"));
+        assert!(out.contains("5 passed"));
+        assert!(!out.contains("failed"));
+        assert!(!out.contains("skipped"));
+        assert!(out.contains("(5)"));
     }
 
     #[test]
@@ -506,14 +459,18 @@ mod tests {
             xfailed: 0,
             todo: 0,
             duration: Duration::from_millis(10),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
         });
 
         let out = output(&r);
         assert!(out.contains("tryke test"));
         assert!(out.contains("✓"));
         assert!(out.contains("test_one"));
-        assert!(out.contains("pass"));
-        assert!(out.contains("Ran 1 tests"));
+        assert!(out.contains("PASS"));
+        assert!(out.contains("1 passed"));
     }
 
     #[test]

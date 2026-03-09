@@ -34,15 +34,6 @@ impl<W: io::Write> DotReporter<W> {
     }
 }
 
-fn format_duration(d: std::time::Duration) -> String {
-    let ms = d.as_secs_f64() * 1000.0;
-    if ms < 1000.0 {
-        format!("{ms:.2}ms")
-    } else {
-        format!("{:.2}s", d.as_secs_f64())
-    }
-}
-
 impl<W: io::Write> Reporter for DotReporter<W> {
     fn on_run_start(&mut self, _tests: &[TestItem]) {
         let _ = writeln!(
@@ -70,57 +61,7 @@ impl<W: io::Write> Reporter for DotReporter<W> {
 
     fn on_run_complete(&mut self, summary: &RunSummary) {
         let _ = writeln!(self.writer);
-        let _ = writeln!(self.writer);
-
-        let _ = writeln!(
-            self.writer,
-            " {} {}",
-            summary.passed.green(),
-            "pass".green()
-        );
-
-        if summary.failed > 0 {
-            let _ = writeln!(self.writer, " {} {}", summary.failed.red(), "fail".red());
-        }
-
-        if summary.errors > 0 {
-            let _ = writeln!(self.writer, " {} {}", summary.errors.red(), "error".red());
-        }
-
-        if summary.skipped > 0 {
-            let _ = writeln!(
-                self.writer,
-                " {} {}",
-                summary.skipped.yellow(),
-                "skip".yellow()
-            );
-        }
-
-        if summary.xfailed > 0 {
-            let _ = writeln!(
-                self.writer,
-                " {} {}",
-                summary.xfailed.dimmed(),
-                "xfail".dimmed()
-            );
-        }
-
-        if summary.todo > 0 {
-            let _ = writeln!(self.writer, " {} {}", summary.todo.cyan(), "todo".cyan());
-        }
-
-        let total = summary.passed
-            + summary.failed
-            + summary.skipped
-            + summary.errors
-            + summary.xfailed
-            + summary.todo;
-        let _ = writeln!(
-            self.writer,
-            "Ran {} tests. [{}]",
-            total,
-            format_duration(summary.duration)
-        );
+        crate::summary::write_summary(&mut self.writer, summary);
     }
 }
 
@@ -202,12 +143,17 @@ mod tests {
             xfailed: 0,
             todo: 0,
             duration: Duration::from_millis(100),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
         });
         let out = output(&r);
-        assert!(out.contains("pass"));
-        assert!(out.contains("fail"));
-        assert!(out.contains("skip"));
-        assert!(out.contains("Ran 6 tests"));
+        assert!(out.contains("FAIL"));
+        assert!(out.contains("1 failed"));
+        assert!(out.contains("3 passed"));
+        assert!(out.contains("2 skipped"));
+        assert!(out.contains("(6)"));
     }
 
     #[test]
@@ -231,12 +177,16 @@ mod tests {
             xfailed: 0,
             todo: 0,
             duration: Duration::from_millis(10),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
         });
 
         let out = output(&r);
         assert!(out.contains("tryke test"));
         assert!(out.contains('.'));
-        assert!(out.contains("pass"));
-        assert!(out.contains("Ran 1 tests"));
+        assert!(out.contains("PASS"));
+        assert!(out.contains("1 passed"));
     }
 }

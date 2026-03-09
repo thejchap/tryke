@@ -619,10 +619,16 @@ pub fn discover_from(start: &Path) -> Vec<TestItem> {
     let root = find_project_root(start).unwrap_or_else(|| start.to_path_buf());
     let mut files = collect_python_files(&root);
     files.sort();
-    files
+    let mut tests: Vec<TestItem> = files
         .par_iter()
         .flat_map_iter(|f| parse_tests_from_file(&root, f))
-        .collect()
+        .collect();
+    tests.sort_by(|a, b| {
+        a.file_path
+            .cmp(&b.file_path)
+            .then(a.line_number.cmp(&b.line_number))
+    });
+    tests
 }
 
 /// # Errors
@@ -1337,5 +1343,34 @@ def test_fn():
     fn detects_dynamic_import_inside_try() {
         let body = parse_body("try:\n    importlib.import_module('x')\nexcept:\n    pass\n");
         assert!(has_dynamic_imports(&body));
+    }
+
+    #[test]
+    fn discover_from_returns_tests_in_line_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        let source = "\
+@test
+def test_third():
+    pass
+
+@test
+def test_first():
+    pass
+
+@test
+def test_second():
+    pass
+";
+        fs::write(dir.path().join("test_order.py"), source).expect("write test file");
+        let items = discover_from(dir.path());
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].name, "test_third");
+        assert_eq!(items[1].name, "test_first");
+        assert_eq!(items[2].name, "test_second");
+        // line numbers are monotonically increasing
+        for pair in items.windows(2) {
+            assert!(pair[0].line_number < pair[1].line_number);
+        }
     }
 }

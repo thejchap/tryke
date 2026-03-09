@@ -11,7 +11,8 @@ use log::{debug, warn};
 use tokio_stream::StreamExt;
 use tryke_discovery::Discoverer;
 use tryke_reporter::{
-    DotReporter, JSONReporter, JUnitReporter, LlmReporter, Reporter, TextReporter, Verbosity,
+    DotReporter, JSONReporter, JUnitReporter, LlmReporter, ProgressReporter, Reporter,
+    TextReporter, Verbosity,
 };
 use tryke_runner::{WorkerPool, resolve_python};
 use tryke_types::filter::TestFilter;
@@ -326,10 +327,17 @@ fn run_graph(root: Option<&Path>, connected_only: bool) -> Result<()> {
 }
 
 fn build_reporter(format: &ReporterFormat, verbosity: Verbosity) -> Box<dyn Reporter> {
+    let use_progress = tryke_reporter::progress::supports_progress()
+        && matches!(format, ReporterFormat::Text | ReporterFormat::Dot);
+
     match format {
+        ReporterFormat::Text if use_progress => Box::new(ProgressReporter::new(
+            TextReporter::with_verbosity(verbosity),
+        )),
         ReporterFormat::Text => Box::new(TextReporter::with_verbosity(verbosity)),
-        ReporterFormat::Json => Box::new(JSONReporter::new()),
+        ReporterFormat::Dot if use_progress => Box::new(ProgressReporter::new(DotReporter::new())),
         ReporterFormat::Dot => Box::new(DotReporter::new()),
+        ReporterFormat::Json => Box::new(JSONReporter::new()),
         ReporterFormat::Junit => Box::new(JUnitReporter::new()),
         ReporterFormat::Llm => Box::new(LlmReporter::new()),
     }
@@ -441,6 +449,14 @@ mod tests {
     use tryke_types::TestItem;
 
     use super::*;
+
+    fn test_python_bin() -> String {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("workspace root");
+        tryke_runner::resolve_python(&root)
+    }
 
     fn group_tests_by_file(tests: Vec<TestItem>) -> Vec<(Option<PathBuf>, Vec<TestItem>)> {
         let mut index: std::collections::HashMap<Option<PathBuf>, usize> =
@@ -742,7 +758,7 @@ mod tests {
             .expect("write test file");
         let mut discoverer = Discoverer::new(dir.path());
         let mut reporter = TextReporter::new();
-        let pool = WorkerPool::new(1, "python3", dir.path());
+        let pool = WorkerPool::new(1, &test_python_bin(), dir.path());
         assert!(
             run_cycle(&mut reporter, &mut discoverer, &pool)
                 .await
@@ -756,7 +772,7 @@ mod tests {
         std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
         let mut discoverer = Discoverer::new(dir.path());
         let mut reporter = JSONReporter::with_writer(Vec::new());
-        let pool = WorkerPool::new(1, "python3", dir.path());
+        let pool = WorkerPool::new(1, &test_python_bin(), dir.path());
         assert!(
             run_cycle(&mut reporter, &mut discoverer, &pool)
                 .await
@@ -965,7 +981,7 @@ def test_failing():
 
         let pool = WorkerPool::with_python_path(
             1,
-            "python3",
+            &test_python_bin(),
             dir.path(),
             &[dir.path().to_path_buf(), python_dir],
         );

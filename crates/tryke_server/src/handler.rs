@@ -249,6 +249,14 @@ mod tests {
 
     use super::*;
 
+    fn test_python_bin() -> String {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("workspace root");
+        tryke_runner::resolve_python(&root)
+    }
+
     fn make_root() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
         fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
@@ -256,7 +264,11 @@ mod tests {
     }
 
     fn make_pool() -> Arc<WorkerPool> {
-        Arc::new(WorkerPool::new(1, "python3", std::path::Path::new(".")))
+        Arc::new(WorkerPool::new(
+            1,
+            &test_python_bin(),
+            std::path::Path::new("."),
+        ))
     }
 
     #[tokio::test]

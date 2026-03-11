@@ -275,6 +275,7 @@ mod tests {
                     span_length: 1,
                     expected: "2".into(),
                     received: "3".into(),
+                    expected_arg_span: Some((19, 1)),
                 }],
             },
             duration: Duration::from_millis(5),
@@ -283,7 +284,8 @@ mod tests {
         });
         let out = output(&r);
         assert!(out.contains("FAIL test_add"));
-        assert!(out.contains("expected 2, received 3"));
+        assert!(out.contains("received 3"));
+        assert!(out.contains("expected 2"));
         assert!(out.contains("1/1 assertions failed"));
     }
 

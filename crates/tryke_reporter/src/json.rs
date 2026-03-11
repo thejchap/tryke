@@ -347,6 +347,7 @@ mod tests {
                     span_length: 1,
                     expected: "2".into(),
                     received: "3".into(),
+                    expected_arg_span: None,
                 }],
             },
             duration: Duration::from_millis(5),

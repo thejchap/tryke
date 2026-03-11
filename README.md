@@ -9,6 +9,7 @@ a test framework for python that is modern, fast, and fun
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue.svg)](https://python.org)
 [![CI](https://github.com/thejchap/tryke/actions/workflows/ci.yml/badge.svg)](https://github.com/thejchap/tryke/actions/workflows/ci.yml)
+[![docs](https://img.shields.io/badge/docs-thejchap.github.io%2Ftryke-blue)](https://thejchap.github.io/tryke/)
 
 
 <img width="1920" height="1080" alt="300shots_so" src="https://github.com/user-attachments/assets/b882039b-1638-4cf5-b511-7631fe355139" />
@@ -56,6 +57,27 @@ uv tool install tryke@latest
 # or run directly without installing
 uvx tryke test
 ```
+
+## benchmarks
+
+Run benchmarks locally to compare tryke vs pytest across different scales:
+
+```bash
+python benchmarks/generate.py   # generate synthetic test suites
+./benchmarks/run.sh              # run hyperfine benchmarks
+python benchmarks/summarize.py   # generate markdown summary
+```
+
+See the [benchmarks documentation](https://thejchap.github.io/tryke/benchmarks/) for methodology and details.
+
+## documentation
+
+Full documentation is available at **[thejchap.github.io/tryke](https://thejchap.github.io/tryke/)**:
+
+- [Quick Start](https://thejchap.github.io/tryke/quickstart/) — up and running in 2 minutes
+- [API Reference](https://thejchap.github.io/tryke/api/) — full decorator and assertion API
+- [Migration from pytest](https://thejchap.github.io/tryke/migration/) — side-by-side cheat sheet
+- [Why tryke?](https://thejchap.github.io/tryke/why/) — honest comparison with pytest
 
 ## ide support
 

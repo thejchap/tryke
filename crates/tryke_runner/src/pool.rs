@@ -14,7 +14,7 @@ use crate::worker::WorkerProcess;
 
 enum WorkerMsg {
     Ping(oneshot::Sender<()>),
-    Test(TestItem, oneshot::Sender<TestResult>),
+    Test(Box<TestItem>, oneshot::Sender<TestResult>),
     Reload(Vec<String>, oneshot::Sender<()>),
     Shutdown,
 }
@@ -61,7 +61,7 @@ impl WorkerPool {
         for test in tests {
             let (result_tx, result_rx) = oneshot::channel();
             let idx = next.fetch_add(1, Ordering::Relaxed) % n;
-            let _ = self.worker_txs[idx].send(WorkerMsg::Test(test, result_tx));
+            let _ = self.worker_txs[idx].send(WorkerMsg::Test(Box::new(test), result_tx));
             let stx = stream_tx.clone();
             tokio::spawn(async move {
                 if let Ok(result) = result_rx.await {
@@ -132,7 +132,8 @@ async fn worker_task(
                 }
                 let _ = ack_tx.send(());
             }
-            WorkerMsg::Test(test, result_tx) => {
+            WorkerMsg::Test(boxed_test, result_tx) => {
+                let test = *boxed_test;
                 trace!("worker_task: running test {}", test.name);
                 if worker.is_none() {
                     trace!("worker_task: spawning process");

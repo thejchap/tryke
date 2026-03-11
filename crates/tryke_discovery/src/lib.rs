@@ -553,6 +553,96 @@ pub(crate) fn has_dynamic_imports(body: &[Stmt]) -> bool {
     body.iter().any(stmt_has_dynamic_import)
 }
 
+/// Check whether an expression is a call to `describe` (bare or `tryke.describe`).
+/// Returns the describe name if it is, `None` otherwise.
+fn extract_describe_name(expr: &Expr) -> Option<String> {
+    let Expr::Call(call) = expr else {
+        return None;
+    };
+    let is_describe = match call.func.as_ref() {
+        Expr::Name(n) => n.id.as_str() == "describe",
+        Expr::Attribute(a) => {
+            a.attr.id.as_str() == "describe"
+                && matches!(&*a.value, Expr::Name(n) if n.id.as_str() == "tryke")
+        }
+        _ => return None,
+    };
+    if !is_describe {
+        return None;
+    }
+    if let Some(first) = call.arguments.args.first()
+        && let Expr::StringLiteral(s) = first
+    {
+        return Some(s.value.to_str().to_owned());
+    }
+    None
+}
+
+#[expect(clippy::too_many_arguments)]
+fn collect_tests_from_body(
+    stmts: &[Stmt],
+    top_body: &[Stmt],
+    root: &Path,
+    file: &Path,
+    source: &str,
+    line_index: &LineIndex,
+    groups: &[String],
+    out: &mut Vec<TestItem>,
+) {
+    for stmt in stmts {
+        if let Stmt::FunctionDef(func) = stmt
+            && let Some(dec) = func
+                .decorator_list
+                .iter()
+                .find(|d| is_tryke_test_decorator(&d.expression, top_body))
+        {
+            let display_name =
+                extract_decorator_name(&dec.expression).or_else(|| extract_docstring(&func.body));
+            let modifier = extract_test_modifier(&dec.expression);
+            let tags = extract_decorator_tags(&dec.expression);
+            let (skip, todo, xfail) = match modifier {
+                TestModifier::Skip(r) => (Some(r), None, None),
+                TestModifier::Todo(d) => (None, Some(d), None),
+                TestModifier::Xfail(r) => (None, None, Some(r)),
+                TestModifier::SkipIf | TestModifier::None => (None, None, None),
+            };
+            out.push(TestItem {
+                name: func.name.id.as_str().to_owned(),
+                module_path: path_to_module(root, file),
+                file_path: Some(file.strip_prefix(root).unwrap_or(file).to_path_buf()),
+                line_number: u32::try_from(line_index.line_index(func.range.start()).get()).ok(),
+                display_name,
+                expected_assertions: extract_expected_assertions(&func.body, source, line_index),
+                skip,
+                todo,
+                xfail,
+                tags,
+                groups: groups.to_vec(),
+            });
+        } else if let Stmt::With(with_stmt) = stmt {
+            // Check if this is a `with describe("name")` block
+            let describe_name = with_stmt
+                .items
+                .iter()
+                .find_map(|item| extract_describe_name(&item.context_expr));
+            if let Some(name) = describe_name {
+                let mut nested_groups = groups.to_vec();
+                nested_groups.push(name);
+                collect_tests_from_body(
+                    &with_stmt.body,
+                    top_body,
+                    root,
+                    file,
+                    source,
+                    line_index,
+                    &nested_groups,
+                    out,
+                );
+            }
+        }
+    }
+}
+
 pub(crate) fn parse_tests_from_source(root: &Path, file: &Path, source: &str) -> Vec<TestItem> {
     trace!(
         "parsing {}",
@@ -565,46 +655,9 @@ pub(crate) fn parse_tests_from_source(root: &Path, file: &Path, source: &str) ->
     let line_index = LineIndex::from_source_text(source);
     let module = parsed.syntax();
     let body = &module.body;
-    body.iter()
-        .filter_map(|stmt| {
-            if let Stmt::FunctionDef(func) = stmt
-                && let Some(dec) = func
-                    .decorator_list
-                    .iter()
-                    .find(|d| is_tryke_test_decorator(&d.expression, body))
-            {
-                let display_name = extract_decorator_name(&dec.expression)
-                    .or_else(|| extract_docstring(&func.body));
-                let modifier = extract_test_modifier(&dec.expression);
-                let tags = extract_decorator_tags(&dec.expression);
-                let (skip, todo, xfail) = match modifier {
-                    TestModifier::Skip(r) => (Some(r), None, None),
-                    TestModifier::Todo(d) => (None, Some(d), None),
-                    TestModifier::Xfail(r) => (None, None, Some(r)),
-                    TestModifier::SkipIf | TestModifier::None => (None, None, None),
-                };
-                Some(TestItem {
-                    name: func.name.id.as_str().to_owned(),
-                    module_path: path_to_module(root, file),
-                    file_path: Some(file.strip_prefix(root).unwrap_or(file).to_path_buf()),
-                    line_number: u32::try_from(line_index.line_index(func.range.start()).get())
-                        .ok(),
-                    display_name,
-                    expected_assertions: extract_expected_assertions(
-                        &func.body,
-                        source,
-                        &line_index,
-                    ),
-                    skip,
-                    todo,
-                    xfail,
-                    tags,
-                })
-            } else {
-                None
-            }
-        })
-        .collect()
+    let mut tests = Vec::new();
+    collect_tests_from_body(body, body, root, file, source, &line_index, &[], &mut tests);
+    tests
 }
 
 fn parse_tests_from_file(root: &Path, file: &Path) -> Vec<TestItem> {
@@ -1301,6 +1354,102 @@ def test_fn():
         assert!(items[0].skip.is_none());
         assert!(items[0].todo.is_none());
         assert!(items[0].xfail.is_none());
+    }
+
+    // --- describe block tests ---
+
+    #[test]
+    fn discovers_tests_in_describe_block() {
+        let source = "\
+with describe(\"Math\"):
+    @test
+    def test_add():
+        expect(1 + 1).to_equal(2)
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "test_add");
+        assert_eq!(items[0].groups, vec!["Math"]);
+    }
+
+    #[test]
+    fn discovers_tests_in_nested_describe() {
+        let source = "\
+with describe(\"Math\"):
+    with describe(\"addition\"):
+        @test
+        def test_add():
+            pass
+    with describe(\"subtraction\"):
+        @test
+        def test_sub():
+            pass
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].name, "test_add");
+        assert_eq!(items[0].groups, vec!["Math", "addition"]);
+        assert_eq!(items[1].name, "test_sub");
+        assert_eq!(items[1].groups, vec!["Math", "subtraction"]);
+    }
+
+    #[test]
+    fn top_level_tests_have_empty_groups() {
+        let source = "@test\ndef test_fn(): pass\n";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert!(items[0].groups.is_empty());
+    }
+
+    #[test]
+    fn mixed_describe_and_top_level() {
+        let source = "\
+with describe(\"Group\"):
+    @test
+    def test_grouped():
+        pass
+
+@test
+def test_standalone():
+    pass
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].groups, vec!["Group"]);
+        assert!(items[1].groups.is_empty());
+    }
+
+    #[test]
+    fn describe_with_tryke_qualified() {
+        let source = "\
+with tryke.describe(\"Suite\"):
+    @test
+    def test_fn():
+        pass
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].groups, vec!["Suite"]);
+    }
+
+    #[test]
+    fn describe_preserves_test_metadata() {
+        let source = "\
+with describe(\"Group\"):
+    @test.skip(\"broken\")
+    def test_fn():
+        expect(1).to_equal(2)
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].groups, vec!["Group"]);
+        assert_eq!(items[0].skip.as_deref(), Some("broken"));
+        assert_eq!(items[0].expected_assertions.len(), 1);
     }
 
     // --- has_dynamic_imports tests ---

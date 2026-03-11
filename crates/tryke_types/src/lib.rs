@@ -40,6 +40,10 @@ pub struct Assertion {
     pub span_length: usize,
     pub expected: String,
     pub received: String,
+    /// Byte offset and length of the matcher argument in `expression`,
+    /// e.g. the `2` in `expect(x).to_equal(2)`. `None` for no-arg matchers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_arg_span: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -58,6 +62,8 @@ pub struct TestItem {
     pub xfail: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
 }
 
 impl TestItem {

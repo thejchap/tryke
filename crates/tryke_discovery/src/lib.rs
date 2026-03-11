@@ -35,8 +35,7 @@ pub fn configured_excludes(start: &Path, cli_excludes: &[String]) -> Vec<String>
 }
 
 fn build_excludes(root: &Path, excludes: &[String]) -> Gitignore {
-    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let mut builder = GitignoreBuilder::new(&canonical);
+    let mut builder = GitignoreBuilder::new(root);
     for exclude in excludes {
         let _ = builder.add_line(None, exclude);
     }

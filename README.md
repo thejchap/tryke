@@ -9,8 +9,7 @@
 
 a test framework for python that is modern, fast, and fun
 
-<img width="610" height="294" alt="Screenshot 2026-03-08 at 00 07 31" src="https://github.com/user-attachments/assets/2920e023-d9bd-4906-b9ae-9b0a0d564600" />
-
+<img width="762" height="649" alt="Screenshot 2026-03-10 at 19 56 53" src="https://github.com/user-attachments/assets/753ffd7a-fe60-46ab-bf65-d585cfdb3222" />
 
 ## quickstart
 

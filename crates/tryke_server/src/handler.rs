@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant};
+use std::{collections::HashSet, sync::Arc, time::Instant};
 
 use bytes::Bytes;
 use serde_json::Value;
@@ -127,6 +127,96 @@ fn serialize_error(id: Option<Value>, code: i32, message: String) -> Option<Vec<
     })
 }
 
+async fn execute_run(
+    rp: RunParams,
+    disc: &tokio::sync::Mutex<tryke_discovery::Discoverer>,
+    bcast_tx: &broadcast::Sender<Bytes>,
+    pool: &WorkerPool,
+) -> RunSummary {
+    let discovery_start = Instant::now();
+    let all_tests = disc.lock().await.tests();
+    let mut tests = match &rp.tests {
+        Some(ids) => all_tests
+            .into_iter()
+            .filter(|t| ids.contains(&t.id()))
+            .collect::<Vec<_>>(),
+        None => all_tests,
+    };
+
+    let paths = rp.paths.unwrap_or_default();
+    if let Ok(tf) = TestFilter::from_args(&paths, rp.filter.as_deref(), rp.markers.as_deref()) {
+        tests = tf.apply(tests);
+    }
+    let discovery_duration = discovery_start.elapsed();
+
+    let file_count = tests
+        .iter()
+        .filter_map(|t| t.file_path.as_ref())
+        .collect::<HashSet<_>>()
+        .len();
+
+    let start_time = chrono::Local::now().format("%H:%M:%S").to_string();
+
+    broadcast_notification(
+        bcast_tx,
+        "run_start",
+        RunStartParams {
+            tests: tests.clone(),
+        },
+    );
+
+    let test_start = Instant::now();
+    let mut stream = pool.run(tests);
+    let mut passed = 0usize;
+    let mut failed = 0usize;
+    let mut skipped = 0usize;
+    let mut errors = 0usize;
+    let mut xfailed = 0usize;
+    let mut todo = 0usize;
+
+    while let Some(result) = stream.next().await {
+        match &result.outcome {
+            TestOutcome::Passed => passed += 1,
+            TestOutcome::Failed { .. } | TestOutcome::XPassed => failed += 1,
+            TestOutcome::Skipped { .. } => skipped += 1,
+            TestOutcome::Error { .. } => errors += 1,
+            TestOutcome::XFailed { .. } => xfailed += 1,
+            TestOutcome::Todo { .. } => todo += 1,
+        }
+        broadcast_notification(
+            bcast_tx,
+            "test_complete",
+            TestCompleteParams {
+                result: result.clone(),
+            },
+        );
+    }
+
+    let test_duration = test_start.elapsed();
+    let summary = RunSummary {
+        passed,
+        failed,
+        skipped,
+        errors,
+        xfailed,
+        todo,
+        duration: discovery_duration + test_duration,
+        discovery_duration: Some(discovery_duration),
+        test_duration: Some(test_duration),
+        file_count,
+        start_time: Some(start_time),
+    };
+    broadcast_notification(
+        bcast_tx,
+        "run_complete",
+        RunCompleteParams {
+            summary: summary.clone(),
+        },
+    );
+
+    summary
+}
+
 pub async fn handle_request(
     line: &str,
     disc: &tokio::sync::Mutex<tryke_discovery::Discoverer>,
@@ -155,79 +245,7 @@ pub async fn handle_request(
                 .params
                 .and_then(|p| serde_json::from_value::<RunParams>(p).ok())
                 .unwrap_or_default();
-
-            let all_tests = disc.lock().await.tests();
-            let mut tests = match &rp.tests {
-                Some(ids) => all_tests
-                    .into_iter()
-                    .filter(|t| ids.contains(&t.id()))
-                    .collect::<Vec<_>>(),
-                None => all_tests,
-            };
-
-            let paths = rp.paths.unwrap_or_default();
-            if let Ok(tf) =
-                TestFilter::from_args(&paths, rp.filter.as_deref(), rp.markers.as_deref())
-            {
-                tests = tf.apply(tests);
-            }
-
-            broadcast_notification(
-                bcast_tx,
-                "run_start",
-                RunStartParams {
-                    tests: tests.clone(),
-                },
-            );
-
-            let start = Instant::now();
-            let mut stream = pool.run(tests);
-            let mut passed = 0usize;
-            let mut failed = 0usize;
-            let mut skipped = 0usize;
-            let mut errors = 0usize;
-            let mut xfailed = 0usize;
-            let mut todo = 0usize;
-
-            while let Some(result) = stream.next().await {
-                match &result.outcome {
-                    TestOutcome::Passed => passed += 1,
-                    TestOutcome::Failed { .. } | TestOutcome::XPassed => failed += 1,
-                    TestOutcome::Skipped { .. } => skipped += 1,
-                    TestOutcome::Error { .. } => errors += 1,
-                    TestOutcome::XFailed { .. } => xfailed += 1,
-                    TestOutcome::Todo { .. } => todo += 1,
-                }
-                broadcast_notification(
-                    bcast_tx,
-                    "test_complete",
-                    TestCompleteParams {
-                        result: result.clone(),
-                    },
-                );
-            }
-
-            let summary = RunSummary {
-                passed,
-                failed,
-                skipped,
-                errors,
-                xfailed,
-                todo,
-                duration: start.elapsed(),
-                discovery_duration: None,
-                test_duration: None,
-                file_count: 0,
-                start_time: None,
-            };
-            broadcast_notification(
-                bcast_tx,
-                "run_complete",
-                RunCompleteParams {
-                    summary: summary.clone(),
-                },
-            );
-
+            let summary = execute_run(rp, disc, bcast_tx, pool).await;
             serialize_response(id, serde_json::json!({ "summary": summary }))
         }
         _ => serialize_error(

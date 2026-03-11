@@ -11,6 +11,7 @@ license.workspace = true
 
 [dependencies]
 anyhow = "1"
+chrono = "0.4.44"
 bytes = "1"
 ignore = { workspace = true }
 log = "0.4"

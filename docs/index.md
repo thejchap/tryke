@@ -14,11 +14,15 @@ uv add tryke
 ## Write a test
 
 ```python
-from tryke import expect, test
+from tryke import expect, test, describe
 
-@test
-def addition():
-    expect(1 + 1).to_equal(2)
+def add(a: int, b: int) -> int:
+    return a + b
+
+with describe("add"):
+    @test("1 + 1")
+    def test_basic():
+        expect(1 + 1).to_equal(2)
 ```
 
 ## Run it

@@ -1,16 +1,16 @@
 use std::fs;
 use std::process::ExitCode;
 
-use tryke::cli_docs::{docs_path, render_cli_reference};
+use tryke::cli_docs::{docs_path, normalize_generated_markdown, render_cli_reference};
 
 fn main() -> ExitCode {
     let check = std::env::args().skip(1).any(|arg| arg == "--check");
-    let docs = render_cli_reference();
+    let docs = normalize_generated_markdown(&render_cli_reference());
     let path = docs_path();
 
     if check {
         match fs::read_to_string(&path) {
-            Ok(existing) if existing == docs => ExitCode::SUCCESS,
+            Ok(existing) if normalize_generated_markdown(&existing) == docs => ExitCode::SUCCESS,
             Ok(_) => {
                 eprintln!(
                     "generated CLI docs are out of date: regenerate with `cargo run --bin generate-cli-docs --`"

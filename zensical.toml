@@ -4,6 +4,8 @@ site_url = "https://thejchap.github.io/tryke/"
 site_description = "A test framework for Python that is modern, fast, and fun"
 site_author = "Justin Chapman"
 copyright = "Copyright &copy; 2025 Justin Chapman"
+repo_url = "https://github.com/thejchap/tryke"
+repo_name = "tryke"
 
 nav = [
     { "Home" = "index.md" },
@@ -15,5 +17,33 @@ nav = [
     { "Benchmarks" = "benchmarks.md" },
 ]
 
+[project.plugins.search]
+enabled = true
+
 [project.theme]
-features = ["navigation.instant", "navigation.sections", "navigation.path"]
+features = [
+    "navigation.instant",
+    "navigation.sections",
+    "navigation.path",
+    "search.highlight",
+]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+primary = "blue"
+accent = "teal"
+
+[project.theme.palette.toggle]
+icon = "lucide/moon"
+name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+primary = "blue"
+accent = "teal"
+
+[project.theme.palette.toggle]
+icon = "lucide/sun"
+name = "Switch to light mode"

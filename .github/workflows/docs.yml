@@ -18,9 +18,11 @@ jobs:
       - uses: actions/checkout@v6
       - run: rustup show
       - run: cargo run --bin generate-cli-docs -- --check
+      - uses: astral-sh/setup-uv@v7
       - uses: actions/setup-python@v6
         with:
           python-version: 3.x
+      - run: uv run python benchmarks/summarize.py --check
       - run: pip install zensical
       - run: zensical build --clean
       - uses: actions/upload-pages-artifact@v4

@@ -79,7 +79,7 @@ Usage: tryke server [OPTIONS]
 Options:
       --port <PORT>
           Port for the server
-          
+
           [default: 2337]
 
       --root <ROOT>
@@ -139,7 +139,7 @@ Options:
 
       --reporter <REPORTER>
           Reporter format to use for output
-          
+
           [default: text]
           [possible values: text, json, dot, junit, llm]
 
@@ -190,7 +190,7 @@ Options:
 
       --reporter <REPORTER>
           Reporter format to use for output
-          
+
           [default: text]
           [possible values: text, json, dot, junit, llm]
 
@@ -215,4 +215,3 @@ Options:
   -h, --help
           Print help
 ```
-

@@ -29,6 +29,18 @@ pub fn render_cli_reference() -> String {
     out
 }
 
+pub fn normalize_generated_markdown(content: &str) -> String {
+    let content = content.replace("\r\n", "\n");
+    let mut normalized = content
+        .trim_end()
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n");
+    normalized.push('\n');
+    normalized
+}
+
 fn render_section(command: &clap::Command, path: &[&str], level: usize, out: &mut String) {
     let heading = "#".repeat(level);
     let command_name = path.join(" ");
@@ -48,7 +60,8 @@ fn render_section(command: &clap::Command, path: &[&str], level: usize, out: &mu
         .write_long_help(&mut help)
         .expect("write clap help");
     let help = String::from_utf8(help).expect("clap help is valid utf-8");
-    let help = help.trim();
+    let help = normalize_generated_markdown(help.trim());
+    let help = help.trim_end();
     let _ = writeln!(out, "```text\n{help}\n```\n");
 
     let mut subcommands: Vec<_> = command
@@ -61,19 +74,5 @@ fn render_section(command: &clap::Command, path: &[&str], level: usize, out: &mu
         let mut next_path = path.to_vec();
         next_path.push(subcommand.get_name());
         render_section(subcommand, &next_path, level + 1, out);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use super::{docs_path, render_cli_reference};
-
-    #[test]
-    fn generated_cli_reference_matches_checked_in_docs() {
-        let expected = render_cli_reference();
-        let actual = fs::read_to_string(docs_path()).expect("read docs/cli.md");
-        assert_eq!(actual, expected);
     }
 }

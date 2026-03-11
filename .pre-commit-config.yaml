@@ -26,6 +26,12 @@ repos:
         pass_filenames: false
         types: [file, rust]
         language: system
+      - id: generate-benchmark-docs
+        name: generate benchmark docs
+        entry: uv run python benchmarks/summarize.py
+        files: ^(benchmarks/(summarize\.py|results/.*\.json)|docs/benchmarks\.md)$
+        pass_filenames: false
+        language: system
       - id: ruff-check
         name: ruff check
         entry: uv run ruff check --fix

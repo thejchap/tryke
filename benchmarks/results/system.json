@@ -1,0 +1,23 @@
+{
+  "platform": {
+    "system": "Linux",
+    "release": "Ubuntu 24.04.3 LTS",
+    "architecture": "x86_64"
+  },
+  "cpu": {
+    "model": "AMD Ryzen 5 5600X 6-Core Processor",
+    "logical_cores": 12
+  },
+  "versions": {
+    "python": "3.12.3",
+    "hyperfine": "hyperfine 1.19.0",
+    "tryke": "tryke 0.0.6",
+    "pytest": "9.0.2",
+    "pytest_xdist": "3.8.0"
+  },
+  "benchmark": {
+    "generated_at": "2026-03-12T04:34:25+00:00",
+    "warmup": 2,
+    "min_runs": 5
+  }
+}

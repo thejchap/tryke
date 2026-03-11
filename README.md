@@ -63,9 +63,9 @@ uvx tryke test
 Run benchmarks locally to compare tryke vs pytest across different scales:
 
 ```bash
-python benchmarks/generate.py   # generate synthetic test suites
-./benchmarks/run.sh              # run hyperfine benchmarks (uses --include benchmarks/suites)
-python benchmarks/summarize.py   # generate markdown summary
+uv run python benchmarks/generate.py   # generate synthetic test suites
+./benchmarks/run.sh                    # run hyperfine benchmarks and refresh docs
+uv run python benchmarks/summarize.py --check
 ```
 
 See the [benchmarks documentation](https://thejchap.github.io/tryke/benchmarks/) for methodology and details.

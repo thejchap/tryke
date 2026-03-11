@@ -13,7 +13,7 @@ Comparative benchmarks for tryke vs pytest across different test suite sizes.
 ### Generate test suites
 
 ```bash
-python benchmarks/generate.py
+uv run python benchmarks/generate.py
 ```
 
 This creates synthetic test files in `benchmarks/suites/` at 3 scales (50, 500, 5000 tests) for both tryke and pytest formats, covering sync, async, and mixed tests.
@@ -25,6 +25,8 @@ This creates synthetic test files in `benchmarks/suites/` at 3 scales (50, 500, 
 ```
 
 This runs all benchmarks using hyperfine and saves JSON results to `benchmarks/results/`.
+On success it also refreshes `benchmarks/RESULTS.md` and the generated benchmark section in
+`docs/benchmarks.md`.
 
 Pass extra arguments to hyperfine:
 
@@ -35,10 +37,17 @@ Pass extra arguments to hyperfine:
 ### Generate summary
 
 ```bash
-python benchmarks/summarize.py
+uv run python benchmarks/summarize.py
 ```
 
-Produces `benchmarks/RESULTS.md` with a markdown summary table.
+Produces `benchmarks/RESULTS.md` and updates the generated results block in
+`docs/benchmarks.md`.
+
+Validate that generated benchmark docs are current:
+
+```bash
+uv run python benchmarks/summarize.py --check
+```
 
 ## What's measured
 

@@ -31,6 +31,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2.8.2
       - run: cargo run --bin generate-cli-docs -- --check
 
+  benchmark-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+      - run: uv run python benchmarks/summarize.py --check
+
   ruff:
     runs-on: ubuntu-latest
     steps:
@@ -66,7 +73,7 @@ jobs:
 
   ci:
     if: always()
-    needs: [fmt, clippy, cli-docs, ruff, ty, test]
+    needs: [fmt, clippy, cli-docs, benchmark-docs, ruff, ty, test]
     runs-on: ubuntu-latest
     steps:
       - run: |

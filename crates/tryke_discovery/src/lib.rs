@@ -3,8 +3,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use log::trace;
 use rayon::prelude::*;
+use serde::Deserialize;
 
 pub(crate) mod db;
 mod discoverer;
@@ -25,13 +27,83 @@ pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-pub(crate) fn collect_python_files(root: &Path) -> Vec<PathBuf> {
+#[derive(Debug, Default, Deserialize)]
+struct PyprojectToml {
+    tool: Option<PyprojectTool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PyprojectTool {
+    tryke: Option<TrykeConfig>,
+    trike: Option<TrykeConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TrykeConfig {
+    exclude: Option<Vec<String>>,
+}
+
+fn load_config_excludes(root: &Path) -> Vec<String> {
+    let pyproject = root.join("pyproject.toml");
+    let Ok(contents) = fs::read_to_string(pyproject) else {
+        return vec![];
+    };
+    parse_config_excludes(&contents).unwrap_or_default()
+}
+
+fn parse_config_excludes(contents: &str) -> Option<Vec<String>> {
+    let Ok(config) = toml::from_str::<PyprojectToml>(&contents) else {
+        return None;
+    };
+    config
+        .tool
+        .and_then(|tool| tool.tryke.or(tool.trike))
+        .and_then(|cfg| cfg.exclude)
+}
+
+fn find_config_root(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|dir| {
+            let pyproject = dir.join("pyproject.toml");
+            let Ok(contents) = fs::read_to_string(pyproject) else {
+                return false;
+            };
+            parse_config_excludes(&contents).is_some()
+        })
+        .map(Path::to_path_buf)
+}
+
+pub fn configured_excludes(start: &Path, cli_excludes: &[String]) -> Vec<String> {
+    if !cli_excludes.is_empty() {
+        return cli_excludes.to_vec();
+    }
+    let root = find_config_root(start).unwrap_or_else(|| start.to_path_buf());
+    load_config_excludes(&root)
+}
+
+fn build_excludes(root: &Path, excludes: &[String]) -> Gitignore {
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut builder = GitignoreBuilder::new(&canonical);
+    for exclude in excludes {
+        let _ = builder.add_line(None, exclude);
+    }
+    builder.build().unwrap_or_else(|_| Gitignore::empty())
+}
+
+pub(crate) fn collect_python_files(root: &Path, excludes: &[String]) -> Vec<PathBuf> {
+    let exclude_matcher = build_excludes(root, excludes);
     WalkBuilder::new(root)
         .build()
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
         .map(ignore::DirEntry::into_path)
         .filter(|p| p.extension().is_some_and(|ext| ext == "py"))
+        .filter(|p| {
+            !exclude_matcher
+                .matched_path_or_any_parents(p, false)
+                .is_ignore()
+        })
         .collect()
 }
 
@@ -108,10 +180,18 @@ pub(crate) fn extract_local_imports(root: &Path, file: &Path, body: &[Stmt]) -> 
                 let level = from_stmt.level;
                 if level == 0 {
                     // Absolute: from foo.bar import x
-                    if let Some(module) = &from_stmt.module
-                        && let Some(path) = resolve_absolute_import(root, module.id.as_str())
-                    {
-                        add(path);
+                    if let Some(module) = &from_stmt.module {
+                        let module_name = module.id.as_str();
+                        if let Some(path) = resolve_absolute_import(root, module_name) {
+                            add(path);
+                        }
+                        for alias in &from_stmt.names {
+                            let imported = alias.name.id.as_str();
+                            let submodule = format!("{module_name}.{imported}");
+                            if let Some(path) = resolve_absolute_import(root, &submodule) {
+                                add(path);
+                            }
+                        }
                     }
                 } else {
                     // Relative: walk up level-1 directories from file's parent
@@ -669,8 +749,14 @@ fn parse_tests_from_file(root: &Path, file: &Path) -> Vec<TestItem> {
 
 #[must_use]
 pub fn discover_from(start: &Path) -> Vec<TestItem> {
+    let excludes = configured_excludes(start, &[]);
+    discover_from_with_excludes(start, &excludes)
+}
+
+#[must_use]
+pub fn discover_from_with_excludes(start: &Path, excludes: &[String]) -> Vec<TestItem> {
     let root = find_project_root(start).unwrap_or_else(|| start.to_path_buf());
-    let mut files = collect_python_files(&root);
+    let mut files = collect_python_files(&root, excludes);
     files.sort();
     let mut tests: Vec<TestItem> = files
         .par_iter()
@@ -735,7 +821,7 @@ mod tests {
     #[test]
     fn collects_py_files_only() {
         let dir = make_tree(&["a.py", "b.txt", "sub/c.py"]);
-        let mut files = collect_python_files(dir.path());
+        let mut files = collect_python_files(dir.path(), &[]);
         files.sort();
         assert_eq!(files.len(), 2);
         assert!(files.iter().all(|p| p.extension().unwrap() == "py"));
@@ -745,7 +831,95 @@ mod tests {
     fn respects_ignore_files() {
         let dir = make_tree(&["a.py", "ignored/b.py"]);
         fs::write(dir.path().join(".ignore"), "ignored/\n").expect("write .ignore");
-        let files = collect_python_files(dir.path());
+        let files = collect_python_files(dir.path(), &[]);
+        assert_eq!(files.len(), 1);
+        assert!(files[0].ends_with("a.py"));
+    }
+
+    #[test]
+    fn loads_excludes_from_tryke_tool_section() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.tryke]\nexclude = [\"benchmarks/suites\", \"generated\"]\n",
+        )
+        .expect("write pyproject");
+        let excludes = configured_excludes(dir.path(), &[]);
+        assert_eq!(excludes, vec!["benchmarks/suites", "generated"]);
+    }
+
+    #[test]
+    fn cli_excludes_override_pyproject() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.tryke]\nexclude = [\"benchmarks/suites\"]\n",
+        )
+        .expect("write pyproject");
+        let excludes = configured_excludes(dir.path(), &["tmp".into(), "cache".into()]);
+        assert_eq!(excludes, vec!["tmp", "cache"]);
+    }
+
+    #[test]
+    fn skips_intermediate_pyproject_without_tryke_section() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.tryke]\nexclude = [\"benchmarks/suites\"]\n",
+        )
+        .expect("write root pyproject");
+        let nested = dir.path().join("packages/app/src");
+        fs::create_dir_all(&nested).expect("create nested");
+        fs::write(
+            dir.path().join("packages/app/pyproject.toml"),
+            "[project]\nname = \"app\"\n",
+        )
+        .expect("write nested pyproject");
+
+        let excludes = configured_excludes(&nested, &[]);
+        assert_eq!(excludes, vec!["benchmarks/suites"]);
+    }
+
+    #[test]
+    fn nearest_tryke_config_wins() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.tryke]\nexclude = [\"benchmarks/suites\"]\n",
+        )
+        .expect("write root pyproject");
+        let nested = dir.path().join("packages/app/src");
+        fs::create_dir_all(&nested).expect("create nested");
+        fs::write(
+            dir.path().join("packages/app/pyproject.toml"),
+            "[tool.tryke]\nexclude = [\"generated\"]\n",
+        )
+        .expect("write nested pyproject");
+
+        let excludes = configured_excludes(&nested, &[]);
+        assert_eq!(excludes, vec!["generated"]);
+    }
+
+    #[test]
+    fn returns_empty_when_no_tryke_config_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let nested = dir.path().join("packages/app/src");
+        fs::create_dir_all(&nested).expect("create nested");
+        fs::write(
+            dir.path().join("packages/app/pyproject.toml"),
+            "[project]\nname = \"app\"\n",
+        )
+        .expect("write nested pyproject");
+
+        let excludes = configured_excludes(&nested, &[]);
+        assert!(excludes.is_empty());
+    }
+
+    #[test]
+    fn collect_python_files_respects_custom_excludes() {
+        let dir = make_tree(&["a.py", "benchmarks/suites/test_bench.py"]);
+        let mut files = collect_python_files(dir.path(), &["benchmarks/suites".into()]);
+        files.sort();
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("a.py"));
     }
@@ -1125,6 +1299,27 @@ def my_func():
         let file = root.join("test_foo.py");
         let imports = extract_local_imports(root, &file, &parsed.syntax().body);
         assert_eq!(imports, vec![root.join("utils.py")]);
+    }
+
+    #[test]
+    fn extract_local_imports_from_absolute_submodule() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let pkg = root.join("pkg");
+        fs::create_dir_all(&pkg).expect("mkdir");
+        fs::write(pkg.join("__init__.py"), "").expect("write");
+        fs::write(pkg.join("helpers.py"), "").expect("write");
+        let source = "from pkg import helpers\n";
+        let parsed = parse_module(source).expect("parse");
+        let file = root.join("test_foo.py");
+        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        assert_eq!(
+            imports,
+            vec![
+                root.join("pkg").join("__init__.py"),
+                root.join("pkg").join("helpers.py")
+            ]
+        );
     }
 
     #[test]

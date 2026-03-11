@@ -100,6 +100,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
 
         let summary = reporter.summary.as_ref().expect("summary should be set");

@@ -111,6 +111,12 @@ pub struct TestResult {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ChangedSelectionSummary {
+    pub changed_files: usize,
+    pub affected_tests: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RunSummary {
     pub passed: usize,
     pub failed: usize,
@@ -130,6 +136,8 @@ pub struct RunSummary {
     pub file_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_selection: Option<ChangedSelectionSummary>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

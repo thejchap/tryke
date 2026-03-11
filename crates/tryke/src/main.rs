@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     env,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -16,7 +17,7 @@ use tryke_reporter::{
 };
 use tryke_runner::{WorkerPool, resolve_python};
 use tryke_types::filter::TestFilter;
-use tryke_types::{RunSummary, TestOutcome};
+use tryke_types::{ChangedSelectionSummary, RunSummary, TestOutcome};
 
 #[derive(Debug, Parser)]
 #[command(version, about, long_about = None)]
@@ -42,6 +43,9 @@ enum Commands {
     Test {
         /// File paths or file:line specs to restrict collection
         paths: Vec<String>,
+        /// Exclude files/directories from discovery (overrides pyproject config)
+        #[arg(short = 'e', long = "exclude")]
+        exclude: Vec<String>,
         #[arg(long)]
         collect_only: bool,
         /// Filter expression (e.g. "math and not slow")
@@ -70,6 +74,9 @@ enum Commands {
         workers: Option<usize>,
     },
     Watch {
+        /// Exclude files/directories from discovery (overrides pyproject config)
+        #[arg(short = 'e', long = "exclude")]
+        exclude: Vec<String>,
         /// Filter expression (e.g. "math and not slow")
         #[arg(short = 'k', long = "filter")]
         filter: Option<String>,
@@ -95,14 +102,23 @@ enum Commands {
         port: u16,
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Exclude files/directories from discovery (overrides pyproject config)
+        #[arg(short = 'e', long = "exclude")]
+        exclude: Vec<String>,
     },
     /// Print the import dependency graph for the project
     Graph {
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Exclude files/directories from discovery (overrides pyproject config)
+        #[arg(short = 'e', long = "exclude")]
+        exclude: Vec<String>,
         /// Show only files that have dependents or dependencies (skip isolated files)
         #[arg(long)]
         connected_only: bool,
+        /// Show only files affected by files changed since HEAD (requires git)
+        #[arg(long)]
+        changed: bool,
     },
 }
 
@@ -110,27 +126,44 @@ fn worker_pool_size() -> usize {
     std::thread::available_parallelism().map_or(4, std::num::NonZero::get)
 }
 
+struct DiscoverySelection {
+    tests: Vec<tryke_types::TestItem>,
+    changed_files: Option<usize>,
+}
+
 /// Discover tests, optionally restricting to changed files.
-fn discover_tests(root: &Path, changed: bool) -> Vec<tryke_types::TestItem> {
+fn discover_tests(root: &Path, changed: bool, excludes: &[String]) -> DiscoverySelection {
     if changed {
-        let mut discoverer = Discoverer::new(root);
+        let mut discoverer = Discoverer::new_with_excludes(root, excludes);
         discoverer.rediscover();
         match git_changed_files(root) {
             Some(changed_files) if !changed_files.is_empty() => {
                 debug!("--changed: {} git-changed files", changed_files.len());
-                discoverer.tests_for_changed(&changed_files)
+                DiscoverySelection {
+                    tests: discoverer.tests_for_changed(&changed_files),
+                    changed_files: Some(changed_files.len()),
+                }
             }
             Some(_) => {
                 warn!("--changed: no changed files found via git, running all tests");
-                discoverer.tests()
+                DiscoverySelection {
+                    tests: discoverer.tests(),
+                    changed_files: None,
+                }
             }
             None => {
                 warn!("--changed: git unavailable or failed, running all tests");
-                discoverer.tests()
+                DiscoverySelection {
+                    tests: discoverer.tests(),
+                    changed_files: None,
+                }
             }
         }
     } else {
-        tryke_discovery::discover_from(root)
+        DiscoverySelection {
+            tests: tryke_discovery::discover_from_with_excludes(root, excludes),
+            changed_files: None,
+        }
     }
 }
 
@@ -141,12 +174,21 @@ async fn run_tests(
     maxfail: Option<usize>,
     workers: Option<usize>,
     discovery_duration: Option<Duration>,
+    changed_selection: Option<ChangedSelectionSummary>,
 ) -> Result<()> {
     let python = resolve_python(root);
     let pool_size = workers.unwrap_or_else(|| tests.len().min(worker_pool_size()));
     let pool = WorkerPool::new(pool_size, &python, root);
     pool.warm().await;
-    report_cycle(reporter, tests, &pool, maxfail, discovery_duration).await?;
+    report_cycle(
+        reporter,
+        tests,
+        &pool,
+        maxfail,
+        discovery_duration,
+        changed_selection,
+    )
+    .await?;
     pool.shutdown();
     Ok(())
 }
@@ -157,6 +199,7 @@ async fn report_cycle(
     pool: &WorkerPool,
     maxfail: Option<usize>,
     discovery_duration: Option<Duration>,
+    changed_selection: Option<ChangedSelectionSummary>,
 ) -> Result<()> {
     use std::collections::HashSet;
 
@@ -235,6 +278,7 @@ async fn report_cycle(
         test_duration: Some(start.elapsed()),
         file_count,
         start_time: Some(start_time),
+        changed_selection,
     });
 
     Ok(())
@@ -250,13 +294,14 @@ fn clear_if_tty() {
 async fn run_watch(
     reporter: &mut dyn Reporter,
     root: Option<&Path>,
+    excludes: &[String],
     test_filter: &TestFilter,
     maxfail: Option<usize>,
     workers: Option<usize>,
 ) -> Result<()> {
     let cwd = env::current_dir()?;
     let root = root.unwrap_or(&cwd);
-    let mut discoverer = Discoverer::new(root);
+    let mut discoverer = Discoverer::new_with_excludes(root, excludes);
 
     let python = resolve_python(root);
     let pool_size = workers.unwrap_or_else(worker_pool_size);
@@ -267,10 +312,10 @@ async fn run_watch(
     let disc_start = Instant::now();
     let tests = test_filter.apply(discoverer.rediscover());
     let disc_dur = Some(disc_start.elapsed());
-    report_cycle(reporter, tests, &pool, maxfail, disc_dur).await?;
+    report_cycle(reporter, tests, &pool, maxfail, disc_dur, None).await?;
 
     let (tx, rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
-    let _debouncer = tryke_server::watcher::spawn_watcher(root, tx)?;
+    let _debouncer = tryke_server::watcher::spawn_watcher(root, excludes, tx)?;
 
     for paths in &rx {
         let modules = discoverer.affected_modules(&paths);
@@ -282,18 +327,16 @@ async fn run_watch(
         let disc_start = Instant::now();
         let tests = test_filter.apply(discoverer.tests_for_changed(&paths));
         let disc_dur = Some(disc_start.elapsed());
-        report_cycle(reporter, tests, &pool, maxfail, disc_dur).await?;
+        report_cycle(reporter, tests, &pool, maxfail, disc_dur, None).await?;
     }
 
     pool.shutdown();
     Ok(())
 }
 
-/// Collect changed files from `git diff --name-only HEAD` relative to `root`.
-/// Returns `None` if git is unavailable or the command fails.
-fn git_changed_files(root: &Path) -> Option<Vec<PathBuf>> {
+fn git_paths(root: &Path, args: &[&str]) -> Option<Vec<PathBuf>> {
     let output = std::process::Command::new("git")
-        .args(["diff", "--name-only", "HEAD"])
+        .args(args)
         .current_dir(root)
         .output()
         .ok()?;
@@ -309,18 +352,82 @@ fn git_changed_files(root: &Path) -> Option<Vec<PathBuf>> {
     Some(paths)
 }
 
-fn run_graph(root: Option<&Path>, connected_only: bool) -> Result<()> {
+/// Collect changed files from git relative to `root`.
+/// Includes tracked changes since HEAD and untracked files.
+/// Returns `None` if git is unavailable or a command fails.
+fn git_changed_files(root: &Path) -> Option<Vec<PathBuf>> {
+    let tracked = git_paths(root, &["diff", "--name-only", "HEAD"])?;
+    let untracked = git_paths(root, &["ls-files", "--others", "--exclude-standard"])?;
+    let mut paths: Vec<PathBuf> = tracked
+        .into_iter()
+        .chain(untracked)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    paths.sort();
+    Some(paths)
+}
+
+fn run_graph(
+    root: Option<&Path>,
+    excludes: &[String],
+    connected_only: bool,
+    changed: bool,
+) -> Result<()> {
     let cwd = env::current_dir()?;
     let root_path = root.unwrap_or(&cwd);
-    let mut discoverer = Discoverer::new(root_path);
+    let mut discoverer = Discoverer::new_with_excludes(root_path, excludes);
     discoverer.rediscover();
+
+    let changed_files = if changed {
+        match git_changed_files(root_path) {
+            Some(paths) if !paths.is_empty() => Some(paths),
+            Some(_) => {
+                println!("No git-visible changed files found.");
+                return Ok(());
+            }
+            None => {
+                println!("Git unavailable or failed; cannot compute changed graph.");
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+
+    let affected = changed_files
+        .as_ref()
+        .map(|paths| discoverer.affected_files(paths))
+        .unwrap_or_default();
+    let changed_set = changed_files
+        .as_ref()
+        .map(|paths| {
+            paths
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .unwrap_or_default();
 
     let summary = discoverer.import_graph_summary();
     for entry in &summary {
+        let full_path = root_path.join(&entry.file);
+        if changed && !affected.contains(&full_path) {
+            continue;
+        }
         if connected_only && entry.imports.is_empty() && entry.imported_by.is_empty() {
             continue;
         }
-        println!("{}", entry.file.display());
+        let label = if changed {
+            if changed_set.contains(&full_path) {
+                " [changed]"
+            } else {
+                " [affected]"
+            }
+        } else {
+            ""
+        };
+        println!("{}{}", entry.file.display(), label);
         if entry.imports.is_empty() {
             println!("  imports:     (none)");
         } else {
@@ -382,6 +489,7 @@ fn main() -> Result<()> {
     match &cli.command {
         Commands::Test {
             paths,
+            exclude,
             collect_only,
             filter,
             markers,
@@ -396,6 +504,11 @@ fn main() -> Result<()> {
             let resolved_maxfail = if *fail_fast { Some(1) } else { *maxfail };
             let mut rep = build_reporter(reporter, verbosity);
             if let Some(p) = port {
+                if !exclude.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "--exclude is not supported with --port; start the server with --exclude instead"
+                    ));
+                }
                 let root_path = root.clone().unwrap_or(env::current_dir()?);
                 return tryke_server::Client::new(
                     *p,
@@ -408,13 +521,21 @@ fn main() -> Result<()> {
 
             let cwd = env::current_dir()?;
             let root_path = root.as_deref().unwrap_or(&cwd);
+            let excludes = tryke_discovery::configured_excludes(root_path, exclude);
             let test_filter = TestFilter::from_args(paths, filter.as_deref(), markers.as_deref())
                 .map_err(|e| anyhow::anyhow!(e))?;
 
             let discovery_start = Instant::now();
-            let tests = discover_tests(root_path, *changed);
-            let tests = test_filter.apply(tests);
+            let discovered = discover_tests(root_path, *changed, &excludes);
+            let tests = test_filter.apply(discovered.tests);
             let discovery_duration = discovery_start.elapsed();
+            let changed_selection =
+                discovered
+                    .changed_files
+                    .map(|changed_files| ChangedSelectionSummary {
+                        changed_files,
+                        affected_tests: tests.len(),
+                    });
 
             if *collect_only {
                 rep.on_collect_complete(&tests);
@@ -427,10 +548,12 @@ fn main() -> Result<()> {
                     resolved_maxfail,
                     *workers,
                     Some(discovery_duration),
+                    changed_selection,
                 ))
             }
         }
         Commands::Watch {
+            exclude,
             filter,
             markers,
             reporter,
@@ -441,25 +564,41 @@ fn main() -> Result<()> {
         } => {
             let resolved_maxfail = if *fail_fast { Some(1) } else { *maxfail };
             let mut rep = build_reporter(reporter, verbosity);
+            let cwd = env::current_dir()?;
+            let root_path = root.as_deref().unwrap_or(&cwd);
+            let excludes = tryke_discovery::configured_excludes(root_path, exclude);
             let test_filter = TestFilter::from_args(&[], filter.as_deref(), markers.as_deref())
                 .map_err(|e| anyhow::anyhow!(e))?;
             rt.block_on(run_watch(
                 &mut *rep,
-                root.as_deref(),
+                Some(root_path),
+                &excludes,
                 &test_filter,
                 resolved_maxfail,
                 *workers,
             ))
         }
-        Commands::Server { port, root } => {
+        Commands::Server {
+            port,
+            root,
+            exclude,
+        } => {
             let root_path = root.clone().unwrap_or(env::current_dir()?);
-            let server = tryke_server::Server::new(*port, root_path);
+            let excludes = tryke_discovery::configured_excludes(&root_path, exclude);
+            let server = tryke_server::Server::new(*port, root_path, excludes);
             rt.block_on(server.run())
         }
         Commands::Graph {
             root,
+            exclude,
             connected_only,
-        } => run_graph(root.as_deref(), *connected_only),
+            changed,
+        } => {
+            let cwd = env::current_dir()?;
+            let root_path = root.as_deref().unwrap_or(&cwd);
+            let excludes = tryke_discovery::configured_excludes(root_path, exclude);
+            run_graph(Some(root_path), &excludes, *connected_only, *changed)
+        }
     }
 }
 
@@ -506,16 +645,16 @@ mod tests {
         discoverer: &mut Discoverer,
         pool: &WorkerPool,
     ) -> Result<()> {
-        report_cycle(reporter, discoverer.rediscover(), pool, None, None).await
+        report_cycle(reporter, discoverer.rediscover(), pool, None, None, None).await
     }
 
     #[tokio::test]
     async fn test_command_text() {
         let mut reporter = TextReporter::new();
         let root = cwd();
-        let tests = discover_tests(&root, false);
+        let tests = discover_tests(&root, false, &[]).tests;
         assert!(
-            run_tests(&mut reporter, &root, tests, None, None, None)
+            run_tests(&mut reporter, &root, tests, None, None, None, None)
                 .await
                 .is_ok()
         );
@@ -525,9 +664,9 @@ mod tests {
     async fn test_command_json() {
         let mut reporter = JSONReporter::new();
         let root = cwd();
-        let tests = discover_tests(&root, false);
+        let tests = discover_tests(&root, false, &[]).tests;
         assert!(
-            run_tests(&mut reporter, &root, tests, None, None, None)
+            run_tests(&mut reporter, &root, tests, None, None, None, None)
                 .await
                 .is_ok()
         );
@@ -537,9 +676,9 @@ mod tests {
     async fn test_command_dot() {
         let mut reporter = DotReporter::new();
         let root = cwd();
-        let tests = discover_tests(&root, false);
+        let tests = discover_tests(&root, false, &[]).tests;
         assert!(
-            run_tests(&mut reporter, &root, tests, None, None, None)
+            run_tests(&mut reporter, &root, tests, None, None, None, None)
                 .await
                 .is_ok()
         );
@@ -549,9 +688,9 @@ mod tests {
     async fn test_command_junit() {
         let mut reporter = JUnitReporter::new();
         let root = cwd();
-        let tests = discover_tests(&root, false);
+        let tests = discover_tests(&root, false, &[]).tests;
         assert!(
-            run_tests(&mut reporter, &root, tests, None, None, None)
+            run_tests(&mut reporter, &root, tests, None, None, None, None)
                 .await
                 .is_ok()
         );
@@ -810,9 +949,24 @@ mod tests {
     }
 
     #[test]
+    fn test_exclude_flag_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "test", "-e", "benchmarks/suites"]).unwrap();
+        assert!(matches!(
+            &cli.command,
+            Commands::Test { exclude, .. } if exclude == &["benchmarks/suites"]
+        ));
+    }
+
+    #[test]
     fn graph_subcommand_parsed() {
         let cli = Cli::try_parse_from(["tryke", "graph"]).unwrap();
         assert!(matches!(cli.command, Commands::Graph { .. }));
+    }
+
+    #[test]
+    fn graph_subcommand_changed_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "graph", "--changed"]).unwrap();
+        assert!(matches!(cli.command, Commands::Graph { changed: true, .. }));
     }
 
     #[test]
@@ -837,7 +991,7 @@ mod tests {
             "from utils import helper\n@test\ndef test_foo(): pass\n",
         )
         .expect("write");
-        assert!(run_graph(Some(dir.path()), false).is_ok());
+        assert!(run_graph(Some(dir.path()), &[], false, false).is_ok());
     }
 
     #[test]
@@ -855,7 +1009,52 @@ mod tests {
             "@test\ndef test_isolated(): pass\n",
         )
         .expect("write");
-        assert!(run_graph(Some(dir.path()), true).is_ok());
+        assert!(run_graph(Some(dir.path()), &[], true, false).is_ok());
+    }
+
+    fn init_git_repo(dir: &tempfile::TempDir) {
+        fn run(dir: &tempfile::TempDir, args: &[&str]) {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {:?} failed", args);
+        }
+
+        run(dir, &["init"]);
+        run(dir, &["config", "user.email", "tryke@example.com"]);
+        run(dir, &["config", "user.name", "Tryke Tests"]);
+    }
+
+    #[test]
+    fn git_changed_files_includes_untracked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        std::fs::write(dir.path().join("tracked.py"), "def helper(): pass\n").expect("write");
+        init_git_repo(&dir);
+
+        let add_status = std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(dir.path())
+            .status()
+            .expect("git add");
+        assert!(add_status.success());
+        let commit_status = std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(dir.path())
+            .status()
+            .expect("git commit");
+        assert!(commit_status.success());
+
+        std::fs::write(
+            dir.path().join("test_new.py"),
+            "@test\ndef test_new(): pass\n",
+        )
+        .expect("write untracked file");
+
+        let changed = git_changed_files(dir.path()).expect("git changed files");
+        assert!(changed.contains(&dir.path().join("test_new.py")));
     }
 
     #[tokio::test]
@@ -864,9 +1063,9 @@ mod tests {
         std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
         let mut reporter = TextReporter::new();
         // non-git directory → git_changed_files returns None → discover_tests runs all (0 here)
-        let tests = discover_tests(dir.path(), true);
+        let tests = discover_tests(dir.path(), true, &[]).tests;
         assert!(
-            run_tests(&mut reporter, dir.path(), tests, None, None, None)
+            run_tests(&mut reporter, dir.path(), tests, None, None, None, None)
                 .await
                 .is_ok()
         );
@@ -999,7 +1198,7 @@ def test_failing():
         )
         .expect("write test file");
 
-        let tests = discover_tests(dir.path(), false);
+        let tests = discover_tests(dir.path(), false, &[]).tests;
         assert_eq!(tests.len(), 2);
 
         let pool = WorkerPool::with_python_path(

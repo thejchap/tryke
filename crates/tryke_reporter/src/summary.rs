@@ -93,6 +93,17 @@ pub fn write_summary<W: io::Write>(writer: &mut W, summary: &RunSummary) {
         format!("({total})").dimmed()
     );
 
+    if let Some(changed) = &summary.changed_selection {
+        let _ = writeln!(
+            writer,
+            "    {}  {} {} {}",
+            "Changed".dimmed(),
+            format!("{} files", changed.changed_files).cyan(),
+            "->".dimmed(),
+            format!("{} tests", changed.affected_tests).cyan()
+        );
+    }
+
     // "  Start at" = 10 chars
     if let Some(ref t) = summary.start_time {
         let _ = writeln!(writer, "   {}  {}", "Start at".dimmed(), t);
@@ -159,6 +170,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
         assert!(out.contains("PASS"));
         assert!(out.contains("5 passed"));
@@ -183,6 +195,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
         assert!(out.contains("FAIL"));
         assert!(out.contains("1 failed"));
@@ -203,6 +216,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
         assert!(out.contains("FAIL"));
         assert!(out.contains("1 error"));
@@ -222,6 +236,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
         assert!(out.contains("1 failed"));
         assert!(out.contains("3 passed"));
@@ -243,6 +258,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
         assert!(out.contains("1 failed"));
         assert!(out.contains("1 error"));
@@ -267,6 +283,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
         assert!(out.contains("PASS"));
         assert!(out.contains("0 passed"));
@@ -287,6 +304,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
         assert!(out.contains("1.50s"));
     }
@@ -305,6 +323,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
         let failed_pos = out.find("failed").expect("should contain failed");
         let passed_pos = out.find("passed").expect("should contain passed");
@@ -328,6 +347,7 @@ mod tests {
             test_duration: Some(Duration::from_millis(70)),
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
         assert!(out.contains("discover 30.00ms"));
         assert!(out.contains("tests 70.00ms"));
@@ -347,6 +367,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
         assert!(!out.contains("discover"));
         assert!(!out.contains("tests "));
@@ -383,6 +404,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
         let lines: Vec<&str> = out.lines().collect();
         let tests_line = lines.iter().find(|l| l.contains("Tests")).unwrap();
@@ -412,6 +434,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
         let lines: Vec<&str> = out.lines().collect();
         let tests_idx = lines.iter().position(|l| l.contains("Tests")).unwrap();
@@ -440,6 +463,7 @@ mod tests {
             test_duration: None,
             file_count: 3,
             start_time: None,
+            changed_selection: None,
         });
         assert!(out.contains("Test Files"));
         assert!(out.contains("3 passed"));
@@ -459,6 +483,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
         assert!(!out.contains("Test Files"));
     }
@@ -477,6 +502,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: Some("16:28:06".into()),
+            changed_selection: None,
         });
         assert!(out.contains("Start at"));
         assert!(out.contains("16:28:06"));
@@ -496,7 +522,32 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
         assert!(!out.contains("Start at"));
+    }
+
+    #[test]
+    fn changed_summary_shown() {
+        let out = render(&RunSummary {
+            passed: 2,
+            failed: 0,
+            skipped: 0,
+            errors: 0,
+            xfailed: 0,
+            todo: 0,
+            duration: Duration::from_millis(10),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 1,
+            start_time: None,
+            changed_selection: Some(tryke_types::ChangedSelectionSummary {
+                changed_files: 3,
+                affected_tests: 2,
+            }),
+        });
+        assert!(out.contains("Changed"));
+        assert!(out.contains("3 files"));
+        assert!(out.contains("2 tests"));
     }
 }

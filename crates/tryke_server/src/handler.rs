@@ -205,6 +205,7 @@ async fn execute_run(
         test_duration: Some(test_duration),
         file_count,
         start_time: Some(start_time),
+        changed_selection: None,
     };
     broadcast_notification(
         bcast_tx,

@@ -74,6 +74,42 @@ tryke test -m "slow"
 tryke test --changed
 ```
 
+### Changed tests
+
+`tryke test --changed` uses git-visible changes, including untracked files, plus a static Python import graph to run only affected tests.
+
+```bash
+# run tests affected by current git changes
+tryke test --changed
+
+# combine changed-test selection with a name filter
+tryke test --changed -k "auth"
+
+# combine changed-test selection with tags
+tryke test --changed -m "slow"
+
+# inspect the affected file graph for the current change set
+tryke graph --changed
+```
+
+This is useful for fast local feedback, but it is still a lightweight approximation rather than full runtime dependency tracking.
+
+### Excluding paths from discovery
+
+Use `pyproject.toml` to exclude paths from discovery by default:
+
+```toml
+[tool.tryke]
+exclude = ["benchmarks/suites", "generated"]
+```
+
+Override config on the command line with `-e/--exclude`:
+
+```bash
+tryke test -e benchmarks/suites
+tryke watch -e generated
+```
+
 ## 7. Async tests
 
 Async tests work out of the box:

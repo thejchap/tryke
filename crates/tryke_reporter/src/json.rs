@@ -229,6 +229,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         };
 
         r.on_run_complete(&summary);
@@ -239,6 +240,35 @@ mod tests {
         assert_eq!(lines[0]["summary"]["passed"], 5);
         assert_eq!(lines[0]["summary"]["failed"], 1);
         assert_eq!(lines[0]["summary"]["skipped"], 2);
+    }
+
+    #[test]
+    fn emits_changed_selection_in_run_complete() {
+        let mut r = reporter();
+        r.on_run_complete(&RunSummary {
+            passed: 2,
+            failed: 0,
+            skipped: 0,
+            errors: 0,
+            xfailed: 0,
+            todo: 0,
+            duration: Duration::from_millis(10),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 1,
+            start_time: None,
+            changed_selection: Some(tryke_types::ChangedSelectionSummary {
+                changed_files: 3,
+                affected_tests: 2,
+            }),
+        });
+
+        let lines = output_lines(&r);
+        assert_eq!(lines[0]["summary"]["changed_selection"]["changed_files"], 3);
+        assert_eq!(
+            lines[0]["summary"]["changed_selection"]["affected_tests"],
+            2
+        );
     }
 
     #[test]
@@ -292,6 +322,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
 
         let lines = output_lines(&r);

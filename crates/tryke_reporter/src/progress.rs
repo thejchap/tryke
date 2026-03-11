@@ -196,6 +196,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
         assert!(reporter.inner.completed);
         assert_eq!(reporter.inner.results.len(), 2);
@@ -221,6 +222,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
         assert!(reporter.inner.completed);
     }

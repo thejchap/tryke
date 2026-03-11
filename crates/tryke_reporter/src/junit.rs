@@ -199,6 +199,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
     }
 
@@ -269,6 +270,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
         assert!(output(&r).contains("a &amp; b"));
     }

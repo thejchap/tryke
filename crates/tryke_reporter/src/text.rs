@@ -459,6 +459,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
 
         let out = output(&r);
@@ -486,6 +487,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
 
         let out = output(&r);
@@ -525,6 +527,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
 
         let out = output(&r);

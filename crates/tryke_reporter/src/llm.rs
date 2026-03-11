@@ -365,6 +365,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
         let out = output(&r);
         assert_eq!(out.trim(), "47 passed [35.00ms]");
@@ -385,6 +386,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
         let out = output(&r);
         assert_eq!(
@@ -420,6 +422,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
         let out = output(&r);
         assert!(
@@ -517,6 +520,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
 
         let out = output(&r);

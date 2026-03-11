@@ -18,11 +18,18 @@ pub struct Discoverer {
     inputs: HashMap<PathBuf, SourceFile>,
     root: PathBuf,
     import_graph: ImportGraph,
+    excludes: Vec<String>,
 }
 
 impl Discoverer {
     #[must_use]
     pub fn new(start: &Path) -> Self {
+        let excludes = crate::configured_excludes(start, &[]);
+        Self::new_with_excludes(start, &excludes)
+    }
+
+    #[must_use]
+    pub fn new_with_excludes(start: &Path, excludes: &[String]) -> Self {
         let root = crate::find_project_root(start).unwrap_or_else(|| start.to_path_buf());
         let root = root.canonicalize().unwrap_or(root);
         Self {
@@ -30,11 +37,12 @@ impl Discoverer {
             inputs: HashMap::new(),
             root,
             import_graph: ImportGraph::default(),
+            excludes: excludes.to_vec(),
         }
     }
 
     pub fn rediscover(&mut self) -> Vec<TestItem> {
-        let mut paths = crate::collect_python_files(&self.root);
+        let mut paths = crate::collect_python_files(&self.root, &self.excludes);
         paths.sort();
         debug!(
             "rediscover: found {} python files in {}",
@@ -170,6 +178,12 @@ impl Discoverer {
         paths.iter().map(|p| Self::canonicalize_path(p)).collect()
     }
 
+    /// Returns all files transitively affected by the given changed paths.
+    pub fn affected_files(&self, changed: &[PathBuf]) -> HashSet<PathBuf> {
+        let changed = Self::canonicalize_paths(changed);
+        self.import_graph.affected_files(&changed)
+    }
+
     /// Returns module names for all files transitively affected by the given changed paths.
     /// Used to reload Python modules in the worker pool.
     pub fn affected_modules(&self, changed: &[PathBuf]) -> Vec<String> {
@@ -193,8 +207,7 @@ impl Discoverer {
 
     /// Returns only tests whose source file is transitively affected by the changed paths.
     pub fn tests_for_changed(&self, changed: &[PathBuf]) -> Vec<TestItem> {
-        let changed = Self::canonicalize_paths(changed);
-        let affected = self.import_graph.affected_files(&changed);
+        let affected = self.affected_files(changed);
         let tests: Vec<TestItem> = self
             .tests()
             .into_iter()
@@ -206,7 +219,7 @@ impl Discoverer {
             .collect();
         debug!(
             "tests_for_changed: {:?} → {} tests",
-            changed
+            Self::canonicalize_paths(changed)
                 .iter()
                 .map(|p| p.display().to_string())
                 .collect::<Vec<_>>(),
@@ -485,6 +498,36 @@ mod tests {
         assert!(
             names.contains(&"test_login"),
             "test_login should be affected by change to src/services/auth.py, got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"test_other"),
+            "test_other should not be affected"
+        );
+    }
+
+    #[test]
+    fn tests_for_changed_absolute_imported_submodule() {
+        let dir = make_project(&[
+            ("pkg/__init__.py", ""),
+            ("pkg/helpers.py", "def helper(): pass\n"),
+            (
+                "tests/test_helpers.py",
+                "from pkg import helpers\n@test\ndef test_helper_user():\n    pass\n",
+            ),
+            (
+                "tests/test_other.py",
+                "@test\ndef test_other():\n    pass\n",
+            ),
+        ]);
+        let mut discoverer = Discoverer::new(dir.path());
+        discoverer.rediscover();
+
+        let changed = vec![dir.path().join("pkg/helpers.py")];
+        let tests = discoverer.tests_for_changed(&changed);
+        let names: Vec<&str> = tests.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            names.contains(&"test_helper_user"),
+            "test_helper_user should be affected by change to pkg/helpers.py, got: {names:?}"
         );
         assert!(
             !names.contains(&"test_other"),

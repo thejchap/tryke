@@ -41,7 +41,11 @@ def create_user():
 
 ### Changed-files mode
 
-`tryke test --changed` uses git to determine which files changed and runs only the affected tests.
+`tryke test --changed` uses git to determine which files changed, including untracked files, then applies a static Python import graph to run affected tests.
+
+It is a lightweight incremental workflow feature: closer to a smarter `pytest-picked` style run than to full runtime dependency tracking. `tryke graph --changed` lets you inspect the affected file graph behind the selection.
+
+Tryke also supports project-level discovery excludes through `[tool.tryke]` in `pyproject.toml`, with command-line overrides when you need a different scope for a specific run.
 
 ## Comparison
 
@@ -54,7 +58,7 @@ def create_user():
 | **Dependencies** | Zero | Many transitive |
 | **Watch mode** | Built-in | Plugin (pytest-watch) |
 | **Server mode** | Built-in | Not available |
-| **Changed files** | Built-in (`--changed`) | Plugin (pytest-picked) |
+| **Changed files** | Built-in (`--changed`, static import graph) | Plugins such as pytest-picked / pytest-testmon |
 | **Async** | Built-in | Plugin (pytest-asyncio) |
 | **Reporters** | text, json, dot, junit, llm | Verbose, short + plugins |
 | **Plugin ecosystem** | — | Extensive (1000+) |
@@ -71,6 +75,7 @@ def create_user():
 - **Developer experience** — rich diagnostics, watch mode, and server mode out of the box
 - **Clean dependency trees** — tryke adds zero transitive dependencies
 - **Async-heavy projects** — no extra plugins for async test support
+- **Fast incremental local runs** — `--changed` is useful when you want a lightweight affected-tests pass
 
 ## When to stick with pytest
 
@@ -78,6 +83,7 @@ def create_user():
 - **Complex fixture graphs** — pytest's fixture system is unmatched
 - **Stability requirements** — pytest is battle-tested across millions of projects
 - **Team familiarity** — if your team knows pytest well and switching cost is high
+- **High-confidence test impact analysis** — `pytest-testmon` is more thorough than tryke's static changed-files mode
 
 ## Roadmap
 

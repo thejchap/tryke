@@ -18,12 +18,17 @@ use crate::{
 pub struct Server {
     port: u16,
     root: PathBuf,
+    excludes: Vec<String>,
 }
 
 impl Server {
     #[must_use]
-    pub fn new(port: u16, root: PathBuf) -> Self {
-        Self { port, root }
+    pub fn new(port: u16, root: PathBuf, excludes: Vec<String>) -> Self {
+        Self {
+            port,
+            root,
+            excludes,
+        }
     }
 
     #[expect(clippy::missing_errors_doc)]
@@ -40,11 +45,14 @@ impl Server {
         pool.warm().await;
 
         let (bcast_tx, _) = broadcast::channel::<Bytes>(256);
-        let disc = Arc::new(Mutex::new(Discoverer::new(&self.root)));
+        let disc = Arc::new(Mutex::new(Discoverer::new_with_excludes(
+            &self.root,
+            &self.excludes,
+        )));
         disc.lock().await.rediscover();
 
         let (std_tx, std_rx) = std::sync::mpsc::channel::<Vec<std::path::PathBuf>>();
-        let _debouncer = spawn_watcher(&self.root, std_tx)?;
+        let _debouncer = spawn_watcher(&self.root, &self.excludes, std_tx)?;
 
         // bridge blocking std receiver to async tokio channel
         let (watcher_tx, mut watcher_rx) = tokio::sync::mpsc::channel::<Vec<PathBuf>>(64);
@@ -119,7 +127,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let root = dir.path().to_path_buf();
         tokio::spawn(async move {
-            Server::new(port, root)
+            Server::new(port, root, vec![])
                 .run_on_listener(listener)
                 .await
                 .unwrap();

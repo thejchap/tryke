@@ -266,6 +266,7 @@ tryke test [OPTIONS] [PATHS]...
 | Option | Description |
 |--------|-------------|
 | `[PATHS]...` | File paths or `file:line` specs to restrict collection |
+| `-e, --exclude <PATTERN>` | Exclude files/directories from discovery (overrides `pyproject.toml`) |
 | `--collect-only` | List discovered tests without running them |
 | `-k <FILTER>` | Filter by name expression (e.g. `"math and not slow"`) |
 | `-m <MARKERS>` | Filter by tag expression (e.g. `"slow and not network"`) |
@@ -276,6 +277,36 @@ tryke test [OPTIONS] [PATHS]...
 | `-x, --fail-fast` | Stop after the first failure |
 | `--maxfail <N>` | Stop after N failures |
 | `-j, --workers <N>` | Number of worker processes |
+
+#### Changed tests
+
+Use `--changed` to run only tests affected by files changed since `HEAD`.
+
+```bash
+tryke test --changed
+tryke test --changed -k "auth"
+tryke test --changed -m "slow"
+tryke graph --changed
+```
+
+Tryke determines the changed file set from git, including untracked files, then uses a static import graph to select affected tests at file granularity.
+
+If git is unavailable, or if no changed files are found, tryke falls back to running the full test set.
+
+Use `tryke graph --changed` to inspect the affected file graph for the current change set.
+
+This is designed for fast incremental runs during development. It is less thorough than runtime dependency tracking tools such as `pytest-testmon`, but more dependency-aware than simple changed-test-file selection.
+
+#### Discovery config
+
+Configure default discovery excludes in `pyproject.toml`:
+
+```toml
+[tool.tryke]
+exclude = ["benchmarks/suites", "generated"]
+```
+
+Use `-e/--exclude` on `test`, `watch`, `server`, or `graph` to override the config for that command.
 
 ### `tryke watch`
 
@@ -295,5 +326,6 @@ tryke server [OPTIONS]
 |--------|-------------|
 | `--port <PORT>` | Listen port (default: `2337`) |
 | `--root <PATH>` | Project root directory |
+| `-e, --exclude <PATTERN>` | Exclude files/directories from discovery (overrides `pyproject.toml`) |
 
 Start a persistent server. Run tests against it with `tryke test --port 2337`.

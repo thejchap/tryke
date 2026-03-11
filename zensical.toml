@@ -8,6 +8,7 @@ copyright = "Copyright &copy; 2025 Justin Chapman"
 nav = [
     { "Home" = "index.md" },
     { "Quick Start" = "quickstart.md" },
+    { "CLI Reference" = "cli.md" },
     { "API Reference" = "api.md" },
     { "Migration from pytest" = "migration.md" },
     { "Why tryke?" = "why.md" },

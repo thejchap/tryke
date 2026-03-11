@@ -9,6 +9,15 @@ virtualenv so you can import and test the python bindings locally.
 
 run `cargo run test` to test tryke's own python code, using tryke
 
+## updating CLI docs
+
+run `cargo run --bin generate-cli-docs --` after changing the Rust CLI definitions
+or their help text. this rewrites `docs/cli.md` from the clap metadata in
+`crates/tryke/src/cli.rs`.
+
+pre-commit regenerates the file locally, and CI fails if the checked-in docs are
+out of sync with the Rust code.
+
 ## updating snapshot tests
 
 1. run `cargo test` — new or changed snapshots are written to

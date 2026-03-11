@@ -41,6 +41,7 @@ tryke test
 ## Links
 
 - [Quick Start](quickstart.md) — up and running in 2 minutes
+- [CLI Reference](cli.md) — generated from the Rust clap definitions
 - [API Reference](api.md) — full decorator and assertion API
 - [Migration from pytest](migration.md) — side-by-side cheat sheet
 - [Why tryke?](why.md) — honest comparison with pytest

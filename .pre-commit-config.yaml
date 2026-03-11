@@ -20,6 +20,12 @@ repos:
         pass_filenames: false
         types: [file, rust]
         language: system
+      - id: generate-cli-docs
+        name: generate cli docs
+        entry: cargo run --bin generate-cli-docs --
+        pass_filenames: false
+        types: [file, rust]
+        language: system
       - id: ruff-check
         name: ruff check
         entry: uv run ruff check --fix

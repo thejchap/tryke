@@ -1,0 +1,131 @@
+use std::path::PathBuf;
+
+use clap::{Parser, Subcommand, ValueEnum};
+use clap_verbosity_flag::{Verbosity as LogVerbosity, WarnLevel};
+
+#[derive(Debug, Parser)]
+#[command(version, about, long_about = None)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+
+    #[command(flatten)]
+    pub verbose: LogVerbosity<WarnLevel>,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+pub enum ReporterFormat {
+    Text,
+    Json,
+    Dot,
+    Junit,
+    Llm,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Commands {
+    /// Collect and run tests.
+    Test {
+        /// File paths or file:line specs to restrict collection
+        paths: Vec<String>,
+        /// Exclude files/directories from discovery (overrides pyproject config)
+        #[arg(short = 'e', long = "exclude")]
+        exclude: Vec<String>,
+        /// Include files/directories even if excluded by `pyproject.toml`
+        #[arg(short = 'i', long = "include")]
+        include: Vec<String>,
+        /// Collect tests without running them
+        #[arg(long)]
+        collect_only: bool,
+        /// Filter expression (e.g. "math and not slow")
+        #[arg(short = 'k', long = "filter")]
+        filter: Option<String>,
+        /// Tag/marker filter expression (e.g. "slow and not network")
+        #[arg(short = 'm', long = "markers")]
+        markers: Option<String>,
+        /// Reporter format to use for output
+        #[arg(long = "reporter", default_value = "text")]
+        reporter: ReporterFormat,
+        /// Project root used for discovery and execution
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Use an already-running server on the optional port
+        #[arg(long, default_missing_value = "2337", num_args = 0..=1, require_equals = false)]
+        port: Option<u16>,
+        /// Run only tests affected by files changed since HEAD (requires git)
+        #[arg(long)]
+        changed: bool,
+        /// Stop after first failure
+        #[arg(short = 'x', long = "fail-fast")]
+        fail_fast: bool,
+        /// Stop after N failures
+        #[arg(long)]
+        maxfail: Option<usize>,
+        /// Number of worker processes (default: min(test_count, cpu_count))
+        #[arg(short = 'j', long = "workers")]
+        workers: Option<usize>,
+    },
+    /// Watch files and rerun affected tests.
+    Watch {
+        /// Exclude files/directories from discovery (overrides pyproject config)
+        #[arg(short = 'e', long = "exclude")]
+        exclude: Vec<String>,
+        /// Include files/directories even if excluded by `pyproject.toml`
+        #[arg(short = 'i', long = "include")]
+        include: Vec<String>,
+        /// Filter expression (e.g. "math and not slow")
+        #[arg(short = 'k', long = "filter")]
+        filter: Option<String>,
+        /// Tag/marker filter expression (e.g. "slow and not network")
+        #[arg(short = 'm', long = "markers")]
+        markers: Option<String>,
+        /// Reporter format to use for output
+        #[arg(long = "reporter", default_value = "text")]
+        reporter: ReporterFormat,
+        /// Project root used for discovery and execution
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Stop after first failure
+        #[arg(short = 'x', long = "fail-fast")]
+        fail_fast: bool,
+        /// Stop after N failures
+        #[arg(long)]
+        maxfail: Option<usize>,
+        /// Number of worker processes (default: cpu_count)
+        #[arg(short = 'j', long = "workers")]
+        workers: Option<usize>,
+    },
+    /// Start a persistent worker server.
+    Server {
+        /// Port for the server
+        #[arg(long, default_value = "2337")]
+        port: u16,
+        /// Project root used for discovery and execution
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Exclude files/directories from discovery (overrides pyproject config)
+        #[arg(short = 'e', long = "exclude")]
+        exclude: Vec<String>,
+        /// Include files/directories even if excluded by `pyproject.toml`
+        #[arg(short = 'i', long = "include")]
+        include: Vec<String>,
+    },
+    /// Print the import dependency graph for the project.
+    Graph {
+        /// Project root used for discovery and execution
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Exclude files/directories from discovery (overrides pyproject config)
+        #[arg(short = 'e', long = "exclude")]
+        exclude: Vec<String>,
+        /// Include files/directories even if excluded by `pyproject.toml`
+        #[arg(short = 'i', long = "include")]
+        include: Vec<String>,
+        /// Show only files that have dependents or dependencies (skip isolated files)
+        #[arg(long)]
+        connected_only: bool,
+        /// Show only files affected by files changed since HEAD (requires git)
+        #[arg(long)]
+        changed: bool,
+    },
+}

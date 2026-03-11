@@ -41,20 +41,19 @@ uvx tryke test
 - native async test support
 - client/server mode
 - ghostty progress bar integration
+- TODO doctest support
+- TODO fixtures/dependency injection of some kind
 
 ## install
 
-```
+```bash
 # in a project
 uv add tryke
 
 # globally
 uv tool install tryke@latest
-```
 
-Or run directly without installing:
-
-```
+# or run directly without installing
 uvx tryke test
 ```
 

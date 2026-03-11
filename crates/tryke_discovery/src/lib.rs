@@ -6,7 +6,6 @@ use std::{
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use log::trace;
 use rayon::prelude::*;
-use serde::Deserialize;
 
 pub(crate) mod db;
 mod discoverer;
@@ -27,59 +26,12 @@ pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-#[derive(Debug, Default, Deserialize)]
-struct PyprojectToml {
-    tool: Option<PyprojectTool>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct PyprojectTool {
-    tryke: Option<TrykeConfig>,
-    trike: Option<TrykeConfig>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct TrykeConfig {
-    exclude: Option<Vec<String>>,
-}
-
-fn load_config_excludes(root: &Path) -> Vec<String> {
-    let pyproject = root.join("pyproject.toml");
-    let Ok(contents) = fs::read_to_string(pyproject) else {
-        return vec![];
-    };
-    parse_config_excludes(&contents).unwrap_or_default()
-}
-
-fn parse_config_excludes(contents: &str) -> Option<Vec<String>> {
-    let Ok(config) = toml::from_str::<PyprojectToml>(&contents) else {
-        return None;
-    };
-    config
-        .tool
-        .and_then(|tool| tool.tryke.or(tool.trike))
-        .and_then(|cfg| cfg.exclude)
-}
-
-fn find_config_root(start: &Path) -> Option<PathBuf> {
-    start
-        .ancestors()
-        .find(|dir| {
-            let pyproject = dir.join("pyproject.toml");
-            let Ok(contents) = fs::read_to_string(pyproject) else {
-                return false;
-            };
-            parse_config_excludes(&contents).is_some()
-        })
-        .map(Path::to_path_buf)
-}
-
+#[must_use]
 pub fn configured_excludes(start: &Path, cli_excludes: &[String]) -> Vec<String> {
     if !cli_excludes.is_empty() {
         return cli_excludes.to_vec();
     }
-    let root = find_config_root(start).unwrap_or_else(|| start.to_path_buf());
-    load_config_excludes(&root)
+    tryke_config::load_effective_config(start).discovery.exclude
 }
 
 fn build_excludes(root: &Path, excludes: &[String]) -> Gitignore {
@@ -837,18 +789,6 @@ mod tests {
     }
 
     #[test]
-    fn loads_excludes_from_tryke_tool_section() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(
-            dir.path().join("pyproject.toml"),
-            "[tool.tryke]\nexclude = [\"benchmarks/suites\", \"generated\"]\n",
-        )
-        .expect("write pyproject");
-        let excludes = configured_excludes(dir.path(), &[]);
-        assert_eq!(excludes, vec!["benchmarks/suites", "generated"]);
-    }
-
-    #[test]
     fn cli_excludes_override_pyproject() {
         let dir = tempfile::tempdir().expect("tempdir");
         fs::write(
@@ -858,61 +798,6 @@ mod tests {
         .expect("write pyproject");
         let excludes = configured_excludes(dir.path(), &["tmp".into(), "cache".into()]);
         assert_eq!(excludes, vec!["tmp", "cache"]);
-    }
-
-    #[test]
-    fn skips_intermediate_pyproject_without_tryke_section() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(
-            dir.path().join("pyproject.toml"),
-            "[tool.tryke]\nexclude = [\"benchmarks/suites\"]\n",
-        )
-        .expect("write root pyproject");
-        let nested = dir.path().join("packages/app/src");
-        fs::create_dir_all(&nested).expect("create nested");
-        fs::write(
-            dir.path().join("packages/app/pyproject.toml"),
-            "[project]\nname = \"app\"\n",
-        )
-        .expect("write nested pyproject");
-
-        let excludes = configured_excludes(&nested, &[]);
-        assert_eq!(excludes, vec!["benchmarks/suites"]);
-    }
-
-    #[test]
-    fn nearest_tryke_config_wins() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(
-            dir.path().join("pyproject.toml"),
-            "[tool.tryke]\nexclude = [\"benchmarks/suites\"]\n",
-        )
-        .expect("write root pyproject");
-        let nested = dir.path().join("packages/app/src");
-        fs::create_dir_all(&nested).expect("create nested");
-        fs::write(
-            dir.path().join("packages/app/pyproject.toml"),
-            "[tool.tryke]\nexclude = [\"generated\"]\n",
-        )
-        .expect("write nested pyproject");
-
-        let excludes = configured_excludes(&nested, &[]);
-        assert_eq!(excludes, vec!["generated"]);
-    }
-
-    #[test]
-    fn returns_empty_when_no_tryke_config_exists() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let nested = dir.path().join("packages/app/src");
-        fs::create_dir_all(&nested).expect("create nested");
-        fs::write(
-            dir.path().join("packages/app/pyproject.toml"),
-            "[project]\nname = \"app\"\n",
-        )
-        .expect("write nested pyproject");
-
-        let excludes = configured_excludes(&nested, &[]);
-        assert!(excludes.is_empty());
     }
 
     #[test]

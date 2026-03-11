@@ -110,6 +110,12 @@ tryke test -e benchmarks/suites
 tryke watch -e generated
 ```
 
+Include a config-excluded path for one run with `--include`:
+
+```bash
+tryke test --include benchmarks/suites benchmarks/suites/suite_50/test_sync.py
+```
+
 ## 7. Async tests
 
 Async tests work out of the box:

@@ -4500,4 +4500,3 @@ def test_sync_499():
     loaded = json.loads(dumped)
     expect(loaded).to_equal(original)
     expect(len(loaded["items"])).to_equal(80)
-

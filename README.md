@@ -64,7 +64,7 @@ Run benchmarks locally to compare tryke vs pytest across different scales:
 
 ```bash
 python benchmarks/generate.py   # generate synthetic test suites
-./benchmarks/run.sh              # run hyperfine benchmarks
+./benchmarks/run.sh              # run hyperfine benchmarks (uses --include benchmarks/suites)
 python benchmarks/summarize.py   # generate markdown summary
 ```
 

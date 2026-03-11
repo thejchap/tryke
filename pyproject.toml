@@ -35,6 +35,9 @@ exclude = ["benchmarks/suites"]
 select = ["ALL"]
 ignore = ["D", "COM812"]
 
+[tool.tryke]
+exclude = ["benchmarks/suites"]
+
 [tool.maturin]
 bindings = "bin"
 manifest-path = "crates/tryke/Cargo.toml"

@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use clap_verbosity_flag::{Verbosity as LogVerbosity, WarnLevel};
 use log::{debug, warn};
 use tokio_stream::StreamExt;
+use tryke_config::load_effective_config;
 use tryke_discovery::Discoverer;
 use tryke_reporter::{
     DotReporter, JSONReporter, JUnitReporter, LlmReporter, ProgressReporter, Reporter,
@@ -46,6 +47,9 @@ enum Commands {
         /// Exclude files/directories from discovery (overrides pyproject config)
         #[arg(short = 'e', long = "exclude")]
         exclude: Vec<String>,
+        /// Include files/directories even if excluded by `pyproject.toml`
+        #[arg(short = 'i', long = "include")]
+        include: Vec<String>,
         #[arg(long)]
         collect_only: bool,
         /// Filter expression (e.g. "math and not slow")
@@ -77,6 +81,9 @@ enum Commands {
         /// Exclude files/directories from discovery (overrides pyproject config)
         #[arg(short = 'e', long = "exclude")]
         exclude: Vec<String>,
+        /// Include files/directories even if excluded by `pyproject.toml`
+        #[arg(short = 'i', long = "include")]
+        include: Vec<String>,
         /// Filter expression (e.g. "math and not slow")
         #[arg(short = 'k', long = "filter")]
         filter: Option<String>,
@@ -105,6 +112,9 @@ enum Commands {
         /// Exclude files/directories from discovery (overrides pyproject config)
         #[arg(short = 'e', long = "exclude")]
         exclude: Vec<String>,
+        /// Include files/directories even if excluded by `pyproject.toml`
+        #[arg(short = 'i', long = "include")]
+        include: Vec<String>,
     },
     /// Print the import dependency graph for the project
     Graph {
@@ -113,6 +123,9 @@ enum Commands {
         /// Exclude files/directories from discovery (overrides pyproject config)
         #[arg(short = 'e', long = "exclude")]
         exclude: Vec<String>,
+        /// Include files/directories even if excluded by `pyproject.toml`
+        #[arg(short = 'i', long = "include")]
+        include: Vec<String>,
         /// Show only files that have dependents or dependencies (skip isolated files)
         #[arg(long)]
         connected_only: bool,
@@ -129,6 +142,21 @@ fn worker_pool_size() -> usize {
 struct DiscoverySelection {
     tests: Vec<tryke_types::TestItem>,
     changed_files: Option<usize>,
+}
+
+fn resolved_excludes(root: &Path, cli_excludes: &[String], cli_includes: &[String]) -> Vec<String> {
+    if !cli_excludes.is_empty() {
+        return cli_excludes.to_vec();
+    }
+    let includes = cli_includes
+        .iter()
+        .collect::<std::collections::HashSet<_>>();
+    load_effective_config(root)
+        .discovery
+        .exclude
+        .into_iter()
+        .filter(|exclude| !includes.contains(exclude))
+        .collect()
 }
 
 /// Discover tests, optionally restricting to changed files.
@@ -500,6 +528,7 @@ fn main() -> Result<()> {
             fail_fast,
             maxfail,
             workers,
+            include,
         } => {
             let resolved_maxfail = if *fail_fast { Some(1) } else { *maxfail };
             let mut rep = build_reporter(reporter, verbosity);
@@ -521,7 +550,7 @@ fn main() -> Result<()> {
 
             let cwd = env::current_dir()?;
             let root_path = root.as_deref().unwrap_or(&cwd);
-            let excludes = tryke_discovery::configured_excludes(root_path, exclude);
+            let excludes = resolved_excludes(root_path, exclude, include);
             let test_filter = TestFilter::from_args(paths, filter.as_deref(), markers.as_deref())
                 .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -561,12 +590,13 @@ fn main() -> Result<()> {
             fail_fast,
             maxfail,
             workers,
+            include,
         } => {
             let resolved_maxfail = if *fail_fast { Some(1) } else { *maxfail };
             let mut rep = build_reporter(reporter, verbosity);
             let cwd = env::current_dir()?;
             let root_path = root.as_deref().unwrap_or(&cwd);
-            let excludes = tryke_discovery::configured_excludes(root_path, exclude);
+            let excludes = resolved_excludes(root_path, exclude, include);
             let test_filter = TestFilter::from_args(&[], filter.as_deref(), markers.as_deref())
                 .map_err(|e| anyhow::anyhow!(e))?;
             rt.block_on(run_watch(
@@ -582,21 +612,23 @@ fn main() -> Result<()> {
             port,
             root,
             exclude,
+            include,
         } => {
             let root_path = root.clone().unwrap_or(env::current_dir()?);
-            let excludes = tryke_discovery::configured_excludes(&root_path, exclude);
+            let excludes = resolved_excludes(&root_path, exclude, include);
             let server = tryke_server::Server::new(*port, root_path, excludes);
             rt.block_on(server.run())
         }
         Commands::Graph {
             root,
             exclude,
+            include,
             connected_only,
             changed,
         } => {
             let cwd = env::current_dir()?;
             let root_path = root.as_deref().unwrap_or(&cwd);
-            let excludes = tryke_discovery::configured_excludes(root_path, exclude);
+            let excludes = resolved_excludes(root_path, exclude, include);
             run_graph(Some(root_path), &excludes, *connected_only, *changed)
         }
     }
@@ -650,9 +682,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_text() {
-        let mut reporter = TextReporter::new();
+        let mut reporter = TextReporter::with_writer(Vec::new());
         let root = cwd();
-        let tests = discover_tests(&root, false, &[]).tests;
+        let excludes = resolved_excludes(&root, &[], &[]);
+        let tests = discover_tests(&root, false, &excludes).tests;
         assert!(
             run_tests(&mut reporter, &root, tests, None, None, None, None)
                 .await
@@ -662,9 +695,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_json() {
-        let mut reporter = JSONReporter::new();
+        let mut reporter = JSONReporter::with_writer(Vec::new());
         let root = cwd();
-        let tests = discover_tests(&root, false, &[]).tests;
+        let excludes = resolved_excludes(&root, &[], &[]);
+        let tests = discover_tests(&root, false, &excludes).tests;
         assert!(
             run_tests(&mut reporter, &root, tests, None, None, None, None)
                 .await
@@ -674,9 +708,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_dot() {
-        let mut reporter = DotReporter::new();
+        let mut reporter = DotReporter::with_writer(Vec::new());
         let root = cwd();
-        let tests = discover_tests(&root, false, &[]).tests;
+        let excludes = resolved_excludes(&root, &[], &[]);
+        let tests = discover_tests(&root, false, &excludes).tests;
         assert!(
             run_tests(&mut reporter, &root, tests, None, None, None, None)
                 .await
@@ -686,9 +721,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_junit() {
-        let mut reporter = JUnitReporter::new();
+        let mut reporter = JUnitReporter::with_writer(Vec::new());
         let root = cwd();
-        let tests = discover_tests(&root, false, &[]).tests;
+        let excludes = resolved_excludes(&root, &[], &[]);
+        let tests = discover_tests(&root, false, &excludes).tests;
         assert!(
             run_tests(&mut reporter, &root, tests, None, None, None, None)
                 .await
@@ -914,13 +950,25 @@ mod tests {
 
     #[tokio::test]
     async fn run_cycle_runs_without_error() {
+        let python_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../python")
+            .canonicalize()
+            .expect("python/ dir must exist");
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
-        std::fs::write(dir.path().join("test_x.py"), "@test\ndef test_x(): pass\n")
-            .expect("write test file");
+        std::fs::write(
+            dir.path().join("test_x.py"),
+            "from tryke import test\n\n@test\ndef test_x(): pass\n",
+        )
+        .expect("write test file");
         let mut discoverer = Discoverer::new(dir.path());
         let mut reporter = TextReporter::new();
-        let pool = WorkerPool::new(1, &test_python_bin(), dir.path());
+        let pool = WorkerPool::with_python_path(
+            1,
+            &test_python_bin(),
+            dir.path(),
+            &[dir.path().to_path_buf(), python_dir],
+        );
         assert!(
             run_cycle(&mut reporter, &mut discoverer, &pool)
                 .await
@@ -955,6 +1003,61 @@ mod tests {
             &cli.command,
             Commands::Test { exclude, .. } if exclude == &["benchmarks/suites"]
         ));
+    }
+
+    #[test]
+    fn test_include_flag_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "test", "--include", "benchmarks/suites"]).unwrap();
+        assert!(matches!(
+            &cli.command,
+            Commands::Test {
+                include,
+                ..
+            } if include == &["benchmarks/suites"]
+        ));
+    }
+
+    #[test]
+    fn resolved_excludes_reads_pyproject_when_enabled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.tryke]\nexclude = [\"benchmarks/suites\"]\n",
+        )
+        .expect("write pyproject.toml");
+
+        let excludes = resolved_excludes(dir.path(), &[], &[]);
+        assert_eq!(excludes, vec!["benchmarks/suites"]);
+    }
+
+    #[test]
+    fn resolved_excludes_removes_included_config_excludes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.tryke]\nexclude = [\"benchmarks/suites\", \"generated\"]\n",
+        )
+        .expect("write pyproject.toml");
+
+        let excludes = resolved_excludes(dir.path(), &[], &["benchmarks/suites".into()]);
+        assert_eq!(excludes, vec!["generated"]);
+    }
+
+    #[test]
+    fn resolved_excludes_prefers_cli_excludes_over_includes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.tryke]\nexclude = [\"benchmarks/suites\"]\n",
+        )
+        .expect("write pyproject.toml");
+
+        let excludes = resolved_excludes(
+            dir.path(),
+            &["tmp".into(), "cache".into()],
+            &["benchmarks/suites".into()],
+        );
+        assert_eq!(excludes, vec!["tmp", "cache"]);
     }
 
     #[test]

@@ -267,6 +267,7 @@ tryke test [OPTIONS] [PATHS]...
 |--------|-------------|
 | `[PATHS]...` | File paths or `file:line` specs to restrict collection |
 | `-e, --exclude <PATTERN>` | Exclude files/directories from discovery (overrides `pyproject.toml`) |
+| `-i, --include <PATTERN>` | Include a path even if it is excluded by `pyproject.toml` |
 | `--collect-only` | List discovered tests without running them |
 | `-k <FILTER>` | Filter by name expression (e.g. `"math and not slow"`) |
 | `-m <MARKERS>` | Filter by tag expression (e.g. `"slow and not network"`) |
@@ -307,6 +308,7 @@ exclude = ["benchmarks/suites", "generated"]
 ```
 
 Use `-e/--exclude` on `test`, `watch`, `server`, or `graph` to override the config for that command.
+Use `-i/--include` to remove specific config-driven excludes for that command.
 
 ### `tryke watch`
 
@@ -327,5 +329,6 @@ tryke server [OPTIONS]
 | `--port <PORT>` | Listen port (default: `2337`) |
 | `--root <PATH>` | Project root directory |
 | `-e, --exclude <PATTERN>` | Exclude files/directories from discovery (overrides `pyproject.toml`) |
+| `-i, --include <PATTERN>` | Include a path even if it is excluded by `pyproject.toml` |
 
 Start a persistent server. Run tests against it with `tryke test --port 2337`.

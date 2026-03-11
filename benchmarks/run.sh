@@ -72,7 +72,7 @@ for scale in 50 500 5000; do
     hyperfine "${HYPERFINE_ARGS[@]}" \
         --export-json "$RESULTS_DIR/discovery_${scale}.json" \
         --command-name "tryke ($scale)" \
-        "tryke test --collect-only $test_files" \
+        "tryke test --include benchmarks/suites --collect-only $test_files" \
         --command-name "pytest ($scale)" \
         "uv run pytest --collect-only -q $suite_dir"
 
@@ -81,7 +81,7 @@ for scale in 50 500 5000; do
     hyperfine "${HYPERFINE_ARGS[@]}" \
         --export-json "$RESULTS_DIR/sequential_${scale}.json" \
         --command-name "tryke -j1 ($scale)" \
-        "tryke test -j1 $test_files" \
+        "tryke test --include benchmarks/suites -j1 $test_files" \
         --command-name "pytest ($scale)" \
         "uv run pytest -q $suite_dir"
 
@@ -102,7 +102,7 @@ for scale in 50 500 5000; do
     hyperfine "${HYPERFINE_ARGS[@]}" \
         --export-json "$RESULTS_DIR/parallel_${scale}.json" \
         --command-name "tryke ($scale)" \
-        "tryke test $test_files" \
+        "tryke test --include benchmarks/suites $test_files" \
         --command-name "pytest-xdist -nauto ($scale)" \
         "uv run pytest -q -nauto $suite_dir"
 

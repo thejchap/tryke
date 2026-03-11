@@ -2027,11 +2027,21 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-stream",
+ "tryke_config",
  "tryke_discovery",
  "tryke_reporter",
  "tryke_runner",
  "tryke_server",
  "tryke_types",
+]
+
+[[package]]
+name = "tryke_config"
+version = "0.0.7"
+dependencies = [
+ "serde",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]
@@ -2048,7 +2058,7 @@ dependencies = [
  "salsa",
  "serde",
  "tempfile",
- "toml",
+ "tryke_config",
  "tryke_types",
 ]
 

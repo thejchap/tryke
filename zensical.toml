@@ -47,3 +47,16 @@ accent = "teal"
 [project.theme.palette.toggle]
 icon = "lucide/sun"
 name = "Switch to light mode"
+
+[project.plugins.mkdocstrings.handlers.python]
+paths = ["python"]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+docstring_style = "google"
+show_source = false
+show_root_heading = true
+show_root_full_path = false
+members_order = "source"
+merge_init_into_class = true
+show_signature_annotations = true
+separate_signature = true

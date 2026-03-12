@@ -54,9 +54,22 @@ pub fn load_effective_config(start: &Path) -> TrykeConfig {
     TrykeConfig::from_toml_str(&contents).unwrap_or_default()
 }
 
+#[must_use]
+pub fn requires_python(contents: &str) -> Option<String> {
+    let raw = toml::from_str::<PyprojectToml>(contents).ok()?;
+    raw.project.and_then(|p| p.requires_python)
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct PyprojectToml {
+    project: Option<PyprojectProject>,
     tool: Option<PyprojectTool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PyprojectProject {
+    #[serde(rename = "requires-python")]
+    requires_python: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -169,5 +182,23 @@ mod tests {
 
         let config = load_effective_config(&nested);
         assert_eq!(config.discovery.exclude, vec!["generated"]);
+    }
+
+    #[test]
+    fn requires_python_extracts_specifier() {
+        let spec = requires_python("[project]\nrequires-python = \">=3.12\"\n");
+        assert_eq!(spec.as_deref(), Some(">=3.12"));
+    }
+
+    #[test]
+    fn requires_python_returns_none_when_missing() {
+        let spec = requires_python("[project]\nname = \"app\"\n");
+        assert_eq!(spec, None);
+    }
+
+    #[test]
+    fn requires_python_returns_none_without_project_table() {
+        let spec = requires_python("[tool.tryke]\nexclude = []\n");
+        assert_eq!(spec, None);
     }
 }

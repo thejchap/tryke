@@ -16,7 +16,7 @@ use tryke_reporter::{
     DotReporter, JSONReporter, JUnitReporter, LlmReporter, ProgressReporter, Reporter,
     TextReporter, Verbosity,
 };
-use tryke_runner::{WorkerPool, resolve_python};
+use tryke_runner::{WorkerPool, check_python_version, resolve_python};
 use tryke_types::filter::TestFilter;
 use tryke_types::{ChangedSelectionSummary, RunSummary, TestOutcome};
 
@@ -90,6 +90,7 @@ async fn run_tests(
     changed_selection: Option<ChangedSelectionSummary>,
 ) -> Result<()> {
     let python = resolve_python(root);
+    check_python_version(&python, root)?;
     let pool_size = workers.unwrap_or_else(|| tests.len().min(worker_pool_size()));
     let pool = WorkerPool::new(pool_size, &python, root);
     pool.warm().await;
@@ -217,6 +218,7 @@ async fn run_watch(
     let mut discoverer = Discoverer::new_with_excludes(root, excludes);
 
     let python = resolve_python(root);
+    check_python_version(&python, root)?;
     let pool_size = workers.unwrap_or_else(worker_pool_size);
     let pool = WorkerPool::new(pool_size, &python, root);
     pool.warm().await;
@@ -1013,6 +1015,7 @@ mod tests {
         run(dir, &["init"]);
         run(dir, &["config", "user.email", "tryke@example.com"]);
         run(dir, &["config", "user.name", "Tryke Tests"]);
+        run(dir, &["config", "commit.gpgsign", "false"]);
     }
 
     #[test]
@@ -1163,10 +1166,15 @@ mod tests {
 
     #[tokio::test]
     async fn integration_python_worker_runs_tests() {
-        let python_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../python")
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
             .canonicalize()
-            .expect("python/ dir must exist");
+            .expect("workspace root");
+        let python = test_python_bin();
+        tryke_runner::check_python_version(&python, &workspace_root)
+            .expect("Python version check (from pyproject.toml requires-python)");
+
+        let python_dir = workspace_root.join("python");
 
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");

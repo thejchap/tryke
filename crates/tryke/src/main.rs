@@ -1018,25 +1018,37 @@ mod tests {
         run(dir, &["config", "commit.gpgsign", "false"]);
     }
 
+    fn git_run(dir: &tempfile::TempDir, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir.path())
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {:?} failed", args);
+    }
+
+    /// Seed a git repo with an initial commit containing `pyproject.toml`
+    /// and an optional set of extra files, so `git diff --name-only HEAD`
+    /// has a baseline to compare against.
+    fn seed_git_repo(dir: &tempfile::TempDir, files: &[(&str, &str)]) {
+        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        for &(name, content) in files {
+            if let Some(parent) = std::path::Path::new(name).parent()
+                && !parent.as_os_str().is_empty()
+            {
+                std::fs::create_dir_all(dir.path().join(parent)).expect("mkdir");
+            }
+            std::fs::write(dir.path().join(name), content).expect("write file");
+        }
+        init_git_repo(dir);
+        git_run(dir, &["add", "."]);
+        git_run(dir, &["commit", "-m", "initial"]);
+    }
+
     #[test]
     fn git_changed_files_includes_untracked() {
         let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
-        std::fs::write(dir.path().join("tracked.py"), "def helper(): pass\n").expect("write");
-        init_git_repo(&dir);
-
-        let add_status = std::process::Command::new("git")
-            .args(["add", "."])
-            .current_dir(dir.path())
-            .status()
-            .expect("git add");
-        assert!(add_status.success());
-        let commit_status = std::process::Command::new("git")
-            .args(["commit", "-m", "initial"])
-            .current_dir(dir.path())
-            .status()
-            .expect("git commit");
-        assert!(commit_status.success());
+        seed_git_repo(&dir, &[("tracked.py", "def helper(): pass\n")]);
 
         std::fs::write(
             dir.path().join("test_new.py"),
@@ -1046,6 +1058,105 @@ mod tests {
 
         let changed = git_changed_files(dir.path()).expect("git changed files");
         assert!(changed.contains(&dir.path().join("test_new.py")));
+    }
+
+    #[test]
+    fn git_changed_files_includes_tracked_modifications() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        seed_git_repo(&dir, &[("lib.py", "x = 1\n")]);
+
+        std::fs::write(dir.path().join("lib.py"), "x = 2\n").expect("modify tracked file");
+
+        let changed = git_changed_files(dir.path()).expect("git changed files");
+        assert!(changed.contains(&dir.path().join("lib.py")));
+    }
+
+    #[test]
+    fn git_changed_files_returns_empty_when_clean() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        seed_git_repo(&dir, &[("lib.py", "x = 1\n")]);
+
+        let changed = git_changed_files(dir.path()).expect("git changed files");
+        assert!(changed.is_empty());
+    }
+
+    #[test]
+    fn git_changed_files_includes_staged_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        seed_git_repo(&dir, &[]);
+
+        std::fs::write(dir.path().join("new.py"), "y = 1\n").expect("write new file");
+        git_run(&dir, &["add", "new.py"]);
+
+        let changed = git_changed_files(dir.path()).expect("git changed files");
+        assert!(changed.contains(&dir.path().join("new.py")));
+    }
+
+    #[test]
+    fn git_changed_files_deduplicates_tracked_and_untracked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        seed_git_repo(&dir, &[]);
+
+        // Stage a new file, then modify it again so it appears in both
+        // `git diff --name-only HEAD` (staged) and `git ls-files --others`
+        // would not list it since it's tracked. But the staged version differs
+        // from HEAD, and the working copy differs from the index, so it
+        // appears in `git diff --name-only HEAD` (which covers both).
+        // This verifies our BTreeSet dedup doesn't produce duplicates.
+        std::fs::write(dir.path().join("dup.py"), "v1\n").expect("write");
+        git_run(&dir, &["add", "dup.py"]);
+        std::fs::write(dir.path().join("dup.py"), "v2\n").expect("modify");
+
+        let changed = git_changed_files(dir.path()).expect("git changed files");
+        let count = changed
+            .iter()
+            .filter(|p| *p == &dir.path().join("dup.py"))
+            .count();
+        assert_eq!(count, 1, "file should appear exactly once");
+    }
+
+    #[test]
+    fn git_changed_files_handles_paths_with_spaces() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        seed_git_repo(&dir, &[]);
+
+        let subdir = dir.path().join("my tests");
+        std::fs::create_dir_all(&subdir).expect("mkdir");
+        std::fs::write(subdir.join("test_space.py"), "pass\n").expect("write");
+
+        let changed = git_changed_files(dir.path()).expect("git changed files");
+        assert!(
+            changed.contains(&subdir.join("test_space.py")),
+            "should detect files in directories with spaces: {changed:?}"
+        );
+    }
+
+    #[test]
+    fn git_changed_files_includes_deleted_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        seed_git_repo(&dir, &[("to_delete.py", "pass\n")]);
+
+        std::fs::remove_file(dir.path().join("to_delete.py")).expect("delete file");
+
+        let changed = git_changed_files(dir.path()).expect("git changed files");
+        assert!(
+            changed.contains(&dir.path().join("to_delete.py")),
+            "deleted files should appear in changed list: {changed:?}"
+        );
+    }
+
+    #[test]
+    fn git_changed_files_returns_sorted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        seed_git_repo(&dir, &[]);
+
+        std::fs::write(dir.path().join("z.py"), "pass\n").expect("write");
+        std::fs::write(dir.path().join("a.py"), "pass\n").expect("write");
+        std::fs::write(dir.path().join("m.py"), "pass\n").expect("write");
+
+        let changed = git_changed_files(dir.path()).expect("git changed files");
+        let is_sorted = changed.windows(2).all(|w| w[0] <= w[1]);
+        assert!(is_sorted, "results should be sorted: {changed:?}");
     }
 
     #[tokio::test]

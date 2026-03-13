@@ -228,6 +228,13 @@ impl Discoverer {
         tests
     }
 
+    /// Returns all files that contain dynamic imports (`importlib.import_module()` or
+    /// `__import__()`). These files are marked always-dirty: they are included in every
+    /// `--changed` run and may produce stale module state in watch/server mode.
+    pub fn dynamic_import_files(&self) -> Vec<PathBuf> {
+        self.import_graph.always_dirty_files()
+    }
+
     /// Returns a sorted summary of the import graph for all known files.
     pub fn import_graph_summary(&self) -> Vec<GraphEntry> {
         let mut entries: Vec<GraphEntry> = self
@@ -611,6 +618,33 @@ mod tests {
         assert!(
             !names.contains(&"test_static"),
             "test_static should not be affected"
+        );
+    }
+
+    #[test]
+    fn dynamic_import_files_reflects_always_dirty() {
+        let dynamic_src = "import importlib\nmod = importlib.import_module('utils')\nfrom tryke import test\n@test\ndef test_dyn():\n    pass\n";
+        let static_src = "from tryke import test\n@test\ndef test_static():\n    pass\n";
+        let dir = make_project(&[
+            ("test_dynamic.py", dynamic_src),
+            ("test_static.py", static_src),
+        ]);
+        let mut discoverer = Discoverer::new(dir.path());
+        discoverer.rediscover();
+
+        let files = discoverer.dynamic_import_files();
+        let names: Vec<&str> = files
+            .iter()
+            .filter_map(|p| p.file_name())
+            .filter_map(|n| n.to_str())
+            .collect();
+        assert!(
+            names.contains(&"test_dynamic.py"),
+            "test_dynamic.py should be in dynamic_import_files, got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"test_static.py"),
+            "test_static.py should not be in dynamic_import_files"
         );
     }
 

@@ -3,6 +3,7 @@ use std::path::Path;
 use log::{debug, warn};
 use tryke_config::load_effective_config;
 use tryke_discovery::Discoverer;
+use tryke_types::{DiscoveryWarning, DiscoveryWarningKind};
 
 use crate::git::resolve_changed_files;
 
@@ -11,6 +12,26 @@ pub struct DiscoverySelection {
     pub changed_files: Option<usize>,
     /// In changed-first mode, how many tests at the front are "changed" tests.
     pub changed_prefix_len: Option<usize>,
+    /// Files where dynamic imports were detected; these will always re-run with --changed.
+    pub warnings: Vec<DiscoveryWarning>,
+}
+
+fn dynamic_import_warnings(discoverer: &Discoverer) -> Vec<DiscoveryWarning> {
+    discoverer
+        .dynamic_import_files()
+        .into_iter()
+        .map(|path| {
+            let message = format!(
+                "{} — dynamic imports found; will always re-run with --changed",
+                path.display()
+            );
+            DiscoveryWarning {
+                file_path: path,
+                kind: DiscoveryWarningKind::DynamicImports,
+                message,
+            }
+        })
+        .collect()
 }
 
 pub fn resolved_excludes(
@@ -39,9 +60,11 @@ pub fn discover_tests(
     base_branch: Option<&str>,
     excludes: &[String],
 ) -> DiscoverySelection {
+    let mut discoverer = Discoverer::new_with_excludes(root, excludes);
+    discoverer.rediscover();
+    let warnings = dynamic_import_warnings(&discoverer);
+
     if changed {
-        let mut discoverer = Discoverer::new_with_excludes(root, excludes);
-        discoverer.rediscover();
         match resolve_changed_files(root, base_branch) {
             Some(changed_files) if !changed_files.is_empty() => {
                 debug!("--changed: {} git-changed files", changed_files.len());
@@ -49,6 +72,7 @@ pub fn discover_tests(
                     tests: discoverer.tests_for_changed(&changed_files),
                     changed_files: Some(changed_files.len()),
                     changed_prefix_len: None,
+                    warnings,
                 }
             }
             Some(_) => {
@@ -57,6 +81,7 @@ pub fn discover_tests(
                     tests: discoverer.tests(),
                     changed_files: None,
                     changed_prefix_len: None,
+                    warnings,
                 }
             }
             None => {
@@ -65,14 +90,16 @@ pub fn discover_tests(
                     tests: discoverer.tests(),
                     changed_files: None,
                     changed_prefix_len: None,
+                    warnings,
                 }
             }
         }
     } else {
         DiscoverySelection {
-            tests: tryke_discovery::discover_from_with_excludes(root, excludes),
+            tests: discoverer.tests(),
             changed_files: None,
             changed_prefix_len: None,
+            warnings,
         }
     }
 }
@@ -85,6 +112,7 @@ pub fn discover_tests_changed_first(
 ) -> DiscoverySelection {
     let mut discoverer = Discoverer::new_with_excludes(root, excludes);
     discoverer.rediscover();
+    let warnings = dynamic_import_warnings(&discoverer);
     let changed_files = resolve_changed_files(root, base_branch);
     let all_tests = discoverer.tests();
     match changed_files {
@@ -102,6 +130,7 @@ pub fn discover_tests_changed_first(
                 tests,
                 changed_files: Some(cf.len()),
                 changed_prefix_len: Some(changed_prefix_len),
+                warnings,
             }
         }
         Some(_) => {
@@ -110,6 +139,7 @@ pub fn discover_tests_changed_first(
                 tests: all_tests,
                 changed_files: None,
                 changed_prefix_len: None,
+                warnings,
             }
         }
         None => {
@@ -118,6 +148,7 @@ pub fn discover_tests_changed_first(
                 tests: all_tests,
                 changed_files: None,
                 changed_prefix_len: None,
+                warnings,
             }
         }
     }
@@ -311,5 +342,32 @@ mod tests {
         );
         // All 3 tests should be present
         assert_eq!(names.len(), 3, "all 3 tests should be present: {names:?}");
+    }
+
+    #[test]
+    fn discover_tests_includes_dynamic_import_warnings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        std::fs::write(
+            dir.path().join("test_dyn.py"),
+            "import importlib\nmod = importlib.import_module('os')\nfrom tryke import test\n@test\ndef test_something():\n    pass\n",
+        )
+        .expect("write test_dyn.py");
+
+        let discovered = discover_tests(dir.path(), false, None, &[]);
+        assert!(
+            !discovered.warnings.is_empty(),
+            "should have at least one dynamic import warning"
+        );
+        let file_names: Vec<&str> = discovered
+            .warnings
+            .iter()
+            .filter_map(|w| w.file_path.file_name())
+            .filter_map(|n| n.to_str())
+            .collect();
+        assert!(
+            file_names.contains(&"test_dyn.py"),
+            "warning should reference test_dyn.py, got: {file_names:?}"
+        );
     }
 }

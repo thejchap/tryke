@@ -7,7 +7,7 @@ use anyhow::Result;
 use tryke_discovery::Discoverer;
 use tryke_reporter::Reporter;
 use tryke_runner::{WorkerPool, check_python_version, resolve_python};
-use tryke_types::filter::TestFilter;
+use tryke_types::{DiscoveryWarning, DiscoveryWarningKind, filter::TestFilter};
 
 use crate::execution::{report_cycle, worker_pool_size};
 
@@ -15,6 +15,20 @@ fn clear_if_tty() {
     use std::io::IsTerminal;
     if std::io::stdout().is_terminal() {
         let _ = clearscreen::clear();
+    }
+}
+
+fn emit_dynamic_import_warnings(reporter: &mut dyn Reporter, discoverer: &Discoverer) {
+    for path in discoverer.dynamic_import_files() {
+        let message = format!(
+            "{} — dynamic imports found; will always re-run and may serve stale module state in watch mode",
+            path.display()
+        );
+        reporter.on_discovery_warning(&DiscoveryWarning {
+            file_path: path,
+            kind: DiscoveryWarningKind::DynamicImports,
+            message,
+        });
     }
 }
 
@@ -40,6 +54,7 @@ pub async fn run_watch(
     let disc_start = Instant::now();
     let tests = test_filter.apply(discoverer.rediscover());
     let disc_dur = Some(disc_start.elapsed());
+    emit_dynamic_import_warnings(reporter, &discoverer);
     report_cycle(reporter, tests, &pool, maxfail, disc_dur, None).await?;
 
     let (tx, rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
@@ -55,6 +70,7 @@ pub async fn run_watch(
         let disc_start = Instant::now();
         let tests = test_filter.apply(discoverer.tests_for_changed(&paths));
         let disc_dur = Some(disc_start.elapsed());
+        emit_dynamic_import_warnings(reporter, &discoverer);
         report_cycle(reporter, tests, &pool, maxfail, disc_dur, None).await?;
     }
 

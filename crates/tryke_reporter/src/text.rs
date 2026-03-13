@@ -6,7 +6,7 @@ use std::time::Duration;
 use owo_colors::OwoColorize;
 use tryke_types::{RunSummary, TestItem, TestOutcome, TestResult};
 
-use tryke_types::DiscoveryError;
+use tryke_types::{DiscoveryError, DiscoveryWarning};
 
 use crate::Reporter;
 use crate::diagnostic::{
@@ -338,6 +338,22 @@ impl<W: io::Write> Reporter for TextReporter<W> {
             "!".red(),
             error.file_path.display().to_string().yellow(),
             error.message
+        );
+    }
+
+    fn on_discovery_warning(&mut self, warning: &DiscoveryWarning) {
+        let _ = writeln!(
+            self.writer,
+            "{} {} — dynamic imports found; this file will always re-run with {}",
+            "warning:".yellow().bold(),
+            warning.file_path.display().to_string().yellow(),
+            "--changed".bold(),
+        );
+        let _ = writeln!(
+            self.writer,
+            "         replace {} or {} with static imports to restore selective re-runs",
+            "importlib.import_module()".dimmed(),
+            "__import__()".dimmed(),
         );
     }
 }
@@ -943,5 +959,23 @@ mod tests {
     fn format_duration_sub_millis() {
         let d = Duration::from_micros(170);
         assert_eq!(format_duration(d), "0.17ms");
+    }
+
+    #[test]
+    fn discovery_warning_shows_file_and_hint() {
+        let mut r = reporter();
+        r.on_discovery_warning(&DiscoveryWarning {
+            file_path: PathBuf::from("tests/helpers/loader.py"),
+            kind: tryke_types::DiscoveryWarningKind::DynamicImports,
+            message: String::new(),
+        });
+        let out = output(&r);
+        assert!(out.contains("warning:"), "should show 'warning:' label");
+        assert!(out.contains("loader.py"), "should show the file path");
+        assert!(out.contains("--changed"), "should mention --changed mode");
+        assert!(
+            out.contains("importlib.import_module()"),
+            "should hint at the cause"
+        );
     }
 }

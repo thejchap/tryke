@@ -1,4 +1,4 @@
-use tryke_types::{DiscoveryError, RunSummary, TestItem, TestResult};
+use tryke_types::{DiscoveryError, DiscoveryWarning, RunSummary, TestItem, TestResult};
 
 pub trait Reporter {
     fn on_run_start(&mut self, tests: &[TestItem]);
@@ -6,6 +6,10 @@ pub trait Reporter {
     fn on_run_complete(&mut self, summary: &RunSummary);
     fn on_collect_complete(&mut self, _tests: &[TestItem]) {}
     fn on_discovery_error(&mut self, _error: &DiscoveryError) {}
+    /// Called once per file when dynamic imports are detected during discovery.
+    /// Implementations should surface this to the user so they understand why
+    /// those files are always included in `--changed` runs.
+    fn on_discovery_warning(&mut self, _warning: &DiscoveryWarning) {}
 }
 
 #[cfg(test)]

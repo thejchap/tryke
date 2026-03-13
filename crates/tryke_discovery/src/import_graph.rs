@@ -59,6 +59,13 @@ impl ImportGraph {
         self.always_dirty.remove(file);
     }
 
+    /// Returns all files currently marked as always-dirty (i.e. files with dynamic imports).
+    pub fn always_dirty_files(&self) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = self.always_dirty.iter().cloned().collect();
+        files.sort();
+        files
+    }
+
     /// BFS over the reverse index: returns all files that transitively depend on `changed`.
     /// Includes the changed files themselves and any always-dirty files.
     pub fn affected_files(&self, changed: &[PathBuf]) -> HashSet<PathBuf> {
@@ -246,6 +253,27 @@ mod tests {
 
         let affected = g.affected_files(&[p("/proj/utils.py")]);
         assert!(!affected.contains(&p("/proj/test_dyn.py")));
+    }
+
+    #[test]
+    fn always_dirty_files_returns_marked_paths() {
+        let mut g = ImportGraph::default();
+        assert!(g.always_dirty_files().is_empty());
+        g.mark_always_dirty(p("/proj/dyn_a.py"));
+        g.mark_always_dirty(p("/proj/dyn_b.py"));
+        let files = g.always_dirty_files();
+        assert_eq!(files.len(), 2);
+        assert!(files.contains(&p("/proj/dyn_a.py")));
+        assert!(files.contains(&p("/proj/dyn_b.py")));
+    }
+
+    #[test]
+    fn always_dirty_files_sorted() {
+        let mut g = ImportGraph::default();
+        g.mark_always_dirty(p("/proj/z.py"));
+        g.mark_always_dirty(p("/proj/a.py"));
+        let files = g.always_dirty_files();
+        assert_eq!(files, vec![p("/proj/a.py"), p("/proj/z.py")]);
     }
 
     #[test]

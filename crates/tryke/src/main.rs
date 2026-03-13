@@ -101,6 +101,9 @@ fn main() -> Result<()> {
             } else {
                 discover_tests(root_path, *changed, base_branch.as_deref(), &excludes)
             };
+            for warning in &discovered.warnings {
+                rep.on_discovery_warning(warning);
+            }
             let tests = test_filter.apply(discovered.tests);
             let discovery_duration = discovery_start.elapsed();
             let changed_selection =

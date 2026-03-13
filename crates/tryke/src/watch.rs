@@ -1,0 +1,63 @@
+use std::{
+    path::{Path, PathBuf},
+    time::Instant,
+};
+
+use anyhow::Result;
+use tryke_discovery::Discoverer;
+use tryke_reporter::Reporter;
+use tryke_runner::{WorkerPool, check_python_version, resolve_python};
+use tryke_types::filter::TestFilter;
+
+use crate::execution::{report_cycle, worker_pool_size};
+
+fn clear_if_tty() {
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() {
+        let _ = clearscreen::clear();
+    }
+}
+
+pub async fn run_watch(
+    reporter: &mut dyn Reporter,
+    root: Option<&Path>,
+    excludes: &[String],
+    test_filter: &TestFilter,
+    maxfail: Option<usize>,
+    workers: Option<usize>,
+) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let root = root.unwrap_or(&cwd);
+    let mut discoverer = Discoverer::new_with_excludes(root, excludes);
+
+    let python = resolve_python(root);
+    check_python_version(&python, root)?;
+    let pool_size = workers.unwrap_or_else(worker_pool_size);
+    let pool = WorkerPool::new(pool_size, &python, root);
+    pool.warm().await;
+
+    clear_if_tty();
+    let disc_start = Instant::now();
+    let tests = test_filter.apply(discoverer.rediscover());
+    let disc_dur = Some(disc_start.elapsed());
+    report_cycle(reporter, tests, &pool, maxfail, disc_dur, None).await?;
+
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
+    let _debouncer = tryke_server::watcher::spawn_watcher(root, excludes, tx)?;
+
+    for paths in &rx {
+        let modules = discoverer.affected_modules(&paths);
+        if !modules.is_empty() {
+            pool.reload(modules).await;
+        }
+        discoverer.rediscover_changed(&paths);
+        clear_if_tty();
+        let disc_start = Instant::now();
+        let tests = test_filter.apply(discoverer.tests_for_changed(&paths));
+        let disc_dur = Some(disc_start.elapsed());
+        report_cycle(reporter, tests, &pool, maxfail, disc_dur, None).await?;
+    }
+
+    pool.shutdown();
+    Ok(())
+}

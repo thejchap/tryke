@@ -27,6 +27,9 @@ fn worker_pool_size() -> usize {
 struct DiscoverySelection {
     tests: Vec<tryke_types::TestItem>,
     changed_files: Option<usize>,
+    /// In changed-first mode, how many tests at the front are "changed" tests.
+    #[cfg_attr(not(test), allow(dead_code))]
+    changed_prefix_len: Option<usize>,
 }
 
 fn resolved_excludes(root: &Path, cli_excludes: &[String], cli_includes: &[String]) -> Vec<String> {
@@ -45,16 +48,22 @@ fn resolved_excludes(root: &Path, cli_excludes: &[String], cli_includes: &[Strin
 }
 
 /// Discover tests, optionally restricting to changed files.
-fn discover_tests(root: &Path, changed: bool, excludes: &[String]) -> DiscoverySelection {
+fn discover_tests(
+    root: &Path,
+    changed: bool,
+    base_branch: Option<&str>,
+    excludes: &[String],
+) -> DiscoverySelection {
     if changed {
         let mut discoverer = Discoverer::new_with_excludes(root, excludes);
         discoverer.rediscover();
-        match git_changed_files(root) {
+        match resolve_changed_files(root, base_branch) {
             Some(changed_files) if !changed_files.is_empty() => {
                 debug!("--changed: {} git-changed files", changed_files.len());
                 DiscoverySelection {
                     tests: discoverer.tests_for_changed(&changed_files),
                     changed_files: Some(changed_files.len()),
+                    changed_prefix_len: None,
                 }
             }
             Some(_) => {
@@ -62,6 +71,7 @@ fn discover_tests(root: &Path, changed: bool, excludes: &[String]) -> DiscoveryS
                 DiscoverySelection {
                     tests: discoverer.tests(),
                     changed_files: None,
+                    changed_prefix_len: None,
                 }
             }
             None => {
@@ -69,6 +79,7 @@ fn discover_tests(root: &Path, changed: bool, excludes: &[String]) -> DiscoveryS
                 DiscoverySelection {
                     tests: discoverer.tests(),
                     changed_files: None,
+                    changed_prefix_len: None,
                 }
             }
         }
@@ -76,6 +87,53 @@ fn discover_tests(root: &Path, changed: bool, excludes: &[String]) -> DiscoveryS
         DiscoverySelection {
             tests: tryke_discovery::discover_from_with_excludes(root, excludes),
             changed_files: None,
+            changed_prefix_len: None,
+        }
+    }
+}
+
+/// Discover all tests but place changed tests first in the returned list.
+fn discover_tests_changed_first(
+    root: &Path,
+    base_branch: Option<&str>,
+    excludes: &[String],
+) -> DiscoverySelection {
+    let mut discoverer = Discoverer::new_with_excludes(root, excludes);
+    discoverer.rediscover();
+    let changed_files = resolve_changed_files(root, base_branch);
+    let all_tests = discoverer.tests();
+    match changed_files {
+        Some(cf) if !cf.is_empty() => {
+            let changed_tests = discoverer.tests_for_changed(&cf);
+            let changed_ids: std::collections::HashSet<String> =
+                changed_tests.iter().map(|t| t.id()).collect();
+            let (first, rest): (Vec<_>, Vec<_>) = all_tests
+                .into_iter()
+                .partition(|t| changed_ids.contains(&t.id()));
+            let changed_prefix_len = first.len();
+            let mut tests = first;
+            tests.extend(rest);
+            DiscoverySelection {
+                tests,
+                changed_files: Some(cf.len()),
+                changed_prefix_len: Some(changed_prefix_len),
+            }
+        }
+        Some(_) => {
+            warn!("--changed-first: no changed files found, running all tests in default order");
+            DiscoverySelection {
+                tests: all_tests,
+                changed_files: None,
+                changed_prefix_len: None,
+            }
+        }
+        None => {
+            warn!("--changed-first: git unavailable, running all tests in default order");
+            DiscoverySelection {
+                tests: all_tests,
+                changed_files: None,
+                changed_prefix_len: None,
+            }
         }
     }
 }
@@ -283,11 +341,38 @@ fn git_changed_files(root: &Path) -> Option<Vec<PathBuf>> {
     Some(paths)
 }
 
+/// Collect files changed on the current branch relative to `base`.
+/// Uses three-dot merge-base diff so only the branch's own changes appear.
+/// Also includes untracked files (not captured by the diff).
+/// Returns `None` if git is unavailable or a command fails.
+fn git_branch_changed_files(root: &Path, base: &str) -> Option<Vec<PathBuf>> {
+    let diff_spec = format!("{base}...HEAD");
+    let branch_diff = git_paths(root, &["diff", "--name-only", &diff_spec])?;
+    let untracked = git_paths(root, &["ls-files", "--others", "--exclude-standard"])?;
+    let mut paths: Vec<PathBuf> = branch_diff
+        .into_iter()
+        .chain(untracked)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    paths.sort();
+    Some(paths)
+}
+
+/// Resolve changed files using either branch mode or HEAD mode.
+fn resolve_changed_files(root: &Path, base_branch: Option<&str>) -> Option<Vec<PathBuf>> {
+    match base_branch {
+        Some(base) => git_branch_changed_files(root, base),
+        None => git_changed_files(root),
+    }
+}
+
 fn run_graph(
     root: Option<&Path>,
     excludes: &[String],
     connected_only: bool,
     changed: bool,
+    base_branch: Option<&str>,
 ) -> Result<()> {
     let cwd = env::current_dir()?;
     let root_path = root.unwrap_or(&cwd);
@@ -295,7 +380,7 @@ fn run_graph(
     discoverer.rediscover();
 
     let changed_files = if changed {
-        match git_changed_files(root_path) {
+        match resolve_changed_files(root_path, base_branch) {
             Some(paths) if !paths.is_empty() => Some(paths),
             Some(_) => {
                 println!("No git-visible changed files found.");
@@ -412,11 +497,18 @@ fn main() -> Result<()> {
             root,
             port,
             changed,
+            changed_first,
+            base_branch,
             fail_fast,
             maxfail,
             workers,
             include,
         } => {
+            if base_branch.is_some() && !changed && !changed_first {
+                return Err(anyhow::anyhow!(
+                    "--base-branch requires --changed or --changed-first"
+                ));
+            }
             let resolved_maxfail = if *fail_fast { Some(1) } else { *maxfail };
             let mut rep = build_reporter(reporter, verbosity);
             if let Some(p) = port {
@@ -442,7 +534,11 @@ fn main() -> Result<()> {
                 .map_err(|e| anyhow::anyhow!(e))?;
 
             let discovery_start = Instant::now();
-            let discovered = discover_tests(root_path, *changed, &excludes);
+            let discovered = if *changed_first {
+                discover_tests_changed_first(root_path, base_branch.as_deref(), &excludes)
+            } else {
+                discover_tests(root_path, *changed, base_branch.as_deref(), &excludes)
+            };
             let tests = test_filter.apply(discovered.tests);
             let discovery_duration = discovery_start.elapsed();
             let changed_selection =
@@ -512,11 +608,21 @@ fn main() -> Result<()> {
             include,
             connected_only,
             changed,
+            base_branch,
         } => {
+            if base_branch.is_some() && !changed {
+                return Err(anyhow::anyhow!("--base-branch requires --changed"));
+            }
             let cwd = env::current_dir()?;
             let root_path = root.as_deref().unwrap_or(&cwd);
             let excludes = resolved_excludes(root_path, exclude, include);
-            run_graph(Some(root_path), &excludes, *connected_only, *changed)
+            run_graph(
+                Some(root_path),
+                &excludes,
+                *connected_only,
+                *changed,
+                base_branch.as_deref(),
+            )
         }
     }
 }
@@ -572,7 +678,7 @@ mod tests {
         let mut reporter = TextReporter::with_writer(Vec::new());
         let root = cwd();
         let excludes = resolved_excludes(&root, &[], &[]);
-        let tests = discover_tests(&root, false, &excludes).tests;
+        let tests = discover_tests(&root, false, None, &excludes).tests;
         assert!(
             run_tests(&mut reporter, &root, tests, None, None, None, None)
                 .await
@@ -585,7 +691,7 @@ mod tests {
         let mut reporter = JSONReporter::with_writer(Vec::new());
         let root = cwd();
         let excludes = resolved_excludes(&root, &[], &[]);
-        let tests = discover_tests(&root, false, &excludes).tests;
+        let tests = discover_tests(&root, false, None, &excludes).tests;
         assert!(
             run_tests(&mut reporter, &root, tests, None, None, None, None)
                 .await
@@ -598,7 +704,7 @@ mod tests {
         let mut reporter = DotReporter::with_writer(Vec::new());
         let root = cwd();
         let excludes = resolved_excludes(&root, &[], &[]);
-        let tests = discover_tests(&root, false, &excludes).tests;
+        let tests = discover_tests(&root, false, None, &excludes).tests;
         assert!(
             run_tests(&mut reporter, &root, tests, None, None, None, None)
                 .await
@@ -611,7 +717,7 @@ mod tests {
         let mut reporter = JUnitReporter::with_writer(Vec::new());
         let root = cwd();
         let excludes = resolved_excludes(&root, &[], &[]);
-        let tests = discover_tests(&root, false, &excludes).tests;
+        let tests = discover_tests(&root, false, None, &excludes).tests;
         assert!(
             run_tests(&mut reporter, &root, tests, None, None, None, None)
                 .await
@@ -981,7 +1087,7 @@ mod tests {
             "from utils import helper\n@test\ndef test_foo(): pass\n",
         )
         .expect("write");
-        assert!(run_graph(Some(dir.path()), &[], false, false).is_ok());
+        assert!(run_graph(Some(dir.path()), &[], false, false, None).is_ok());
     }
 
     #[test]
@@ -999,7 +1105,7 @@ mod tests {
             "@test\ndef test_isolated(): pass\n",
         )
         .expect("write");
-        assert!(run_graph(Some(dir.path()), &[], true, false).is_ok());
+        assert!(run_graph(Some(dir.path()), &[], true, false, None).is_ok());
     }
 
     fn init_git_repo(dir: &tempfile::TempDir) {
@@ -1165,7 +1271,7 @@ mod tests {
         std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
         let mut reporter = TextReporter::new();
         // non-git directory → git_changed_files returns None → discover_tests runs all (0 here)
-        let tests = discover_tests(dir.path(), true, &[]).tests;
+        let tests = discover_tests(dir.path(), true, None, &[]).tests;
         assert!(
             run_tests(&mut reporter, dir.path(), tests, None, None, None, None)
                 .await
@@ -1305,7 +1411,7 @@ def test_failing():
         )
         .expect("write test file");
 
-        let tests = discover_tests(dir.path(), false, &[]).tests;
+        let tests = discover_tests(dir.path(), false, None, &[]).tests;
         assert_eq!(tests.len(), 2);
 
         let pool = WorkerPool::with_python_path(
@@ -1338,5 +1444,314 @@ def test_failing():
         }
 
         pool.shutdown();
+    }
+
+    // --- Branch mode tests ---
+
+    /// Seed a git repo with an explicit "main" branch name for branch-mode tests.
+    fn seed_git_repo_with_main(dir: &tempfile::TempDir, files: &[(&str, &str)]) {
+        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        for &(name, content) in files {
+            if let Some(parent) = std::path::Path::new(name).parent()
+                && !parent.as_os_str().is_empty()
+            {
+                std::fs::create_dir_all(dir.path().join(parent)).expect("mkdir");
+            }
+            std::fs::write(dir.path().join(name), content).expect("write file");
+        }
+        init_git_repo(dir);
+        git_run(dir, &["checkout", "-b", "main"]);
+        git_run(dir, &["add", "."]);
+        git_run(dir, &["commit", "-m", "initial"]);
+    }
+
+    #[test]
+    fn git_branch_changed_files_returns_branch_diff() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        seed_git_repo_with_main(&dir, &[("base.py", "x = 1\n")]);
+
+        git_run(&dir, &["checkout", "-b", "feature"]);
+        std::fs::write(dir.path().join("feature.py"), "y = 2\n").expect("write");
+        git_run(&dir, &["add", "feature.py"]);
+        git_run(&dir, &["commit", "-m", "feature commit"]);
+
+        let changed =
+            git_branch_changed_files(dir.path(), "main").expect("git branch changed files");
+        assert!(
+            changed.contains(&dir.path().join("feature.py")),
+            "branch file should appear: {changed:?}"
+        );
+        assert!(
+            !changed.contains(&dir.path().join("base.py")),
+            "base file should not appear: {changed:?}"
+        );
+    }
+
+    #[test]
+    fn git_branch_changed_files_includes_untracked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        seed_git_repo_with_main(&dir, &[("base.py", "x = 1\n")]);
+
+        git_run(&dir, &["checkout", "-b", "feature"]);
+        std::fs::write(dir.path().join("feature.py"), "y = 2\n").expect("write");
+        git_run(&dir, &["add", "feature.py"]);
+        git_run(&dir, &["commit", "-m", "feature commit"]);
+
+        std::fs::write(dir.path().join("untracked.py"), "z = 3\n").expect("write");
+
+        let changed =
+            git_branch_changed_files(dir.path(), "main").expect("git branch changed files");
+        assert!(
+            changed.contains(&dir.path().join("untracked.py")),
+            "untracked file should appear: {changed:?}"
+        );
+    }
+
+    #[test]
+    fn git_branch_changed_files_nonexistent_branch_returns_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        seed_git_repo(&dir, &[("base.py", "x = 1\n")]);
+
+        let result = git_branch_changed_files(dir.path(), "nonexistent-branch-xyz");
+        assert!(result.is_none(), "nonexistent branch should return None");
+    }
+
+    #[test]
+    fn git_branch_changed_files_excludes_main_only_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        seed_git_repo_with_main(&dir, &[("base.py", "x = 1\n")]);
+
+        git_run(&dir, &["checkout", "-b", "feature"]);
+        std::fs::write(dir.path().join("feature.py"), "y = 2\n").expect("write");
+        git_run(&dir, &["add", "feature.py"]);
+        git_run(&dir, &["commit", "-m", "feature commit"]);
+
+        // Switch back to main and add a change there
+        git_run(&dir, &["checkout", "main"]);
+        std::fs::write(dir.path().join("main_only.py"), "z = 3\n").expect("write");
+        git_run(&dir, &["add", "main_only.py"]);
+        git_run(&dir, &["commit", "-m", "main-only commit"]);
+
+        // Switch back to feature branch
+        git_run(&dir, &["checkout", "feature"]);
+
+        let changed =
+            git_branch_changed_files(dir.path(), "main").expect("git branch changed files");
+        assert!(
+            !changed.contains(&dir.path().join("main_only.py")),
+            "main-only changes should not appear: {changed:?}"
+        );
+        assert!(
+            changed.contains(&dir.path().join("feature.py")),
+            "feature changes should appear: {changed:?}"
+        );
+    }
+
+    #[test]
+    fn discover_tests_with_base_branch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        seed_git_repo_with_main(
+            &dir,
+            &[(
+                "test_base.py",
+                "from tryke import test\n\n@test\ndef test_base(): pass\n",
+            )],
+        );
+
+        git_run(&dir, &["checkout", "-b", "feature"]);
+        std::fs::write(
+            dir.path().join("test_feature.py"),
+            "from tryke import test\n\n@test\ndef test_feature(): pass\n",
+        )
+        .expect("write");
+        git_run(&dir, &["add", "test_feature.py"]);
+        git_run(&dir, &["commit", "-m", "add feature test"]);
+
+        let discovered = discover_tests(dir.path(), true, Some("main"), &[]);
+        assert!(
+            discovered.tests.iter().any(|t| t.name == "test_feature"),
+            "should find the branch's test: {:?}",
+            discovered.tests.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
+    }
+
+    // --- Changed-first tests ---
+
+    #[test]
+    fn discover_tests_changed_first_partitions_correctly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        seed_git_repo(
+            &dir,
+            &[
+                (
+                    "test_a.py",
+                    "from tryke import test\n\n@test\ndef test_a(): pass\n",
+                ),
+                (
+                    "test_b.py",
+                    "from tryke import test\n\n@test\ndef test_b(): pass\n",
+                ),
+            ],
+        );
+
+        // Modify test_a.py so it counts as "changed"
+        std::fs::write(
+            dir.path().join("test_a.py"),
+            "from tryke import test\n\n@test\ndef test_a(): assert True\n",
+        )
+        .expect("write");
+
+        let discovered = discover_tests_changed_first(dir.path(), None, &[]);
+        let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
+
+        assert!(
+            discovered.changed_prefix_len.is_some(),
+            "changed_prefix_len should be set"
+        );
+        let prefix_len = discovered.changed_prefix_len.expect("set");
+        assert!(prefix_len > 0, "at least one changed test");
+        // Changed test(s) should be at the front
+        let changed_names: Vec<&str> = names[..prefix_len].to_vec();
+        assert!(
+            changed_names.contains(&"test_a"),
+            "test_a should be in the changed prefix: {names:?}"
+        );
+        // All tests should still be present
+        assert!(
+            names.contains(&"test_b"),
+            "test_b should still be present: {names:?}"
+        );
+    }
+
+    #[test]
+    fn discover_tests_changed_first_no_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        seed_git_repo(
+            &dir,
+            &[(
+                "test_a.py",
+                "from tryke import test\n\n@test\ndef test_a(): pass\n",
+            )],
+        );
+
+        let discovered = discover_tests_changed_first(dir.path(), None, &[]);
+        assert!(
+            discovered.changed_prefix_len.is_none(),
+            "changed_prefix_len should be None when no changes"
+        );
+        assert!(
+            !discovered.tests.is_empty(),
+            "all tests should still be returned"
+        );
+    }
+
+    #[test]
+    fn discover_tests_changed_first_with_base_branch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        seed_git_repo_with_main(
+            &dir,
+            &[
+                (
+                    "test_a.py",
+                    "from tryke import test\n\n@test\ndef test_a(): pass\n",
+                ),
+                (
+                    "test_b.py",
+                    "from tryke import test\n\n@test\ndef test_b(): pass\n",
+                ),
+            ],
+        );
+
+        git_run(&dir, &["checkout", "-b", "feature"]);
+        std::fs::write(
+            dir.path().join("test_c.py"),
+            "from tryke import test\n\n@test\ndef test_c(): pass\n",
+        )
+        .expect("write");
+        git_run(&dir, &["add", "test_c.py"]);
+        git_run(&dir, &["commit", "-m", "add test_c"]);
+
+        let discovered = discover_tests_changed_first(dir.path(), Some("main"), &[]);
+        let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
+
+        assert!(
+            discovered.changed_prefix_len.is_some(),
+            "changed_prefix_len should be set"
+        );
+        let prefix_len = discovered.changed_prefix_len.expect("set");
+        // test_c should be in the changed prefix
+        let changed_names: Vec<&str> = names[..prefix_len].to_vec();
+        assert!(
+            changed_names.contains(&"test_c"),
+            "test_c should be in the changed prefix: {names:?}"
+        );
+        // All 3 tests should be present
+        assert_eq!(names.len(), 3, "all 3 tests should be present: {names:?}");
+    }
+
+    // --- CLI parsing tests for new flags ---
+
+    #[test]
+    fn test_changed_with_base_branch_parsed() {
+        let cli =
+            Cli::try_parse_from(["tryke", "test", "--changed", "--base-branch", "main"]).unwrap();
+        assert!(matches!(
+            &cli.command,
+            Commands::Test {
+                changed: true,
+                base_branch: Some(b),
+                ..
+            } if b == "main"
+        ));
+    }
+
+    #[test]
+    fn test_changed_first_flag_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "test", "--changed-first"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Test {
+                changed_first: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_changed_first_conflicts_with_changed() {
+        let result = Cli::try_parse_from(["tryke", "test", "--changed", "--changed-first"]);
+        assert!(
+            result.is_err(),
+            "--changed and --changed-first should conflict"
+        );
+    }
+
+    #[test]
+    fn test_changed_first_with_base_branch_parsed() {
+        let cli =
+            Cli::try_parse_from(["tryke", "test", "--changed-first", "--base-branch", "main"])
+                .unwrap();
+        assert!(matches!(
+            &cli.command,
+            Commands::Test {
+                changed_first: true,
+                base_branch: Some(b),
+                ..
+            } if b == "main"
+        ));
+    }
+
+    #[test]
+    fn graph_changed_with_base_branch_parsed() {
+        let cli =
+            Cli::try_parse_from(["tryke", "graph", "--changed", "--base-branch", "main"]).unwrap();
+        assert!(matches!(
+            &cli.command,
+            Commands::Graph {
+                changed: true,
+                base_branch: Some(b),
+                ..
+            } if b == "main"
+        ));
     }
 }

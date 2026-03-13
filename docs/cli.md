@@ -59,6 +59,9 @@ Options:
   -v, --verbose...
           Increase logging verbosity
 
+      --base-branch <BASE_BRANCH>
+          Base branch for --changed (e.g. "main"). Uses merge-base diff
+
   -q, --quiet...
           Decrease logging verbosity
 
@@ -151,6 +154,12 @@ Options:
 
       --changed
           Run only tests affected by files changed since HEAD (requires git)
+
+      --changed-first
+          Run changed tests first, then all remaining tests (requires git)
+
+      --base-branch <BASE_BRANCH>
+          Base branch for --changed or --changed-first (e.g. "main"). Uses merge-base diff
 
   -x, --fail-fast
           Stop after first failure

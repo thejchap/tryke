@@ -53,8 +53,14 @@ pub enum Commands {
         #[arg(long, default_missing_value = "2337", num_args = 0..=1, require_equals = false)]
         port: Option<u16>,
         /// Run only tests affected by files changed since HEAD (requires git)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "changed_first")]
         changed: bool,
+        /// Run changed tests first, then all remaining tests (requires git)
+        #[arg(long, conflicts_with = "changed")]
+        changed_first: bool,
+        /// Base branch for --changed or --changed-first (e.g. "main"). Uses merge-base diff.
+        #[arg(long)]
+        base_branch: Option<String>,
         /// Stop after first failure
         #[arg(short = 'x', long = "fail-fast")]
         fail_fast: bool,
@@ -127,5 +133,8 @@ pub enum Commands {
         /// Show only files affected by files changed since HEAD (requires git)
         #[arg(long)]
         changed: bool,
+        /// Base branch for --changed (e.g. "main"). Uses merge-base diff.
+        #[arg(long)]
+        base_branch: Option<String>,
     },
 }

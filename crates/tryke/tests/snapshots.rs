@@ -20,7 +20,7 @@ fn strip_ansi(s: &str) -> String {
     let mut chars = s.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\x1b' {
-            // skip until 'm' (SGR terminator)
+            // Skip until 'm' (SGR terminator)
             for inner in chars.by_ref() {
                 if inner == 'm' {
                     break;

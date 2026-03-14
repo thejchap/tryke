@@ -165,7 +165,7 @@ impl Discoverer {
         if let Ok(c) = p.canonicalize() {
             return c;
         }
-        // file may be deleted; canonicalize parent + filename
+        // File may be deleted; canonicalize parent + filename
         if let (Some(parent), Some(name)) = (p.parent(), p.file_name())
             && let Ok(cp) = parent.canonicalize()
         {
@@ -355,7 +355,7 @@ mod tests {
         let first = discoverer.rediscover();
         assert_eq!(first.len(), 2);
 
-        // modify both files on disk, but only notify about test_a
+        // Modify both files on disk, but only notify about test_a
         let a_with_extra = "@test\ndef test_a():\n    pass\n\n@test\ndef test_a2():\n    pass\n";
         let b_renamed = "@test\ndef test_b_new():\n    pass\n";
         fs::write(dir.path().join("test_a.py"), a_with_extra).expect("overwrite a");
@@ -556,7 +556,7 @@ mod tests {
         let mut discoverer = Discoverer::new(dir.path());
         discoverer.rediscover();
 
-        // simulate canonical path (e.g. macOS /private/var vs /var, or watcher paths)
+        // Simulate canonical path (e.g. macOS /private/var vs /var, or watcher paths)
         let canonical = dir
             .path()
             .join("src/services/auth.py")

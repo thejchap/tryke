@@ -55,7 +55,7 @@ impl Server {
         let (std_tx, std_rx) = std::sync::mpsc::channel::<Vec<std::path::PathBuf>>();
         let _debouncer = spawn_watcher(&self.root, &self.excludes, std_tx)?;
 
-        // bridge blocking std receiver to async tokio channel
+        // Bridge blocking std receiver to async tokio channel
         let (watcher_tx, mut watcher_rx) = tokio::sync::mpsc::channel::<Vec<PathBuf>>(64);
         tokio::task::spawn_blocking(move || {
             while let Ok(paths) = std_rx.recv() {

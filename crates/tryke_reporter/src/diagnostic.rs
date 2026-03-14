@@ -106,7 +106,7 @@ fn render_assertions_themed(
     let mut failed = 0;
 
     for assertion in assertions {
-        // prefer the assertion's own file, fall back to the test's file
+        // Prefer the assertion's own file, fall back to the test's file
         let source_name = assertion
             .file
             .as_deref()
@@ -340,7 +340,7 @@ Traceback (most recent call last):
 AssertionError";
         render_failure_message("AssertionError", Some(tb), false, &mut buf);
         assert!(buf.contains("AssertionError"));
-        // normal mode shows only last frame
+        // Normal mode shows only last frame
         assert!(buf.contains("File \"tests/test_math.py\""));
     }
 

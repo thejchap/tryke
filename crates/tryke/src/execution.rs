@@ -258,7 +258,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
         let mut reporter = TextReporter::new();
-        // non-git directory → git_changed_files returns None → discover_tests runs all (0 here)
+        // Non-git directory → git_changed_files returns None → discover_tests runs all (0 here)
         let tests = discover_tests(dir.path(), true, None, &[]).tests;
         assert!(
             run_tests(&mut reporter, dir.path(), tests, None, None, None, None)

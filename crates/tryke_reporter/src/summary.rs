@@ -13,7 +13,7 @@ fn format_duration(d: Duration) -> String {
     }
 }
 
-// layout — labels right-aligned, values line up at column 13:
+// Layout — labels right-aligned, values line up at column 13:
 //
 // Test Files  3 passed (3)
 //      Tests  41 passed (41)
@@ -443,7 +443,7 @@ mod tests {
             badge_idx > tests_idx,
             "badge should appear after the Tests line"
         );
-        // badge line should not contain "Tests" or "Duration"
+        // Badge line should not contain "Tests" or "Duration"
         let badge_line = lines[badge_idx];
         assert!(!badge_line.contains("Tests"));
         assert!(!badge_line.contains("Duration"));

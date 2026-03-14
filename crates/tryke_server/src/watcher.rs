@@ -77,7 +77,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let _debouncer = spawn_watcher(dir.path(), &[], tx).expect("spawn watcher");
 
-        // give the watcher time to initialize
+        // Give the watcher time to initialize
         thread::sleep(Duration::from_millis(100));
 
         fs::write(&py_file, "@test\ndef bar(): pass").expect("update py file");

@@ -205,9 +205,9 @@ fn is_tryke_test_decorator(expr: &Expr, body: &[Stmt]) -> bool {
         Expr::Attribute(a) if MARKER_ATTRS.contains(&a.attr.id.as_str()) => {
             is_bare_test_or_qualified(&a.value, body)
         }
-        // bare test
+        // Bare test
         Expr::Name(n) => n.id.as_str() == "test" && !is_locally_defined("test", body),
-        // call wrapper: @test(), @test.skip("reason"), @test("name"), etc.
+        // Call wrapper: @test(), @test.skip("reason"), @test("name"), etc.
         Expr::Call(c) => is_tryke_test_decorator(&c.func, body),
         _ => false,
     }
@@ -1596,7 +1596,7 @@ def test_second():
         assert_eq!(items[0].name, "test_third");
         assert_eq!(items[1].name, "test_first");
         assert_eq!(items[2].name, "test_second");
-        // line numbers are monotonically increasing
+        // Line numbers are monotonically increasing
         for pair in items.windows(2) {
             assert!(pair[0].line_number < pair[1].line_number);
         }

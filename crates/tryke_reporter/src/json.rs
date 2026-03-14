@@ -34,7 +34,7 @@ impl<W: io::Write> JSONReporter<W> {
     }
 
     fn write_event<T: Serialize>(&mut self, event: &T) {
-        // ignore write errors to match typical reporter behavior
+        // Ignore write errors to match typical reporter behavior
         let _ = serde_json::to_writer(&mut self.writer, event)
             .map_err(io::Error::from)
             .and_then(|()| self.writer.write_all(b"\n"));

@@ -18,11 +18,18 @@ pub struct Discoverer {
     inputs: HashMap<PathBuf, SourceFile>,
     root: PathBuf,
     import_graph: ImportGraph,
+    excludes: Vec<String>,
 }
 
 impl Discoverer {
     #[must_use]
     pub fn new(start: &Path) -> Self {
+        let excludes = crate::configured_excludes(start, &[]);
+        Self::new_with_excludes(start, &excludes)
+    }
+
+    #[must_use]
+    pub fn new_with_excludes(start: &Path, excludes: &[String]) -> Self {
         let root = crate::find_project_root(start).unwrap_or_else(|| start.to_path_buf());
         let root = root.canonicalize().unwrap_or(root);
         Self {
@@ -30,11 +37,12 @@ impl Discoverer {
             inputs: HashMap::new(),
             root,
             import_graph: ImportGraph::default(),
+            excludes: excludes.to_vec(),
         }
     }
 
     pub fn rediscover(&mut self) -> Vec<TestItem> {
-        let mut paths = crate::collect_python_files(&self.root);
+        let mut paths = crate::collect_python_files(&self.root, &self.excludes);
         paths.sort();
         debug!(
             "rediscover: found {} python files in {}",
@@ -157,7 +165,7 @@ impl Discoverer {
         if let Ok(c) = p.canonicalize() {
             return c;
         }
-        // file may be deleted; canonicalize parent + filename
+        // File may be deleted; canonicalize parent + filename
         if let (Some(parent), Some(name)) = (p.parent(), p.file_name())
             && let Ok(cp) = parent.canonicalize()
         {
@@ -168,6 +176,12 @@ impl Discoverer {
 
     fn canonicalize_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
         paths.iter().map(|p| Self::canonicalize_path(p)).collect()
+    }
+
+    /// Returns all files transitively affected by the given changed paths.
+    pub fn affected_files(&self, changed: &[PathBuf]) -> HashSet<PathBuf> {
+        let changed = Self::canonicalize_paths(changed);
+        self.import_graph.affected_files(&changed)
     }
 
     /// Returns module names for all files transitively affected by the given changed paths.
@@ -193,8 +207,7 @@ impl Discoverer {
 
     /// Returns only tests whose source file is transitively affected by the changed paths.
     pub fn tests_for_changed(&self, changed: &[PathBuf]) -> Vec<TestItem> {
-        let changed = Self::canonicalize_paths(changed);
-        let affected = self.import_graph.affected_files(&changed);
+        let affected = self.affected_files(changed);
         let tests: Vec<TestItem> = self
             .tests()
             .into_iter()
@@ -206,13 +219,20 @@ impl Discoverer {
             .collect();
         debug!(
             "tests_for_changed: {:?} → {} tests",
-            changed
+            Self::canonicalize_paths(changed)
                 .iter()
                 .map(|p| p.display().to_string())
                 .collect::<Vec<_>>(),
             tests.len()
         );
         tests
+    }
+
+    /// Returns all files that contain dynamic imports (`importlib.import_module()` or
+    /// `__import__()`). These files are marked always-dirty: they are included in every
+    /// `--changed` run and may produce stale module state in watch/server mode.
+    pub fn dynamic_import_files(&self) -> Vec<PathBuf> {
+        self.import_graph.always_dirty_files()
     }
 
     /// Returns a sorted summary of the import graph for all known files.
@@ -335,7 +355,7 @@ mod tests {
         let first = discoverer.rediscover();
         assert_eq!(first.len(), 2);
 
-        // modify both files on disk, but only notify about test_a
+        // Modify both files on disk, but only notify about test_a
         let a_with_extra = "@test\ndef test_a():\n    pass\n\n@test\ndef test_a2():\n    pass\n";
         let b_renamed = "@test\ndef test_b_new():\n    pass\n";
         fs::write(dir.path().join("test_a.py"), a_with_extra).expect("overwrite a");
@@ -493,6 +513,36 @@ mod tests {
     }
 
     #[test]
+    fn tests_for_changed_absolute_imported_submodule() {
+        let dir = make_project(&[
+            ("pkg/__init__.py", ""),
+            ("pkg/helpers.py", "def helper(): pass\n"),
+            (
+                "tests/test_helpers.py",
+                "from pkg import helpers\n@test\ndef test_helper_user():\n    pass\n",
+            ),
+            (
+                "tests/test_other.py",
+                "@test\ndef test_other():\n    pass\n",
+            ),
+        ]);
+        let mut discoverer = Discoverer::new(dir.path());
+        discoverer.rediscover();
+
+        let changed = vec![dir.path().join("pkg/helpers.py")];
+        let tests = discoverer.tests_for_changed(&changed);
+        let names: Vec<&str> = tests.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            names.contains(&"test_helper_user"),
+            "test_helper_user should be affected by change to pkg/helpers.py, got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"test_other"),
+            "test_other should not be affected"
+        );
+    }
+
+    #[test]
     fn tests_for_changed_canonical_vs_noncanonical_paths() {
         let auth_src = "def login(): pass\n";
         let test_auth_src =
@@ -506,7 +556,7 @@ mod tests {
         let mut discoverer = Discoverer::new(dir.path());
         discoverer.rediscover();
 
-        // simulate canonical path (e.g. macOS /private/var vs /var, or watcher paths)
+        // Simulate canonical path (e.g. macOS /private/var vs /var, or watcher paths)
         let canonical = dir
             .path()
             .join("src/services/auth.py")
@@ -568,6 +618,33 @@ mod tests {
         assert!(
             !names.contains(&"test_static"),
             "test_static should not be affected"
+        );
+    }
+
+    #[test]
+    fn dynamic_import_files_reflects_always_dirty() {
+        let dynamic_src = "import importlib\nmod = importlib.import_module('utils')\nfrom tryke import test\n@test\ndef test_dyn():\n    pass\n";
+        let static_src = "from tryke import test\n@test\ndef test_static():\n    pass\n";
+        let dir = make_project(&[
+            ("test_dynamic.py", dynamic_src),
+            ("test_static.py", static_src),
+        ]);
+        let mut discoverer = Discoverer::new(dir.path());
+        discoverer.rediscover();
+
+        let files = discoverer.dynamic_import_files();
+        let names: Vec<&str> = files
+            .iter()
+            .filter_map(|p| p.file_name())
+            .filter_map(|n| n.to_str())
+            .collect();
+        assert!(
+            names.contains(&"test_dynamic.py"),
+            "test_dynamic.py should be in dynamic_import_files, got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"test_static.py"),
+            "test_static.py should not be in dynamic_import_files"
         );
     }
 

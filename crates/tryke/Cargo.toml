@@ -3,6 +3,7 @@ name = "tryke"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+default-run = "tryke"
 homepage.workspace = true
 documentation.workspace = true
 repository.workspace = true
@@ -21,6 +22,7 @@ log = "0.4"
 notify-debouncer-mini = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
+tryke_config = { workspace = true }
 tryke_discovery = { workspace = true }
 tryke_reporter = { workspace = true }
 tryke_runner = { workspace = true }

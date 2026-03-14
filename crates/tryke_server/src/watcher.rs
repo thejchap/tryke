@@ -9,20 +9,24 @@ use log::debug;
 use notify::RecommendedWatcher;
 use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
 
-fn build_gitignore(root: &Path) -> Gitignore {
+fn build_gitignore(root: &Path, excludes: &[String]) -> Gitignore {
     let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let mut builder = GitignoreBuilder::new(&canonical);
     let _ = builder.add(canonical.join(".gitignore"));
     let _ = builder.add(canonical.join(".ignore"));
+    for exclude in excludes {
+        let _ = builder.add_line(None, exclude);
+    }
     builder.build().unwrap_or_else(|_| Gitignore::empty())
 }
 
 #[expect(clippy::missing_errors_doc)]
 pub fn spawn_watcher(
     root: &Path,
+    excludes: &[String],
     tx: mpsc::Sender<Vec<PathBuf>>,
 ) -> anyhow::Result<Debouncer<RecommendedWatcher>> {
-    let gitignore = build_gitignore(root);
+    let gitignore = build_gitignore(root, excludes);
     let mut debouncer = new_debouncer(
         Duration::from_millis(200),
         move |res: DebounceEventResult| {
@@ -71,9 +75,9 @@ mod tests {
         fs::write(&py_file, "@test\ndef foo(): pass").expect("write py file");
 
         let (tx, rx) = mpsc::channel();
-        let _debouncer = spawn_watcher(dir.path(), tx).expect("spawn watcher");
+        let _debouncer = spawn_watcher(dir.path(), &[], tx).expect("spawn watcher");
 
-        // give the watcher time to initialize
+        // Give the watcher time to initialize
         thread::sleep(Duration::from_millis(100));
 
         fs::write(&py_file, "@test\ndef bar(): pass").expect("update py file");
@@ -90,7 +94,7 @@ mod tests {
         let txt_file = dir.path().join("notes.txt");
 
         let (tx, rx) = mpsc::channel();
-        let _debouncer = spawn_watcher(dir.path(), tx).expect("spawn watcher");
+        let _debouncer = spawn_watcher(dir.path(), &[], tx).expect("spawn watcher");
 
         thread::sleep(Duration::from_millis(100));
 
@@ -112,7 +116,7 @@ mod tests {
         fs::write(&ignored_file, "x = 1").expect("write ignored py file");
 
         let (tx, rx) = mpsc::channel();
-        let _debouncer = spawn_watcher(dir.path(), tx).expect("spawn watcher");
+        let _debouncer = spawn_watcher(dir.path(), &[], tx).expect("spawn watcher");
 
         thread::sleep(Duration::from_millis(100));
 
@@ -131,7 +135,7 @@ mod tests {
         fs::write(&py_file, "@test\ndef foo(): pass").expect("write py file");
 
         let (tx, rx) = mpsc::channel();
-        let _debouncer = spawn_watcher(dir.path(), tx).expect("spawn watcher");
+        let _debouncer = spawn_watcher(dir.path(), &[], tx).expect("spawn watcher");
 
         thread::sleep(Duration::from_millis(100));
 

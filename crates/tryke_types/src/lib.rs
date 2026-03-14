@@ -40,6 +40,10 @@ pub struct Assertion {
     pub span_length: usize,
     pub expected: String,
     pub received: String,
+    /// Byte offset and length of the matcher argument in `expression`,
+    /// e.g. the `2` in `expect(x).to_equal(2)`. `None` for no-arg matchers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_arg_span: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -58,6 +62,8 @@ pub struct TestItem {
     pub xfail: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
 }
 
 impl TestItem {
@@ -105,6 +111,12 @@ pub struct TestResult {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ChangedSelectionSummary {
+    pub changed_files: usize,
+    pub affected_tests: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RunSummary {
     pub passed: usize,
     pub failed: usize,
@@ -124,6 +136,8 @@ pub struct RunSummary {
     pub file_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_selection: Option<ChangedSelectionSummary>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -146,9 +160,40 @@ pub struct DiscoveryError {
     pub line_number: Option<u32>,
 }
 
+/// The kind of issue detected during test discovery.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveryWarningKind {
+    /// File contains `importlib.import_module()` or `__import__()` calls.
+    /// tryke cannot statically trace these imports, so the file is always
+    /// included in `--changed` runs regardless of what actually changed.
+    DynamicImports,
+}
+
+/// A non-fatal issue detected during test discovery that may degrade
+/// the accuracy of selective re-runs or watch-mode module reloading.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiscoveryWarning {
+    pub file_path: PathBuf,
+    pub kind: DiscoveryWarningKind,
+    pub message: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_warning_serializes() {
+        let warning = DiscoveryWarning {
+            file_path: PathBuf::from("tests/helpers/loader.py"),
+            kind: DiscoveryWarningKind::DynamicImports,
+            message: "dynamic imports detected".into(),
+        };
+        let json = serde_json::to_string(&warning).expect("serialize");
+        assert!(json.contains("dynamic_imports"));
+        assert!(json.contains("loader.py"));
+    }
 
     #[test]
     fn path_to_module_basic() {

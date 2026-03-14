@@ -1,0 +1,32 @@
+name: Documentation
+on:
+  push:
+    branches:
+      - main
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/configure-pages@v5
+      - uses: actions/checkout@v6
+      - run: rustup show
+      - run: cargo run --bin generate-cli-docs -- --check
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: 3.x
+      - run: uv run python benchmarks/summarize.py --check
+      - run: uv sync --group dev
+      - run: uv run zensical build --clean
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+      - uses: actions/deploy-pages@v4
+        id: deployment

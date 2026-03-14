@@ -205,6 +205,7 @@ async fn execute_run(
         test_duration: Some(test_duration),
         file_count,
         start_time: Some(start_time),
+        changed_selection: None,
     };
     broadcast_notification(
         bcast_tx,
@@ -363,7 +364,7 @@ mod tests {
             .expect("write initial file");
         let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
 
-        // populate cache via discover
+        // Populate cache via discover
         let (tx, _rx) = broadcast::channel(64);
         let pool = make_pool();
         handle_request(
@@ -374,11 +375,11 @@ mod tests {
         )
         .await;
 
-        // write a new file to disk without calling discover again
+        // Write a new file to disk without calling discover again
         fs::write(dir.path().join("test_y.py"), "@test\ndef test_y(): pass\n")
             .expect("write second file");
 
-        // run should return only cached tests (test_x), not pick up test_y
+        // Run should return only cached tests (test_x), not pick up test_y
         let (tx2, mut rx2) = broadcast::channel(64);
         handle_request(
             r#"{"jsonrpc":"2.0","id":2,"method":"run","params":{"root":"/ignored","tests":null}}"#,
@@ -462,14 +463,14 @@ mod tests {
         let mut line1 = String::new();
         let mut line2 = String::new();
 
-        // c1 should receive the run response
+        // C1 should receive the run response
         r1.read_line(&mut line1).await.unwrap();
         let v1: serde_json::Value = serde_json::from_str(line1.trim()).unwrap();
-        // c2 should receive a broadcast notification
+        // C2 should receive a broadcast notification
         r2.read_line(&mut line2).await.unwrap();
         let v2: serde_json::Value = serde_json::from_str(line2.trim()).unwrap();
 
-        // c1 gets a notification or response, c2 gets a notification
+        // C1 gets a notification or response, c2 gets a notification
         assert!(v1.get("method").is_some() || v1.get("result").is_some());
         assert!(v2.get("method").is_some());
     }
@@ -484,7 +485,7 @@ mod tests {
         .expect("write test file");
         let (tx, mut rx) = broadcast::channel(64);
         let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
-        // populate cache
+        // Populate cache
         disc.lock().await.rediscover();
         let pool = make_pool();
         handle_request(

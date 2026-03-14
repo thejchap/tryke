@@ -1,3 +1,5 @@
+"""Core test and assertion API for tryke."""
+
 from __future__ import annotations
 
 import re
@@ -13,6 +15,22 @@ type _Decorator = Callable[[_Fn], _Fn]
 
 
 class _SkipMarker:
+    """Skip a test unconditionally.
+
+    Can be used as a bare decorator or called with a reason string.
+
+    Example:
+        ```python
+        @test.skip
+        def not_ready():
+            ...
+
+        @test.skip("waiting on upstream fix")
+        def with_reason():
+            ...
+        ```
+    """
+
     def __get__(self, obj: object, objtype: type | None = None) -> _SkipMarker:
         return self
 
@@ -25,6 +43,15 @@ class _SkipMarker:
         name: str | None = None,  # noqa: ARG002
         tags: list[str] | None = None,  # noqa: ARG002
     ) -> _Fn | _Decorator:
+        """Mark a test to be skipped.
+
+        Args:
+            fn_or_reason: The test function (when used as a bare decorator)
+                or a reason string (when called with parentheses).
+            reason: Reason for skipping (alternative to positional string).
+            name: Optional test name override.
+            tags: Optional list of tags for filtering.
+        """
         if callable(fn_or_reason):
             fn_or_reason.__tryke_skip__ = ""  # type: ignore[attr-defined]
             return fn_or_reason
@@ -38,6 +65,22 @@ class _SkipMarker:
 
 
 class _TodoMarker:
+    """Mark a test as a placeholder — it will be collected but not executed.
+
+    Can be used as a bare decorator or called with a description string.
+
+    Example:
+        ```python
+        @test.todo
+        def future_feature():
+            ...
+
+        @test.todo("implement caching layer")
+        def with_description():
+            ...
+        ```
+    """
+
     def __get__(self, obj: object, objtype: type | None = None) -> _TodoMarker:
         return self
 
@@ -50,6 +93,16 @@ class _TodoMarker:
         name: str | None = None,  # noqa: ARG002
         tags: list[str] | None = None,  # noqa: ARG002
     ) -> _Fn | _Decorator:
+        """Mark a test as a todo placeholder.
+
+        Args:
+            fn_or_desc: The test function (when used as a bare decorator)
+                or a description string (when called with parentheses).
+            description: Description of what needs to be done
+                (alternative to positional string).
+            name: Optional test name override.
+            tags: Optional list of tags for filtering.
+        """
         if callable(fn_or_desc):
             fn_or_desc.__tryke_todo__ = ""  # type: ignore[attr-defined]
             return fn_or_desc
@@ -63,6 +116,22 @@ class _TodoMarker:
 
 
 class _XfailMarker:
+    """Mark a test as expected to fail.
+
+    Can be used as a bare decorator or called with a reason string.
+
+    Example:
+        ```python
+        @test.xfail
+        def known_bug():
+            ...
+
+        @test.xfail("upstream issue #42")
+        def with_reason():
+            ...
+        ```
+    """
+
     def __get__(self, obj: object, objtype: type | None = None) -> _XfailMarker:
         return self
 
@@ -75,6 +144,16 @@ class _XfailMarker:
         name: str | None = None,  # noqa: ARG002
         tags: list[str] | None = None,  # noqa: ARG002
     ) -> _Fn | _Decorator:
+        """Mark a test as expected to fail.
+
+        Args:
+            fn_or_reason: The test function (when used as a bare decorator)
+                or a reason string (when called with parentheses).
+            reason: Reason the test is expected to fail
+                (alternative to positional string).
+            name: Optional test name override.
+            tags: Optional list of tags for filtering.
+        """
         if callable(fn_or_reason):
             fn_or_reason.__tryke_xfail__ = ""  # type: ignore[attr-defined]
             return fn_or_reason
@@ -88,6 +167,34 @@ class _XfailMarker:
 
 
 class _TestBuilder:
+    """Decorator for marking functions as tests.
+
+    Tryke discovers functions decorated with `@test` (or prefixed with
+    `test_`) during collection.
+
+    Attributes:
+        skip: Skip a test unconditionally.
+        todo: Mark a test as a placeholder.
+        xfail: Mark a test as expected to fail.
+
+    Example:
+        ```python
+        from tryke import test
+
+        @test
+        def my_test():
+            ...
+
+        @test(name="descriptive test name")
+        def named():
+            ...
+
+        @test(tags=["slow", "network"])
+        def tagged():
+            ...
+        ```
+    """
+
     skip = _SkipMarker()
     todo = _TodoMarker()
     xfail = _XfailMarker()
@@ -104,6 +211,16 @@ class _TestBuilder:
     ) -> Callable[[Callable[[], None]], Callable[[], None]]: ...
 
     def __call__(self, fn=None, /, *, name=None, tags=None):  # noqa: ARG002
+        """Register a function as a test.
+
+        Can be used as a bare decorator (`@test`) or called with keyword
+        arguments (`@test(name="...", tags=[...])`) to set metadata.
+
+        Args:
+            fn: The test function (when used as a bare decorator).
+            name: Optional display name for the test.
+            tags: Optional list of tags for filtering with `-m`.
+        """
         if callable(fn):
             return fn
 
@@ -113,7 +230,21 @@ class _TestBuilder:
         return decorator
 
     def skip_if(self, condition: bool, *, reason: str = "") -> _Decorator:  # noqa: FBT001
-        """Conditional skip, evaluated at import time."""
+        """Skip a test conditionally, evaluated at import time.
+
+        Args:
+            condition: When `True`, the test is skipped.
+            reason: Optional reason shown in test output.
+
+        Example:
+            ```python
+            import sys
+
+            @test.skip_if(sys.platform == "win32", reason="unix only")
+            def unix_test():
+                ...
+            ```
+        """
 
         def decorator(f: _Fn) -> _Fn:
             if condition:
@@ -124,9 +255,21 @@ class _TestBuilder:
 
 
 test = _TestBuilder()
+"""The singleton `test` decorator instance.
+
+Use `@test` to mark a function as a test, or access sub-decorators like
+`@test.skip`, `@test.todo`, `@test.xfail`, and `@test.skip_if(...)`.
+"""
 
 
 class ExpectationError(AssertionError):
+    """Raised when an assertion fails in fatal mode.
+
+    Attributes:
+        expected: String describing what was expected.
+        received: String describing what was actually received.
+    """
+
     def __init__(self, message: str, *, expected: str, received: str) -> None:
         super().__init__(message)
         self.expected = expected
@@ -137,11 +280,27 @@ _TRYKE_PKG = str(Path(__file__).resolve().parent)
 
 
 class MatchResult:
+    """Result of an assertion.
+
+    By default assertions are **soft** — a failing assertion records the
+    failure but does not stop the test. Call `.fatal()` to opt in to
+    immediate failure.
+    """
+
     def __init__(self, error: ExpectationError | None) -> None:
         self._error = error
 
     def fatal(self) -> None:
-        """If this assertion failed, raise immediately (stop the test)."""
+        """Stop the test immediately if this assertion failed.
+
+        Example:
+            ```python
+            @test
+            def must_pass():
+                expect(config).not_.to_be_none().fatal()  # stops here if None
+                expect(config.value).to_equal(42)
+            ```
+        """
         if self._error is not None:
             raise self._error
 
@@ -162,12 +321,32 @@ def _caller_frame() -> traceback.FrameSummary | None:
 
 
 class Expectation[T]:
+    """Chainable assertion wrapper created by [`expect`][tryke.expect.expect].
+
+    Every assertion method returns a [`MatchResult`][tryke.expect.MatchResult].
+    Use `.not_` to negate any assertion.
+
+    Example:
+        ```python
+        expect(1 + 1).to_equal(2)
+        expect(None).not_.to_be_truthy()
+        ```
+    """
+
     def __init__(self, value: T, *, negated: bool = False) -> None:
         self._value: T = value
         self._negated: bool = negated
 
     @property
     def not_(self) -> Expectation[T]:
+        """Negate the next assertion.
+
+        Example:
+            ```python
+            expect(1).not_.to_equal(2)
+            expect(None).not_.to_be_truthy()
+            ```
+        """
         return Expectation(self._value, negated=not self._negated)
 
     def _assert(
@@ -193,6 +372,17 @@ class Expectation[T]:
         return MatchResult(None)
 
     def to_equal(self, other: T) -> MatchResult:
+        """Deep equality check (`==`).
+
+        Args:
+            other: The value to compare against.
+
+        Example:
+            ```python
+            expect(1 + 1).to_equal(2)
+            expect([1, 2]).to_equal([1, 2])
+            ```
+        """
         return self._assert(
             self._value == other,
             f"{self._value!r} to equal {other!r}",
@@ -201,6 +391,17 @@ class Expectation[T]:
         )
 
     def to_be(self, other: object) -> MatchResult:
+        """Identity check (`is`).
+
+        Args:
+            other: The object to compare identity against.
+
+        Example:
+            ```python
+            sentinel = object()
+            expect(sentinel).to_be(sentinel)
+            ```
+        """
         return self._assert(
             self._value is other,
             f"{self._value!r} to be {other!r}",
@@ -209,6 +410,14 @@ class Expectation[T]:
         )
 
     def to_be_truthy(self) -> MatchResult:
+        """Assert the value is truthy (`bool(value) is True`).
+
+        Example:
+            ```python
+            expect(1).to_be_truthy()
+            expect([1]).to_be_truthy()
+            ```
+        """
         return self._assert(
             bool(self._value),
             f"{self._value!r} to be truthy",
@@ -217,6 +426,14 @@ class Expectation[T]:
         )
 
     def to_be_falsy(self) -> MatchResult:
+        """Assert the value is falsy (`bool(value) is False`).
+
+        Example:
+            ```python
+            expect(0).to_be_falsy()
+            expect("").to_be_falsy()
+            ```
+        """
         return self._assert(
             not bool(self._value),
             f"{self._value!r} to be falsy",
@@ -225,6 +442,14 @@ class Expectation[T]:
         )
 
     def to_be_none(self) -> MatchResult:
+        """Assert the value is `None`.
+
+        Example:
+            ```python
+            expect(None).to_be_none()
+            expect(result).not_.to_be_none()
+            ```
+        """
         return self._assert(
             self._value is None,
             f"{self._value!r} to be None",
@@ -233,6 +458,16 @@ class Expectation[T]:
         )
 
     def to_be_greater_than(self, n: T) -> MatchResult:
+        """Assert the value is greater than `n`.
+
+        Args:
+            n: The value to compare against.
+
+        Example:
+            ```python
+            expect(5).to_be_greater_than(3)
+            ```
+        """
         return self._assert(
             self._value > n,
             f"{self._value!r} to be greater than {n!r}",
@@ -241,6 +476,16 @@ class Expectation[T]:
         )  # type: ignore[operator]
 
     def to_be_less_than(self, n: T) -> MatchResult:
+        """Assert the value is less than `n`.
+
+        Args:
+            n: The value to compare against.
+
+        Example:
+            ```python
+            expect(3).to_be_less_than(5)
+            ```
+        """
         return self._assert(
             self._value < n,
             f"{self._value!r} to be less than {n!r}",
@@ -249,6 +494,16 @@ class Expectation[T]:
         )  # type: ignore[operator]
 
     def to_be_greater_than_or_equal(self, n: T) -> MatchResult:
+        """Assert the value is greater than or equal to `n`.
+
+        Args:
+            n: The value to compare against.
+
+        Example:
+            ```python
+            expect(5).to_be_greater_than_or_equal(5)
+            ```
+        """
         return self._assert(
             self._value >= n,  # type: ignore[operator]
             f"{self._value!r} to be greater than or equal to {n!r}",
@@ -257,6 +512,16 @@ class Expectation[T]:
         )
 
     def to_be_less_than_or_equal(self, n: T) -> MatchResult:
+        """Assert the value is less than or equal to `n`.
+
+        Args:
+            n: The value to compare against.
+
+        Example:
+            ```python
+            expect(4).to_be_less_than_or_equal(5)
+            ```
+        """
         return self._assert(
             self._value <= n,  # type: ignore[operator]
             f"{self._value!r} to be less than or equal to {n!r}",
@@ -265,6 +530,19 @@ class Expectation[T]:
         )
 
     def to_contain(self, item: T) -> MatchResult:
+        """Assert the value contains `item`.
+
+        Works on lists, strings, and any container supporting `in`.
+
+        Args:
+            item: The item to search for.
+
+        Example:
+            ```python
+            expect([1, 2, 3]).to_contain(2)
+            expect("hello world").to_contain("world")
+            ```
+        """
         return self._assert(
             item in self._value,
             f"{self._value!r} to contain {item!r}",
@@ -273,6 +551,17 @@ class Expectation[T]:
         )  # type: ignore[operator]
 
     def to_have_length(self, n: int) -> MatchResult:
+        """Assert the value has length `n`.
+
+        Args:
+            n: The expected length.
+
+        Example:
+            ```python
+            expect([1, 2, 3]).to_have_length(3)
+            expect("hello").to_have_length(5)
+            ```
+        """
         actual = len(self._value)  # type: ignore[arg-type]
         return self._assert(
             actual == n,
@@ -282,6 +571,17 @@ class Expectation[T]:
         )
 
     def to_match(self, pattern: str) -> MatchResult:
+        """Regex match against the string representation of the value.
+
+        Args:
+            pattern: A regular expression pattern.
+
+        Example:
+            ```python
+            expect("hello world").to_match(r"hello")
+            expect("foo123").to_match(r"\\d+")
+            ```
+        """
         return self._assert(
             bool(re.search(pattern, str(self._value))),
             f"{self._value!r} to match pattern {pattern!r}",
@@ -295,6 +595,21 @@ class Expectation[T]:
         *,
         match: str | None = None,
     ) -> MatchResult:
+        """Assert that a callable raises an exception.
+
+        Wrap the expression in a lambda.
+
+        Args:
+            exc_type: Expected exception type, or `None` for any exception.
+            match: Regex pattern to match against the exception message.
+
+        Example:
+            ```python
+            expect(lambda: int("abc")).to_raise(ValueError)
+            expect(lambda: 1 / 0).to_raise(ZeroDivisionError, match="division")
+            expect(lambda: None).not_.to_raise()
+            ```
+        """
         if not callable(self._value):
             msg = "to_raise() requires a callable; wrap the expression in a lambda"
             raise TypeError(msg)
@@ -335,7 +650,24 @@ class Expectation[T]:
         )
 
 
-# `name` is unused at runtime — it exists as an AST-level metadata carrier
-# so the Rust-side discovery can extract assertion labels from source code.
 def expect[T](expr: T, name: str | None = None) -> Expectation[T]:  # noqa: ARG001
+    """Create an [`Expectation`][tryke.expect.Expectation] for `expr`.
+
+    Args:
+        expr: The value to make assertions on.
+        name: Optional label for the assertion (used by the Rust-side
+            discovery to extract assertion labels from source code;
+            unused at runtime).
+
+    Returns:
+        An `Expectation` with chainable assertion methods.
+
+    Example:
+        ```python
+        from tryke import expect
+
+        expect(1 + 1).to_equal(2)
+        expect("hello").to_contain("ell")
+        ```
+    """
     return Expectation(expr)

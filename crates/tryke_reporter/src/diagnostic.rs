@@ -35,7 +35,7 @@ impl SourceCode for OffsetSource {
 
 struct AssertionReport {
     source: NamedSource<OffsetSource>,
-    label: LabeledSpan,
+    labels: Vec<LabeledSpan>,
 }
 
 impl fmt::Debug for AssertionReport {
@@ -62,7 +62,7 @@ impl Diagnostic for AssertionReport {
     }
 
     fn labels(&self) -> Option<Box<dyn Iterator<Item = LabeledSpan> + '_>> {
-        Some(Box::new(std::iter::once(self.label.clone())))
+        Some(Box::new(self.labels.iter().cloned()))
     }
 }
 
@@ -106,7 +106,7 @@ fn render_assertions_themed(
     let mut failed = 0;
 
     for assertion in assertions {
-        // prefer the assertion's own file, fall back to the test's file
+        // Prefer the assertion's own file, fall back to the test's file
         let source_name = assertion
             .file
             .as_deref()
@@ -117,17 +117,32 @@ fn render_assertions_themed(
             line_offset: assertion.line.saturating_sub(1),
         };
         let source = NamedSource::new(source_name, offset_source);
-        let label_text = format!(
-            "expected {}, received {}",
-            assertion.expected, assertion.received
-        );
-        let label = LabeledSpan::new(
-            Some(label_text),
-            assertion.span_offset,
-            assertion.span_length,
-        );
 
-        let report = AssertionReport { source, label };
+        let labels = if let Some((exp_offset, exp_len)) = assertion.expected_arg_span {
+            vec![
+                LabeledSpan::new(
+                    Some(format!("received {}", assertion.received)),
+                    assertion.span_offset,
+                    assertion.span_length,
+                ),
+                LabeledSpan::new(
+                    Some(format!("expected {}", assertion.expected)),
+                    exp_offset,
+                    exp_len,
+                ),
+            ]
+        } else {
+            vec![LabeledSpan::new(
+                Some(format!(
+                    "expected {}, received {}",
+                    assertion.expected, assertion.received
+                )),
+                assertion.span_offset,
+                assertion.span_length,
+            )]
+        };
+
+        let report = AssertionReport { source, labels };
         let report = Report::new(report);
 
         let mut rendered = String::new();
@@ -216,6 +231,7 @@ mod tests {
             span_length: len,
             expected: "2".into(),
             received: "3".into(),
+            expected_arg_span: None,
         }
     }
 
@@ -271,6 +287,7 @@ mod tests {
             span_length: 1,
             expected: "1".into(),
             received: "2".into(),
+            expected_arg_span: None,
         }];
         let mut buf = String::new();
         render_assertions(Some("tests/math.py"), &assertions, &mut buf);
@@ -323,7 +340,7 @@ Traceback (most recent call last):
 AssertionError";
         render_failure_message("AssertionError", Some(tb), false, &mut buf);
         assert!(buf.contains("AssertionError"));
-        // normal mode shows only last frame
+        // Normal mode shows only last frame
         assert!(buf.contains("File \"tests/test_math.py\""));
     }
 
@@ -382,6 +399,7 @@ ZeroDivisionError: division by zero";
             span_length: 1,
             expected: "2".into(),
             received: "3".into(),
+            expected_arg_span: Some((19, 1)),
         }];
         let mut buf = String::new();
         render_assertions_plain(None, &assertions, &mut buf);
@@ -401,10 +419,60 @@ ZeroDivisionError: division by zero";
             span_length: 1,
             expected: "1".into(),
             received: "2".into(),
+            expected_arg_span: Some((19, 1)),
         }];
         let mut buf = String::new();
         // Should not panic with line 0 (saturating_sub handles it)
         render_assertions_plain(None, &assertions, &mut buf);
         assert!(buf.contains("assertion failed"));
+    }
+
+    #[test]
+    fn two_labels_for_matcher_with_arg() {
+        let assertions = vec![Assertion {
+            expression: "expect(x).to_equal(2)".into(),
+            file: Some("test.py".into()),
+            line: 10,
+            span_offset: 7,
+            span_length: 1,
+            expected: "2".into(),
+            received: "3".into(),
+            expected_arg_span: Some((19, 1)),
+        }];
+        let mut buf = String::new();
+        render_assertions_plain(None, &assertions, &mut buf);
+        assert!(
+            buf.contains("received 3"),
+            "missing 'received 3' in:\n{buf}"
+        );
+        assert!(
+            buf.contains("expected 2"),
+            "missing 'expected 2' in:\n{buf}"
+        );
+        // Should NOT contain the combined form
+        assert!(
+            !buf.contains("expected 2, received 3"),
+            "should use separate labels, got:\n{buf}"
+        );
+    }
+
+    #[test]
+    fn single_label_for_no_arg_matcher() {
+        let assertions = vec![Assertion {
+            expression: "expect(val).to_be_falsy()".into(),
+            file: Some("test.py".into()),
+            line: 10,
+            span_offset: 7,
+            span_length: 3,
+            expected: "falsy".into(),
+            received: "True".into(),
+            expected_arg_span: None,
+        }];
+        let mut buf = String::new();
+        render_assertions_plain(None, &assertions, &mut buf);
+        assert!(
+            buf.contains("expected falsy, received True"),
+            "expected combined label, got:\n{buf}"
+        );
     }
 }

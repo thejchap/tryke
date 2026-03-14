@@ -14,10 +14,12 @@ ignore = { workspace = true }
 log = "0.4"
 rayon = { workspace = true }
 salsa = { workspace = true }
+serde = { workspace = true }
 ruff_python_ast = { workspace = true }
 ruff_python_parser = { workspace = true }
 ruff_source_file = { workspace = true }
 ruff_text_size = { workspace = true }
+tryke_config = { workspace = true }
 tryke_types = { workspace = true }
 
 [dev-dependencies]

@@ -6,7 +6,7 @@ use std::time::Duration;
 use owo_colors::OwoColorize;
 use tryke_types::{RunSummary, TestItem, TestOutcome, TestResult};
 
-use tryke_types::DiscoveryError;
+use tryke_types::{DiscoveryError, DiscoveryWarning};
 
 use crate::Reporter;
 use crate::diagnostic::{
@@ -24,6 +24,7 @@ pub enum Verbosity {
 pub struct TextReporter<W: io::Write = io::Stdout> {
     writer: W,
     current_file: Option<PathBuf>,
+    current_groups: Vec<String>,
     verbosity: Verbosity,
 }
 
@@ -33,6 +34,7 @@ impl TextReporter {
         Self {
             writer: io::stdout(),
             current_file: None,
+            current_groups: Vec::new(),
             verbosity: Verbosity::Normal,
         }
     }
@@ -42,6 +44,7 @@ impl TextReporter {
         Self {
             writer: io::stdout(),
             current_file: None,
+            current_groups: Vec::new(),
             verbosity,
         }
     }
@@ -58,6 +61,7 @@ impl<W: io::Write> TextReporter<W> {
         Self {
             writer,
             current_file: None,
+            current_groups: Vec::new(),
             verbosity: Verbosity::Normal,
         }
     }
@@ -66,6 +70,7 @@ impl<W: io::Write> TextReporter<W> {
         Self {
             writer,
             current_file: None,
+            current_groups: Vec::new(),
             verbosity,
         }
     }
@@ -116,6 +121,7 @@ fn format_duration(d: Duration) -> String {
 impl<W: io::Write> Reporter for TextReporter<W> {
     fn on_run_start(&mut self, _tests: &[TestItem]) {
         self.current_file = None;
+        self.current_groups.clear();
         let _ = writeln!(
             self.writer,
             "{} {}",
@@ -138,7 +144,32 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                 }
             }
             self.current_file = file.cloned();
+            self.current_groups.clear();
         }
+
+        // Print group headers when groups change
+        let test_groups = &result.test.groups;
+        if !matches!(self.verbosity, Verbosity::Quiet) && test_groups != &self.current_groups {
+            // Find where the current and new group paths diverge
+            let common = self
+                .current_groups
+                .iter()
+                .zip(test_groups.iter())
+                .take_while(|(a, b)| a == b)
+                .count();
+            // Print each new group header with indentation
+            for (depth, group) in test_groups.iter().enumerate().skip(common) {
+                let indent = "  ".repeat(depth + 1);
+                let _ = writeln!(self.writer, "{indent}{group}");
+            }
+            self.current_groups.clone_from(test_groups);
+        }
+
+        let group_indent = if test_groups.is_empty() {
+            String::new()
+        } else {
+            "  ".repeat(test_groups.len() + 1)
+        };
 
         let display = result
             .test
@@ -150,7 +181,7 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                 if !matches!(self.verbosity, Verbosity::Quiet) {
                     let _ = writeln!(
                         self.writer,
-                        "{} {} {}",
+                        "{group_indent}{} {} {}",
                         "✓".green(),
                         display,
                         format!("[{}]", format_duration(result.duration)).dimmed()
@@ -167,7 +198,7 @@ impl<W: io::Write> Reporter for TextReporter<W> {
             } => {
                 let _ = writeln!(
                     self.writer,
-                    "{} {} {}",
+                    "{group_indent}{} {} {}",
                     "✗".red(),
                     display,
                     format!("[{}]", format_duration(result.duration)).dimmed()
@@ -198,7 +229,13 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                 }
             }
             TestOutcome::Error { message } => {
-                let _ = writeln!(self.writer, "{} {} {}", "!".red(), display, "[error]".red());
+                let _ = writeln!(
+                    self.writer,
+                    "{group_indent}{} {} {}",
+                    "!".red(),
+                    display,
+                    "[error]".red()
+                );
                 let mut buf = String::new();
                 render_error_message(message, &mut buf);
                 let _ = write!(self.writer, "{buf}");
@@ -210,7 +247,7 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                 if !matches!(self.verbosity, Verbosity::Quiet) {
                     let _ = writeln!(
                         self.writer,
-                        "{} {}",
+                        "{group_indent}{} {}",
                         "»".yellow().dimmed(),
                         display.dimmed()
                     );
@@ -218,13 +255,18 @@ impl<W: io::Write> Reporter for TextReporter<W> {
             }
             TestOutcome::XFailed { .. } => {
                 if !matches!(self.verbosity, Verbosity::Quiet) {
-                    let _ = writeln!(self.writer, "{} {}", "~".dimmed(), display.dimmed());
+                    let _ = writeln!(
+                        self.writer,
+                        "{group_indent}{} {}",
+                        "~".dimmed(),
+                        display.dimmed()
+                    );
                 }
             }
             TestOutcome::XPassed => {
                 let _ = writeln!(
                     self.writer,
-                    "{} {} {}",
+                    "{group_indent}{} {} {}",
                     "!".red(),
                     display,
                     "XPASS (unexpected pass)".red()
@@ -232,7 +274,12 @@ impl<W: io::Write> Reporter for TextReporter<W> {
             }
             TestOutcome::Todo { .. } => {
                 if !matches!(self.verbosity, Verbosity::Quiet) {
-                    let _ = writeln!(self.writer, "{} {}", "T".cyan(), display.dimmed());
+                    let _ = writeln!(
+                        self.writer,
+                        "{group_indent}{} {}",
+                        "T".cyan(),
+                        display.dimmed()
+                    );
                 }
             }
         }
@@ -247,6 +294,7 @@ impl<W: io::Write> Reporter for TextReporter<W> {
         );
         let _ = writeln!(self.writer);
         let mut current_file: Option<&std::path::Path> = None;
+        let mut current_groups: Vec<String> = Vec::new();
         for test in tests {
             let file = test.file_path.as_deref();
             if file != current_file {
@@ -257,9 +305,23 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                     let _ = writeln!(self.writer, "{}:", path.display());
                 }
                 current_file = file;
+                current_groups.clear();
             }
+            if test.groups != current_groups {
+                let common = current_groups
+                    .iter()
+                    .zip(test.groups.iter())
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                for (depth, group) in test.groups.iter().enumerate().skip(common) {
+                    let indent = "  ".repeat(depth + 1);
+                    let _ = writeln!(self.writer, "{indent}{group}");
+                }
+                current_groups.clone_from(&test.groups);
+            }
+            let group_indent = "  ".repeat(test.groups.len());
             let display = test.display_name.as_deref().unwrap_or(&test.name);
-            let _ = writeln!(self.writer, "  {}", display.dimmed());
+            let _ = writeln!(self.writer, "  {group_indent}{}", display.dimmed());
         }
         let _ = writeln!(self.writer);
         let _ = writeln!(self.writer, "{} tests collected.", tests.len());
@@ -276,6 +338,22 @@ impl<W: io::Write> Reporter for TextReporter<W> {
             "!".red(),
             error.file_path.display().to_string().yellow(),
             error.message
+        );
+    }
+
+    fn on_discovery_warning(&mut self, warning: &DiscoveryWarning) {
+        let _ = writeln!(
+            self.writer,
+            "{} {} — dynamic imports found; this file will always re-run with {}",
+            "warning:".yellow().bold(),
+            warning.file_path.display().to_string().yellow(),
+            "--changed".bold(),
+        );
+        let _ = writeln!(
+            self.writer,
+            "         replace {} or {} with static imports to restore selective re-runs",
+            "importlib.import_module()".dimmed(),
+            "__import__()".dimmed(),
         );
     }
 }
@@ -397,6 +475,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
 
         let out = output(&r);
@@ -424,6 +503,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
 
         let out = output(&r);
@@ -463,6 +543,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
 
         let out = output(&r);
@@ -495,6 +576,7 @@ mod tests {
                     span_length: 1,
                     expected: "2".into(),
                     received: "3".into(),
+                    expected_arg_span: None,
                 }],
             },
             duration: Duration::from_millis(5),
@@ -797,6 +879,7 @@ mod tests {
                     span_length: 1,
                     expected: "1".into(),
                     received: "2".into(),
+                    expected_arg_span: Some((19, 1)),
                 }],
             },
             duration: Duration::from_millis(1),
@@ -846,6 +929,7 @@ mod tests {
                     span_length: 1,
                     expected: "2".into(),
                     received: "3".into(),
+                    expected_arg_span: Some((19, 1)),
                 }],
             },
             duration: Duration::from_millis(1),
@@ -875,5 +959,23 @@ mod tests {
     fn format_duration_sub_millis() {
         let d = Duration::from_micros(170);
         assert_eq!(format_duration(d), "0.17ms");
+    }
+
+    #[test]
+    fn discovery_warning_shows_file_and_hint() {
+        let mut r = reporter();
+        r.on_discovery_warning(&DiscoveryWarning {
+            file_path: PathBuf::from("tests/helpers/loader.py"),
+            kind: tryke_types::DiscoveryWarningKind::DynamicImports,
+            message: String::new(),
+        });
+        let out = output(&r);
+        assert!(out.contains("warning:"), "should show 'warning:' label");
+        assert!(out.contains("loader.py"), "should show the file path");
+        assert!(out.contains("--changed"), "should mention --changed mode");
+        assert!(
+            out.contains("importlib.import_module()"),
+            "should hint at the cause"
+        );
     }
 }

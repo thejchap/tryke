@@ -241,10 +241,29 @@ impl FilterExpr {
         let name = test.name.to_lowercase();
         let module = test.module_path.to_lowercase();
         let display = test.display_name.as_deref().unwrap_or("").to_lowercase();
-        self.matches_inner(&id, &name, &module, &display)
+        let qualified = if test.groups.is_empty() {
+            String::new()
+        } else {
+            let mut parts = test.groups.clone();
+            parts.push(
+                test.display_name
+                    .as_deref()
+                    .unwrap_or(&test.name)
+                    .to_owned(),
+            );
+            parts.join(" > ").to_lowercase()
+        };
+        self.matches_inner(&id, &name, &module, &display, &qualified)
     }
 
-    fn matches_inner(&self, id: &str, name: &str, module: &str, display: &str) -> bool {
+    fn matches_inner(
+        &self,
+        id: &str,
+        name: &str,
+        module: &str,
+        display: &str,
+        qualified: &str,
+    ) -> bool {
         match self {
             Self::Substring(s) => {
                 let needle = s.to_lowercase();
@@ -252,16 +271,17 @@ impl FilterExpr {
                     || name.contains(&needle)
                     || module.contains(&needle)
                     || display.contains(&needle)
+                    || qualified.contains(&needle)
             }
             Self::And(a, b) => {
-                a.matches_inner(id, name, module, display)
-                    && b.matches_inner(id, name, module, display)
+                a.matches_inner(id, name, module, display, qualified)
+                    && b.matches_inner(id, name, module, display, qualified)
             }
             Self::Or(a, b) => {
-                a.matches_inner(id, name, module, display)
-                    || b.matches_inner(id, name, module, display)
+                a.matches_inner(id, name, module, display, qualified)
+                    || b.matches_inner(id, name, module, display, qualified)
             }
-            Self::Not(inner) => !inner.matches_inner(id, name, module, display),
+            Self::Not(inner) => !inner.matches_inner(id, name, module, display, qualified),
         }
     }
 }
@@ -683,5 +703,58 @@ mod tests {
     fn filter_with_markers_is_not_empty() {
         let filter = TestFilter::from_args(&[], None, Some("slow")).unwrap();
         assert!(!filter.is_empty());
+    }
+
+    // --- group matching tests ---
+
+    fn make_grouped_test(name: &str, groups: &[&str]) -> TestItem {
+        TestItem {
+            name: name.into(),
+            module_path: "tests.math".into(),
+            file_path: Some(PathBuf::from("tests/math.py")),
+            line_number: Some(1),
+            groups: groups.iter().map(|&s| s.into()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn expr_matches_group_name() {
+        let expr = FilterExpr::Substring("Math".into());
+        let test = make_grouped_test("test_add", &["Math", "addition"]);
+        assert!(expr.matches(&test));
+    }
+
+    #[test]
+    fn expr_matches_nested_group_name() {
+        let expr = FilterExpr::Substring("addition".into());
+        let test = make_grouped_test("test_add", &["Math", "addition"]);
+        assert!(expr.matches(&test));
+    }
+
+    #[test]
+    fn expr_matches_qualified_group_path() {
+        let expr = FilterExpr::Substring("Math > addition".into());
+        let test = make_grouped_test("test_add", &["Math", "addition"]);
+        assert!(expr.matches(&test));
+    }
+
+    #[test]
+    fn expr_no_match_wrong_group() {
+        let expr = FilterExpr::Substring("subtraction".into());
+        let test = make_grouped_test("test_add", &["Math", "addition"]);
+        assert!(!expr.matches(&test));
+    }
+
+    #[test]
+    fn filter_by_group_restricts_tests() {
+        let filter = TestFilter::from_args(&[], Some("Math"), None).unwrap();
+        let tests = vec![
+            make_grouped_test("test_add", &["Math", "addition"]),
+            make_test("test_standalone", "tests/other.py", 1),
+        ];
+        let filtered = filter.apply(tests);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "test_add");
     }
 }

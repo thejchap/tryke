@@ -163,7 +163,7 @@ mod tests {
     fn client_returns_err_when_no_server() {
         let dir = tempfile::tempdir().unwrap();
         let mut reporter = RecordingReporter::new();
-        // port 1 is privileged and never has a server
+        // Port 1 is privileged and never has a server
         let result = Client::new(1, None, vec![], None).run(dir.path(), &mut reporter);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();

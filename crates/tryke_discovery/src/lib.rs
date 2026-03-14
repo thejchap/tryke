@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use log::trace;
 use rayon::prelude::*;
 
@@ -25,13 +26,35 @@ pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-pub(crate) fn collect_python_files(root: &Path) -> Vec<PathBuf> {
+#[must_use]
+pub fn configured_excludes(start: &Path, cli_excludes: &[String]) -> Vec<String> {
+    if !cli_excludes.is_empty() {
+        return cli_excludes.to_vec();
+    }
+    tryke_config::load_effective_config(start).discovery.exclude
+}
+
+fn build_excludes(root: &Path, excludes: &[String]) -> Gitignore {
+    let mut builder = GitignoreBuilder::new(root);
+    for exclude in excludes {
+        let _ = builder.add_line(None, exclude);
+    }
+    builder.build().unwrap_or_else(|_| Gitignore::empty())
+}
+
+pub(crate) fn collect_python_files(root: &Path, excludes: &[String]) -> Vec<PathBuf> {
+    let exclude_matcher = build_excludes(root, excludes);
     WalkBuilder::new(root)
         .build()
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
         .map(ignore::DirEntry::into_path)
         .filter(|p| p.extension().is_some_and(|ext| ext == "py"))
+        .filter(|p| {
+            !exclude_matcher
+                .matched_path_or_any_parents(p, false)
+                .is_ignore()
+        })
         .collect()
 }
 
@@ -108,10 +131,18 @@ pub(crate) fn extract_local_imports(root: &Path, file: &Path, body: &[Stmt]) -> 
                 let level = from_stmt.level;
                 if level == 0 {
                     // Absolute: from foo.bar import x
-                    if let Some(module) = &from_stmt.module
-                        && let Some(path) = resolve_absolute_import(root, module.id.as_str())
-                    {
-                        add(path);
+                    if let Some(module) = &from_stmt.module {
+                        let module_name = module.id.as_str();
+                        if let Some(path) = resolve_absolute_import(root, module_name) {
+                            add(path);
+                        }
+                        for alias in &from_stmt.names {
+                            let imported = alias.name.id.as_str();
+                            let submodule = format!("{module_name}.{imported}");
+                            if let Some(path) = resolve_absolute_import(root, &submodule) {
+                                add(path);
+                            }
+                        }
                     }
                 } else {
                     // Relative: walk up level-1 directories from file's parent
@@ -174,9 +205,9 @@ fn is_tryke_test_decorator(expr: &Expr, body: &[Stmt]) -> bool {
         Expr::Attribute(a) if MARKER_ATTRS.contains(&a.attr.id.as_str()) => {
             is_bare_test_or_qualified(&a.value, body)
         }
-        // bare test
+        // Bare test
         Expr::Name(n) => n.id.as_str() == "test" && !is_locally_defined("test", body),
-        // call wrapper: @test(), @test.skip("reason"), @test("name"), etc.
+        // Call wrapper: @test(), @test.skip("reason"), @test("name"), etc.
         Expr::Call(c) => is_tryke_test_decorator(&c.func, body),
         _ => false,
     }
@@ -553,6 +584,96 @@ pub(crate) fn has_dynamic_imports(body: &[Stmt]) -> bool {
     body.iter().any(stmt_has_dynamic_import)
 }
 
+/// Check whether an expression is a call to `describe` (bare or `tryke.describe`).
+/// Returns the describe name if it is, `None` otherwise.
+fn extract_describe_name(expr: &Expr) -> Option<String> {
+    let Expr::Call(call) = expr else {
+        return None;
+    };
+    let is_describe = match call.func.as_ref() {
+        Expr::Name(n) => n.id.as_str() == "describe",
+        Expr::Attribute(a) => {
+            a.attr.id.as_str() == "describe"
+                && matches!(&*a.value, Expr::Name(n) if n.id.as_str() == "tryke")
+        }
+        _ => return None,
+    };
+    if !is_describe {
+        return None;
+    }
+    if let Some(first) = call.arguments.args.first()
+        && let Expr::StringLiteral(s) = first
+    {
+        return Some(s.value.to_str().to_owned());
+    }
+    None
+}
+
+#[expect(clippy::too_many_arguments)]
+fn collect_tests_from_body(
+    stmts: &[Stmt],
+    top_body: &[Stmt],
+    root: &Path,
+    file: &Path,
+    source: &str,
+    line_index: &LineIndex,
+    groups: &[String],
+    out: &mut Vec<TestItem>,
+) {
+    for stmt in stmts {
+        if let Stmt::FunctionDef(func) = stmt
+            && let Some(dec) = func
+                .decorator_list
+                .iter()
+                .find(|d| is_tryke_test_decorator(&d.expression, top_body))
+        {
+            let display_name =
+                extract_decorator_name(&dec.expression).or_else(|| extract_docstring(&func.body));
+            let modifier = extract_test_modifier(&dec.expression);
+            let tags = extract_decorator_tags(&dec.expression);
+            let (skip, todo, xfail) = match modifier {
+                TestModifier::Skip(r) => (Some(r), None, None),
+                TestModifier::Todo(d) => (None, Some(d), None),
+                TestModifier::Xfail(r) => (None, None, Some(r)),
+                TestModifier::SkipIf | TestModifier::None => (None, None, None),
+            };
+            out.push(TestItem {
+                name: func.name.id.as_str().to_owned(),
+                module_path: path_to_module(root, file),
+                file_path: Some(file.strip_prefix(root).unwrap_or(file).to_path_buf()),
+                line_number: u32::try_from(line_index.line_index(func.range.start()).get()).ok(),
+                display_name,
+                expected_assertions: extract_expected_assertions(&func.body, source, line_index),
+                skip,
+                todo,
+                xfail,
+                tags,
+                groups: groups.to_vec(),
+            });
+        } else if let Stmt::With(with_stmt) = stmt {
+            // Check if this is a `with describe("name")` block
+            let describe_name = with_stmt
+                .items
+                .iter()
+                .find_map(|item| extract_describe_name(&item.context_expr));
+            if let Some(name) = describe_name {
+                let mut nested_groups = groups.to_vec();
+                nested_groups.push(name);
+                collect_tests_from_body(
+                    &with_stmt.body,
+                    top_body,
+                    root,
+                    file,
+                    source,
+                    line_index,
+                    &nested_groups,
+                    out,
+                );
+            }
+        }
+    }
+}
+
 pub(crate) fn parse_tests_from_source(root: &Path, file: &Path, source: &str) -> Vec<TestItem> {
     trace!(
         "parsing {}",
@@ -565,46 +686,9 @@ pub(crate) fn parse_tests_from_source(root: &Path, file: &Path, source: &str) ->
     let line_index = LineIndex::from_source_text(source);
     let module = parsed.syntax();
     let body = &module.body;
-    body.iter()
-        .filter_map(|stmt| {
-            if let Stmt::FunctionDef(func) = stmt
-                && let Some(dec) = func
-                    .decorator_list
-                    .iter()
-                    .find(|d| is_tryke_test_decorator(&d.expression, body))
-            {
-                let display_name = extract_decorator_name(&dec.expression)
-                    .or_else(|| extract_docstring(&func.body));
-                let modifier = extract_test_modifier(&dec.expression);
-                let tags = extract_decorator_tags(&dec.expression);
-                let (skip, todo, xfail) = match modifier {
-                    TestModifier::Skip(r) => (Some(r), None, None),
-                    TestModifier::Todo(d) => (None, Some(d), None),
-                    TestModifier::Xfail(r) => (None, None, Some(r)),
-                    TestModifier::SkipIf | TestModifier::None => (None, None, None),
-                };
-                Some(TestItem {
-                    name: func.name.id.as_str().to_owned(),
-                    module_path: path_to_module(root, file),
-                    file_path: Some(file.strip_prefix(root).unwrap_or(file).to_path_buf()),
-                    line_number: u32::try_from(line_index.line_index(func.range.start()).get())
-                        .ok(),
-                    display_name,
-                    expected_assertions: extract_expected_assertions(
-                        &func.body,
-                        source,
-                        &line_index,
-                    ),
-                    skip,
-                    todo,
-                    xfail,
-                    tags,
-                })
-            } else {
-                None
-            }
-        })
-        .collect()
+    let mut tests = Vec::new();
+    collect_tests_from_body(body, body, root, file, source, &line_index, &[], &mut tests);
+    tests
 }
 
 fn parse_tests_from_file(root: &Path, file: &Path) -> Vec<TestItem> {
@@ -616,8 +700,14 @@ fn parse_tests_from_file(root: &Path, file: &Path) -> Vec<TestItem> {
 
 #[must_use]
 pub fn discover_from(start: &Path) -> Vec<TestItem> {
+    let excludes = configured_excludes(start, &[]);
+    discover_from_with_excludes(start, &excludes)
+}
+
+#[must_use]
+pub fn discover_from_with_excludes(start: &Path, excludes: &[String]) -> Vec<TestItem> {
     let root = find_project_root(start).unwrap_or_else(|| start.to_path_buf());
-    let mut files = collect_python_files(&root);
+    let mut files = collect_python_files(&root, excludes);
     files.sort();
     let mut tests: Vec<TestItem> = files
         .par_iter()
@@ -682,7 +772,7 @@ mod tests {
     #[test]
     fn collects_py_files_only() {
         let dir = make_tree(&["a.py", "b.txt", "sub/c.py"]);
-        let mut files = collect_python_files(dir.path());
+        let mut files = collect_python_files(dir.path(), &[]);
         files.sort();
         assert_eq!(files.len(), 2);
         assert!(files.iter().all(|p| p.extension().unwrap() == "py"));
@@ -692,7 +782,28 @@ mod tests {
     fn respects_ignore_files() {
         let dir = make_tree(&["a.py", "ignored/b.py"]);
         fs::write(dir.path().join(".ignore"), "ignored/\n").expect("write .ignore");
-        let files = collect_python_files(dir.path());
+        let files = collect_python_files(dir.path(), &[]);
+        assert_eq!(files.len(), 1);
+        assert!(files[0].ends_with("a.py"));
+    }
+
+    #[test]
+    fn cli_excludes_override_pyproject() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.tryke]\nexclude = [\"benchmarks/suites\"]\n",
+        )
+        .expect("write pyproject");
+        let excludes = configured_excludes(dir.path(), &["tmp".into(), "cache".into()]);
+        assert_eq!(excludes, vec!["tmp", "cache"]);
+    }
+
+    #[test]
+    fn collect_python_files_respects_custom_excludes() {
+        let dir = make_tree(&["a.py", "benchmarks/suites/test_bench.py"]);
+        let mut files = collect_python_files(dir.path(), &["benchmarks/suites".into()]);
+        files.sort();
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("a.py"));
     }
@@ -1075,6 +1186,27 @@ def my_func():
     }
 
     #[test]
+    fn extract_local_imports_from_absolute_submodule() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let pkg = root.join("pkg");
+        fs::create_dir_all(&pkg).expect("mkdir");
+        fs::write(pkg.join("__init__.py"), "").expect("write");
+        fs::write(pkg.join("helpers.py"), "").expect("write");
+        let source = "from pkg import helpers\n";
+        let parsed = parse_module(source).expect("parse");
+        let file = root.join("test_foo.py");
+        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        assert_eq!(
+            imports,
+            vec![
+                root.join("pkg").join("__init__.py"),
+                root.join("pkg").join("helpers.py")
+            ]
+        );
+    }
+
+    #[test]
     fn extract_local_imports_ignores_nonlocal() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
@@ -1303,6 +1435,102 @@ def test_fn():
         assert!(items[0].xfail.is_none());
     }
 
+    // --- describe block tests ---
+
+    #[test]
+    fn discovers_tests_in_describe_block() {
+        let source = "\
+with describe(\"Math\"):
+    @test
+    def test_add():
+        expect(1 + 1).to_equal(2)
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "test_add");
+        assert_eq!(items[0].groups, vec!["Math"]);
+    }
+
+    #[test]
+    fn discovers_tests_in_nested_describe() {
+        let source = "\
+with describe(\"Math\"):
+    with describe(\"addition\"):
+        @test
+        def test_add():
+            pass
+    with describe(\"subtraction\"):
+        @test
+        def test_sub():
+            pass
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].name, "test_add");
+        assert_eq!(items[0].groups, vec!["Math", "addition"]);
+        assert_eq!(items[1].name, "test_sub");
+        assert_eq!(items[1].groups, vec!["Math", "subtraction"]);
+    }
+
+    #[test]
+    fn top_level_tests_have_empty_groups() {
+        let source = "@test\ndef test_fn(): pass\n";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert!(items[0].groups.is_empty());
+    }
+
+    #[test]
+    fn mixed_describe_and_top_level() {
+        let source = "\
+with describe(\"Group\"):
+    @test
+    def test_grouped():
+        pass
+
+@test
+def test_standalone():
+    pass
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].groups, vec!["Group"]);
+        assert!(items[1].groups.is_empty());
+    }
+
+    #[test]
+    fn describe_with_tryke_qualified() {
+        let source = "\
+with tryke.describe(\"Suite\"):
+    @test
+    def test_fn():
+        pass
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].groups, vec!["Suite"]);
+    }
+
+    #[test]
+    fn describe_preserves_test_metadata() {
+        let source = "\
+with describe(\"Group\"):
+    @test.skip(\"broken\")
+    def test_fn():
+        expect(1).to_equal(2)
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].groups, vec!["Group"]);
+        assert_eq!(items[0].skip.as_deref(), Some("broken"));
+        assert_eq!(items[0].expected_assertions.len(), 1);
+    }
+
     // --- has_dynamic_imports tests ---
 
     fn parse_body(source: &str) -> Vec<Stmt> {
@@ -1368,7 +1596,7 @@ def test_second():
         assert_eq!(items[0].name, "test_third");
         assert_eq!(items[1].name, "test_first");
         assert_eq!(items[2].name, "test_second");
-        // line numbers are monotonically increasing
+        // Line numbers are monotonically increasing
         for pair in items.windows(2) {
             assert!(pair[0].line_number < pair[1].line_number);
         }

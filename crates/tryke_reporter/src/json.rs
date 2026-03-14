@@ -1,7 +1,7 @@
 use std::io;
 
 use serde::Serialize;
-use tryke_types::{RunSummary, TestItem, TestResult};
+use tryke_types::{DiscoveryWarning, RunSummary, TestItem, TestResult};
 
 use crate::Reporter;
 
@@ -34,7 +34,7 @@ impl<W: io::Write> JSONReporter<W> {
     }
 
     fn write_event<T: Serialize>(&mut self, event: &T) {
-        // ignore write errors to match typical reporter behavior
+        // Ignore write errors to match typical reporter behavior
         let _ = serde_json::to_writer(&mut self.writer, event)
             .map_err(io::Error::from)
             .and_then(|()| self.writer.write_all(b"\n"));
@@ -65,6 +65,12 @@ struct CollectCompleteEvent<'a> {
     tests: &'a [TestItem],
 }
 
+#[derive(Serialize)]
+struct DiscoveryWarningEvent<'a> {
+    event: &'static str,
+    warning: &'a DiscoveryWarning,
+}
+
 impl<W: io::Write> Reporter for JSONReporter<W> {
     fn on_run_start(&mut self, tests: &[TestItem]) {
         self.write_event(&RunStartEvent {
@@ -91,6 +97,13 @@ impl<W: io::Write> Reporter for JSONReporter<W> {
         self.write_event(&CollectCompleteEvent {
             event: "collect_complete",
             tests,
+        });
+    }
+
+    fn on_discovery_warning(&mut self, warning: &DiscoveryWarning) {
+        self.write_event(&DiscoveryWarningEvent {
+            event: "discovery_warning",
+            warning,
         });
     }
 }
@@ -229,6 +242,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         };
 
         r.on_run_complete(&summary);
@@ -239,6 +253,35 @@ mod tests {
         assert_eq!(lines[0]["summary"]["passed"], 5);
         assert_eq!(lines[0]["summary"]["failed"], 1);
         assert_eq!(lines[0]["summary"]["skipped"], 2);
+    }
+
+    #[test]
+    fn emits_changed_selection_in_run_complete() {
+        let mut r = reporter();
+        r.on_run_complete(&RunSummary {
+            passed: 2,
+            failed: 0,
+            skipped: 0,
+            errors: 0,
+            xfailed: 0,
+            todo: 0,
+            duration: Duration::from_millis(10),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 1,
+            start_time: None,
+            changed_selection: Some(tryke_types::ChangedSelectionSummary {
+                changed_files: 3,
+                affected_tests: 2,
+            }),
+        });
+
+        let lines = output_lines(&r);
+        assert_eq!(lines[0]["summary"]["changed_selection"]["changed_files"], 3);
+        assert_eq!(
+            lines[0]["summary"]["changed_selection"]["affected_tests"],
+            2
+        );
     }
 
     #[test]
@@ -292,6 +335,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
 
         let lines = output_lines(&r);
@@ -326,6 +370,28 @@ mod tests {
     }
 
     #[test]
+    fn emits_discovery_warning() {
+        use std::path::PathBuf;
+        use tryke_types::DiscoveryWarningKind;
+        let mut r = reporter();
+        r.on_discovery_warning(&DiscoveryWarning {
+            file_path: PathBuf::from("tests/helpers/loader.py"),
+            kind: DiscoveryWarningKind::DynamicImports,
+            message: "dynamic imports found".into(),
+        });
+        let lines = output_lines(&r);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["event"], "discovery_warning");
+        assert_eq!(lines[0]["warning"]["kind"], "dynamic_imports");
+        assert!(
+            lines[0]["warning"]["file_path"]
+                .as_str()
+                .unwrap_or("")
+                .contains("loader.py")
+        );
+    }
+
+    #[test]
     fn failed_with_assertions_includes_data() {
         let mut r = reporter();
         let result = TestResult {
@@ -347,6 +413,7 @@ mod tests {
                     span_length: 1,
                     expected: "2".into(),
                     received: "3".into(),
+                    expected_arg_span: None,
                 }],
             },
             duration: Duration::from_millis(5),

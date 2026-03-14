@@ -79,7 +79,7 @@ impl<R: Reporter> Reporter for ProgressReporter<R> {
         ) {
             self.has_failure = true;
         }
-        // value is clamped to 0..=100, safe to truncate
+        // Value is clamped to 0..=100, safe to truncate
         let pct = u8::try_from((self.completed * 100 / self.total).min(100)).unwrap_or(100);
         emit_osc(1, pct);
         self.inner.on_test_complete(result);
@@ -196,6 +196,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
         assert!(reporter.inner.completed);
         assert_eq!(reporter.inner.results.len(), 2);
@@ -221,6 +222,7 @@ mod tests {
             test_duration: None,
             file_count: 0,
             start_time: None,
+            changed_selection: None,
         });
         assert!(reporter.inner.completed);
     }

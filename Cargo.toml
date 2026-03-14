@@ -30,7 +30,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time", "process"] }
 tokio-stream = "0.1"
 notify = "6"
-notify-debouncer-mini = "0.4"
+notify-debouncer-mini = "0.7"
 toml = "0.8"
 tryke = { path = "crates/tryke" }
 tryke_config = { path = "crates/tryke_config" }

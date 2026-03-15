@@ -7,12 +7,14 @@ A side-by-side guide for moving from pytest to tryke.
 ### Test functions
 
 **pytest:**
+
 ```python
 def test_addition():
     assert 1 + 1 == 2
 ```
 
 **tryke:**
+
 ```python
 from tryke import expect, test
 
@@ -41,6 +43,7 @@ The `@test` decorator replaces the `test_` prefix convention (though tryke also 
 ### Exception testing
 
 **pytest:**
+
 ```python
 import pytest
 
@@ -50,6 +53,7 @@ def test_raises():
 ```
 
 **tryke:**
+
 ```python
 from tryke import expect, test
 
@@ -61,6 +65,7 @@ def raises():
 ### Skipping tests
 
 **pytest:**
+
 ```python
 import pytest
 
@@ -74,6 +79,7 @@ def test_unix():
 ```
 
 **tryke:**
+
 ```python
 from tryke import test
 
@@ -89,6 +95,7 @@ def unix():
 ### Expected failures
 
 **pytest:**
+
 ```python
 @pytest.mark.xfail(reason="known bug")
 def test_known():
@@ -96,6 +103,7 @@ def test_known():
 ```
 
 **tryke:**
+
 ```python
 @test.xfail("known bug")
 def known():
@@ -105,6 +113,7 @@ def known():
 ### Async tests
 
 **pytest** (requires `pytest-asyncio`):
+
 ```python
 import pytest
 
@@ -115,6 +124,7 @@ async def test_async():
 ```
 
 **tryke** (built-in):
+
 ```python
 @test
 async def async_operation():
@@ -143,11 +153,13 @@ async def async_operation():
 ### Running changed tests
 
 **pytest** (requires plugin):
+
 ```bash
 pytest --lf  # last failed
 ```
 
 **tryke** (built-in):
+
 ```bash
 tryke test --changed  # tests affected by git changes
 ```

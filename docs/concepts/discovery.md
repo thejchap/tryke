@@ -1,4 +1,4 @@
-# Static analysis and test discovery
+# Discovery
 
 tryke discovers tests without running your code. It uses a Rust-powered Python parser
 ([Ruff](https://github.com/astral-sh/ruff)) to read your source files at startup, build
@@ -35,7 +35,7 @@ impact-based filtering.
 
 tryke will emit a warning when this happens:
 
-```
+```text
 warning: tests/helpers/loader.py — dynamic imports found; this file will always re-run with --changed
          replace importlib.import_module() or __import__() with static imports to restore selective re-runs
 ```

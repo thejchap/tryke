@@ -11,7 +11,7 @@ const GENERATED_NOTE: &str =
 pub fn docs_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("docs/cli.md")
+        .join("docs/reference/cli.md")
 }
 
 pub fn render_cli_reference() -> String {
@@ -19,7 +19,7 @@ pub fn render_cli_reference() -> String {
     out.push_str("# CLI Reference\n\n");
     out.push_str(GENERATED_NOTE);
     out.push_str(
-        "\n\nThis reference is generated from the clap comments and attributes in `crates/tryke/src/cli.rs`.\n",
+        "\n\nThis reference is generated from the clap comments and attributes in `crates/tryke/src/cli.rs`.\n\n",
     );
 
     let mut command = Cli::command();
@@ -44,7 +44,7 @@ pub fn normalize_generated_markdown(content: &str) -> String {
 fn render_section(command: &clap::Command, path: &[&str], level: usize, out: &mut String) {
     let heading = "#".repeat(level);
     let command_name = path.join(" ");
-    let _ = writeln!(out, "\n{heading} `{command_name}`\n");
+    let _ = writeln!(out, "{heading} `{command_name}`\n");
 
     if let Some(about) = command.get_long_about().or_else(|| command.get_about()) {
         let about = about.to_string();

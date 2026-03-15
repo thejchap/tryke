@@ -2,8 +2,6 @@
 
 a test framework for python that is modern, fast, and fun
 
-
-
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![PyPI](https://img.shields.io/pypi/v/tryke)](https://pypi.org/project/tryke/)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -11,9 +9,7 @@ a test framework for python that is modern, fast, and fun
 [![CI](https://github.com/thejchap/tryke/actions/workflows/ci.yml/badge.svg)](https://github.com/thejchap/tryke/actions/workflows/ci.yml)
 [![docs](https://img.shields.io/badge/docs-thejchap.github.io%2Ftryke-blue)](https://thejchap.github.io/tryke/)
 
-
-<img width="1920" height="1080" alt="300shots_so" src="https://github.com/user-attachments/assets/b882039b-1638-4cf5-b511-7631fe355139" />
-
+![300shots_so](https://github.com/user-attachments/assets/b882039b-1638-4cf5-b511-7631fe355139)
 
 ## quickstart
 

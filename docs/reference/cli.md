@@ -30,7 +30,6 @@ Options:
           Print version
 ```
 
-
 ### `tryke graph`
 
 Print the import dependency graph for the project
@@ -69,7 +68,6 @@ Options:
           Print help
 ```
 
-
 ### `tryke server`
 
 Start a persistent worker server
@@ -103,7 +101,6 @@ Options:
   -h, --help
           Print help
 ```
-
 
 ### `tryke test`
 
@@ -173,7 +170,6 @@ Options:
   -h, --help
           Print help
 ```
-
 
 ### `tryke watch`
 

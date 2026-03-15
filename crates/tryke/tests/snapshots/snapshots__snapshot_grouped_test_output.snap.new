@@ -1,0 +1,15 @@
+---
+source: crates/tryke/tests/snapshots.rs
+assertion_line: 111
+expression: strip_ansi(&out)
+---
+tryke test v0.0.8
+
+tests/test_math.py:
+  Math
+    addition
+      ✓ adds_two_numbers [1.00ms]
+      ✓ adds_floats [1.00ms]
+    subtraction
+      ✓ subtracts [1.00ms]
+✓ standalone [1.00ms]

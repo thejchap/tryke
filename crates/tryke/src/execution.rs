@@ -37,6 +37,22 @@ pub async fn run_tests(
     Ok(())
 }
 
+fn flush_buffer(
+    file: &Option<std::path::PathBuf>,
+    buffers: &mut std::collections::HashMap<
+        Option<std::path::PathBuf>,
+        Vec<(usize, tryke_types::TestResult)>,
+    >,
+    reporter: &mut dyn Reporter,
+) {
+    if let Some(mut buf) = buffers.remove(file) {
+        buf.sort_by_key(|(idx, _)| *idx);
+        for (_, result) in buf {
+            reporter.on_test_complete(&result);
+        }
+    }
+}
+
 pub async fn report_cycle(
     reporter: &mut dyn Reporter,
     tests: Vec<tryke_types::TestItem>,
@@ -45,7 +61,8 @@ pub async fn report_cycle(
     discovery_duration: Option<Duration>,
     changed_selection: Option<ChangedSelectionSummary>,
 ) -> Result<()> {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
+    use std::path::PathBuf;
 
     let file_count = tests
         .iter()
@@ -54,6 +71,16 @@ pub async fn report_cycle(
         .len();
 
     let start_time = chrono::Local::now().format("%H:%M:%S").to_string();
+
+    // build discovery-order index and per-file expected counts
+    // before partitioning so shortcircuit tests are included
+    let discovery_order: HashMap<String, usize> =
+        tests.iter().enumerate().map(|(i, t)| (t.id(), i)).collect();
+
+    let mut expected_per_file: HashMap<Option<PathBuf>, usize> = HashMap::new();
+    for t in &tests {
+        *expected_per_file.entry(t.file_path.clone()).or_default() += 1;
+    }
 
     let start = Instant::now();
     reporter.on_run_start(&tests);
@@ -65,7 +92,10 @@ pub async fn report_cycle(
     let mut xfailed = 0usize;
     let mut todo = 0usize;
 
-    // Short-circuit skip/todo tests — no worker needed
+    type FileBuffer = Vec<(usize, tryke_types::TestResult)>;
+    let mut buffers: HashMap<Option<PathBuf>, FileBuffer> = HashMap::new();
+
+    // short-circuit skip/todo tests — buffer instead of reporting eagerly
     let (run_tests, shortcircuit): (Vec<_>, Vec<_>) = tests
         .into_iter()
         .partition(|t| t.skip.is_none() && t.todo.is_none());
@@ -89,9 +119,15 @@ pub async fn report_cycle(
             stdout: String::new(),
             stderr: String::new(),
         };
-        reporter.on_test_complete(&result);
+        let idx = discovery_order
+            .get(&result.test.id())
+            .copied()
+            .unwrap_or(usize::MAX);
+        let file = result.test.file_path.clone();
+        buffers.entry(file).or_default().push((idx, result));
     }
 
+    let mut hit_maxfail = false;
     let mut stream = pool.run(run_tests);
     while let Some(result) = stream.next().await {
         match &result.outcome {
@@ -102,11 +138,41 @@ pub async fn report_cycle(
             TestOutcome::XFailed { .. } => xfailed += 1,
             TestOutcome::Todo { .. } => todo += 1,
         }
-        reporter.on_test_complete(&result);
+
+        let idx = discovery_order
+            .get(&result.test.id())
+            .copied()
+            .unwrap_or(usize::MAX);
+        let file = result.test.file_path.clone();
+        buffers.entry(file.clone()).or_default().push((idx, result));
+
+        // flush if this file's buffer is complete
+        if let Some(&expected) = expected_per_file.get(&file)
+            && buffers.get(&file).is_some_and(|b| b.len() >= expected)
+        {
+            flush_buffer(&file, &mut buffers, reporter);
+        }
+
         if let Some(max) = maxfail
             && failed >= max
         {
+            hit_maxfail = true;
             break;
+        }
+    }
+
+    // flush any remaining buffered files (partial files from maxfail, or edge cases)
+    if hit_maxfail || !buffers.is_empty() {
+        let mut remaining: Vec<(usize, Option<PathBuf>)> = buffers
+            .iter()
+            .map(|(file, buf)| {
+                let min_idx = buf.iter().map(|(idx, _)| *idx).min().unwrap_or(usize::MAX);
+                (min_idx, file.clone())
+            })
+            .collect();
+        remaining.sort_by_key(|(idx, _)| *idx);
+        for (_, file) in remaining {
+            flush_buffer(&file, &mut buffers, reporter);
         }
     }
 

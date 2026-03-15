@@ -15,6 +15,12 @@ fn make_test(name: &str, file: &str) -> TestItem {
 }
 
 /// Strip ANSI escape sequences so snapshot output is stable.
+fn insta_settings() -> insta::Settings {
+    let mut settings = insta::Settings::clone_current();
+    settings.add_filter(r"tryke test v\d+\.\d+\.\d+", "tryke test v[VERSION]");
+    settings
+}
+
 fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -108,7 +114,10 @@ fn snapshot_grouped_test_output() {
     r.on_test_complete(&make("subtracts", &["Math", "subtraction"]));
     r.on_test_complete(&make("standalone", &[]));
     let out = String::from_utf8(r.into_writer()).expect("valid utf-8");
-    insta::assert_snapshot!(strip_ansi(&out));
+    let settings = insta_settings();
+    settings.bind(|| {
+        insta::assert_snapshot!(strip_ansi(&out));
+    });
 }
 
 #[test]
@@ -130,5 +139,8 @@ fn snapshot_collect_grouped_tests() {
         make("standalone", &[]),
     ]);
     let out = String::from_utf8(r.into_writer()).expect("valid utf-8");
-    insta::assert_snapshot!(strip_ansi(&out));
+    let settings = insta_settings();
+    settings.bind(|| {
+        insta::assert_snapshot!(strip_ansi(&out));
+    });
 }

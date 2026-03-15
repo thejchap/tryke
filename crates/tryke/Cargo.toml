@@ -30,6 +30,6 @@ tryke_server = { workspace = true }
 tryke_types = { workspace = true }
 
 [dev-dependencies]
-insta = "1"
+insta = { version = "1", features = ["filters"] }
 serde_json = "1"
 tempfile = "3"

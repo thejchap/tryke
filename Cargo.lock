@@ -1462,8 +1462,8 @@ dependencies = [
  "is-macro",
  "memchr",
  "ruff_python_trivia",
- "ruff_source_file",
- "ruff_text_size",
+ "ruff_source_file 0.0.0 (git+https://github.com/astral-sh/ruff?tag=0.15.4)",
+ "ruff_text_size 0.0.0 (git+https://github.com/astral-sh/ruff?tag=0.15.4)",
  "rustc-hash",
  "thiserror",
 ]
@@ -1480,7 +1480,7 @@ dependencies = [
  "memchr",
  "ruff_python_ast",
  "ruff_python_trivia",
- "ruff_text_size",
+ "ruff_text_size 0.0.0 (git+https://github.com/astral-sh/ruff?tag=0.15.4)",
  "rustc-hash",
  "static_assertions",
  "unicode-ident",
@@ -1494,8 +1494,8 @@ version = "0.0.0"
 source = "git+https://github.com/astral-sh/ruff?tag=0.15.4#f14edd8661e2803254f89265548c7487f47a09f6"
 dependencies = [
  "itertools",
- "ruff_source_file",
- "ruff_text_size",
+ "ruff_source_file 0.0.0 (git+https://github.com/astral-sh/ruff?tag=0.15.4)",
+ "ruff_text_size 0.0.0 (git+https://github.com/astral-sh/ruff?tag=0.15.4)",
  "unicode-ident",
 ]
 
@@ -1505,7 +1505,16 @@ version = "0.0.0"
 source = "git+https://github.com/astral-sh/ruff?tag=0.15.4#f14edd8661e2803254f89265548c7487f47a09f6"
 dependencies = [
  "memchr",
- "ruff_text_size",
+ "ruff_text_size 0.0.0 (git+https://github.com/astral-sh/ruff?tag=0.15.4)",
+]
+
+[[package]]
+name = "ruff_source_file"
+version = "0.0.0"
+source = "git+https://github.com/astral-sh/ruff?tag=0.15.6#e4c7f357777a2fdd34dbe6a98b1b7d3e7488f675"
+dependencies = [
+ "memchr",
+ "ruff_text_size 0.0.0 (git+https://github.com/astral-sh/ruff?tag=0.15.6)",
 ]
 
 [[package]]
@@ -1515,6 +1524,11 @@ source = "git+https://github.com/astral-sh/ruff?tag=0.15.4#f14edd8661e2803254f89
 dependencies = [
  "get-size2",
 ]
+
+[[package]]
+name = "ruff_text_size"
+version = "0.0.0"
+source = "git+https://github.com/astral-sh/ruff?tag=0.15.6#e4c7f357777a2fdd34dbe6a98b1b7d3e7488f675"
 
 [[package]]
 name = "rustc-demangle"
@@ -2053,8 +2067,8 @@ dependencies = [
  "rayon",
  "ruff_python_ast",
  "ruff_python_parser",
- "ruff_source_file",
- "ruff_text_size",
+ "ruff_source_file 0.0.0 (git+https://github.com/astral-sh/ruff?tag=0.15.6)",
+ "ruff_text_size 0.0.0 (git+https://github.com/astral-sh/ruff?tag=0.15.4)",
  "salsa",
  "serde",
  "tempfile",

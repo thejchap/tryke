@@ -6,47 +6,72 @@ site_author = "Justin Chapman"
 copyright = "Copyright &copy; 2025 Justin Chapman"
 repo_url = "https://github.com/thejchap/tryke"
 repo_name = "tryke"
-
 nav = [
-    { "Home" = "index.md" },
-    { "Quick Start" = "quickstart.md" },
-    { "CLI Reference" = "cli.md" },
-    { "API Reference" = "api.md" },
-    { "Migration from pytest" = "migration.md" },
-    { "Why tryke?" = "why.md" },
-    { "Benchmarks" = "benchmarks.md" },
+  { "Introduction" = "index.md" },
+  { "Guides" = [
+    "guides/installation.md",
+    "guides/running-tests.md",
+    "guides/editor-integration.md",
+  ] },
+  { "Concepts" = [
+    "concepts/discovery.md",
+  ] },
+  { "Reference" = [
+    "reference/api.md",
+    "reference/cli.md",
+  ] },
 ]
 
 [project.plugins.search]
 enabled = true
 
+[project.theme.icon]
+repo = "fontawesome/brands/github"
+logo = "lucide/list-check"
+favicon = "lucide/list-check"
+
 [project.theme]
 features = [
-    "navigation.instant",
-    "navigation.sections",
-    "navigation.path",
-    "search.highlight",
+  "navigation.instant",
+  "navigation.sections",
+  "navigation.path",
+  "search.highlight",
+  "toc.integrate",
+  "navigation.tracking",
+  "navigation.tabs",
+  "navigation.expand",
+  "navigation.path",
+  "toc.follow",
+  "content.action.edit",
+  "content.action.view",
+  "content.code.copy",
+  "content.code.select",
+  "content.code.annotate",
+
 ]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+toggle.icon = "lucide/sun-moon"
+toggle.name = "Switch to light mode"
 
 [[project.theme.palette]]
 media = "(prefers-color-scheme: light)"
 scheme = "default"
-primary = "blue"
-accent = "teal"
-
-[project.theme.palette.toggle]
-icon = "lucide/moon"
-name = "Switch to dark mode"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
 
 [[project.theme.palette]]
 media = "(prefers-color-scheme: dark)"
 scheme = "slate"
-primary = "blue"
-accent = "teal"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to system preference"
 
-[project.theme.palette.toggle]
-icon = "lucide/sun"
-name = "Switch to light mode"
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/thejchap"
+
+[project.plugins.offline]
 
 [project.plugins.mkdocstrings.handlers.python]
 paths = ["python"]

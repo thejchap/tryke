@@ -8,7 +8,8 @@ use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tryke_types::{Assertion, ExpectedAssertion, TestItem, TestOutcome, TestResult};
 
 use crate::protocol::{
-    AssertionWire, ReloadParams, RpcRequest, RpcResponse, RunTestParams, RunTestResultWire,
+    AssertionWire, ReloadParams, RpcRequest, RpcResponse, RunDoctestParams, RunTestParams,
+    RunTestResultWire,
 };
 
 pub struct WorkerProcess {
@@ -86,12 +87,24 @@ impl WorkerProcess {
 
     #[expect(clippy::missing_errors_doc)]
     pub async fn run_test(&mut self, test: &TestItem) -> Result<TestResult> {
+        if let Some(object_path) = &test.doctest_object {
+            return self.run_doctest(test, object_path).await;
+        }
         let params = serde_json::to_value(RunTestParams {
             module: test.module_path.clone(),
             function: test.name.clone(),
             xfail: test.xfail.clone(),
         })?;
         let wire: RunTestResultWire = self.call("run_test", Some(params)).await?;
+        Ok(convert_result(test.clone(), wire))
+    }
+
+    async fn run_doctest(&mut self, test: &TestItem, object_path: &str) -> Result<TestResult> {
+        let params = serde_json::to_value(RunDoctestParams {
+            module: test.module_path.clone(),
+            object_path: object_path.to_owned(),
+        })?;
+        let wire: RunTestResultWire = self.call("run_doctest", Some(params)).await?;
         Ok(convert_result(test.clone(), wire))
     }
 

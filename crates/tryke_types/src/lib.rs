@@ -64,6 +64,12 @@ pub struct TestItem {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
+    /// When `Some`, this item represents a doctest rather than a normal test.
+    /// The value is the dotted attribute path to the object whose docstring
+    /// should be tested (e.g. `"Foo.bar"`), or an empty string for the
+    /// module-level docstring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doctest_object: Option<String>,
 }
 
 impl TestItem {

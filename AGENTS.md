@@ -22,3 +22,7 @@ where possible.
 - use comments purposefully. don't use comments to narrate code,
 but do use them to explain invariants and why something unusual
 was done a particular way.
+
+## style guidelines
+
+- comments and docs should be capitalized: <https://google.github.io/styleguide/cppguide.html#Punctuation_Spelling_and_Grammar> and <https://peps.python.org/pep-0008/#comments>

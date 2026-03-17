@@ -8,7 +8,8 @@ tryke is a fast, modern test framework for Python.
 [![python](https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14-blue.svg)](https://python.org)
 [![CI](https://github.com/thejchap/tryke/actions/workflows/ci.yml/badge.svg)](https://github.com/thejchap/tryke/actions/workflows/ci.yml)
 [![docs](https://img.shields.io/badge/docs-thejchap.github.io%2Ftryke-blue)](https://thejchap.github.io/tryke/)
-![300shots_so](https://github.com/user-attachments/assets/b882039b-1638-4cf5-b511-7631fe355139)
+
+<img width="800" height="442" alt="Screenshot 2026-03-16 at 23 01 52" src="https://github.com/user-attachments/assets/ea075157-3555-429d-b230-54ecf94d656a" />
 
 ## Getting started
 

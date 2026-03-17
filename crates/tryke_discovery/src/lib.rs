@@ -649,6 +649,7 @@ fn collect_tests_from_body(
                 xfail,
                 tags,
                 groups: groups.to_vec(),
+                ..TestItem::default()
             });
         } else if let Stmt::With(with_stmt) = stmt {
             // Check if this is a `with describe("name")` block
@@ -674,6 +675,96 @@ fn collect_tests_from_body(
     }
 }
 
+/// Returns `true` if the first statement in `body` is a string literal
+/// whose text contains `>>>` (i.e. a docstring with doctest examples).
+fn has_doctest_in_docstring(body: &[Stmt]) -> bool {
+    if let Some(Stmt::Expr(s)) = body.first()
+        && let Expr::StringLiteral(lit) = &*s.value
+    {
+        return lit.value.to_str().contains(">>>");
+    }
+    false
+}
+
+/// Walk the module body and emit a [`TestItem`] for every object whose
+/// docstring contains `>>>` examples.
+fn collect_doctests_from_body(
+    stmts: &[Stmt],
+    root: &Path,
+    file: &Path,
+    line_index: &LineIndex,
+    prefix: &str,
+    out: &mut Vec<TestItem>,
+) {
+    // Module-level docstring (only when prefix is empty, i.e. top-level call).
+    if prefix.is_empty()
+        && has_doctest_in_docstring(stmts)
+        && let Some(Stmt::Expr(s)) = stmts.first()
+    {
+        let line = u32::try_from(line_index.line_index(s.range.start()).get()).unwrap_or(1);
+        out.push(TestItem {
+            name: "__module__".to_owned(),
+            module_path: path_to_module(root, file),
+            file_path: Some(file.strip_prefix(root).unwrap_or(file).to_path_buf()),
+            line_number: Some(line),
+            display_name: Some("doctest: (module)".to_owned()),
+            doctest_object: Some(String::new()),
+            ..TestItem::default()
+        });
+    }
+
+    for stmt in stmts {
+        match stmt {
+            Stmt::FunctionDef(func) => {
+                if has_doctest_in_docstring(&func.body) {
+                    let object_path = if prefix.is_empty() {
+                        func.name.id.as_str().to_owned()
+                    } else {
+                        format!("{prefix}.{}", func.name.id.as_str())
+                    };
+                    let line =
+                        u32::try_from(line_index.line_index(func.range.start()).get()).unwrap_or(1);
+                    out.push(TestItem {
+                        name: object_path.clone(),
+                        module_path: path_to_module(root, file),
+                        file_path: Some(file.strip_prefix(root).unwrap_or(file).to_path_buf()),
+                        line_number: Some(line),
+                        display_name: Some(format!("doctest: {object_path}")),
+                        doctest_object: Some(object_path),
+                        ..TestItem::default()
+                    });
+                }
+            }
+            Stmt::ClassDef(class) => {
+                let class_name = if prefix.is_empty() {
+                    class.name.id.as_str().to_owned()
+                } else {
+                    format!("{prefix}.{}", class.name.id.as_str())
+                };
+
+                // Class-level docstring
+                if has_doctest_in_docstring(&class.body) {
+                    let line = u32::try_from(line_index.line_index(class.range.start()).get())
+                        .unwrap_or(1);
+                    out.push(TestItem {
+                        name: class_name.clone(),
+                        module_path: path_to_module(root, file),
+                        file_path: Some(file.strip_prefix(root).unwrap_or(file).to_path_buf()),
+                        line_number: Some(line),
+                        display_name: Some(format!("doctest: {class_name}")),
+                        doctest_object: Some(class_name.clone()),
+                        ..TestItem::default()
+                    });
+                }
+
+                // Recurse into methods
+                collect_doctests_from_body(&class.body, root, file, line_index, &class_name, out);
+            }
+            _ => {}
+        }
+    }
+}
+
 pub(crate) fn parse_tests_from_source(root: &Path, file: &Path, source: &str) -> Vec<TestItem> {
     trace!(
         "parsing {}",
@@ -688,6 +779,7 @@ pub(crate) fn parse_tests_from_source(root: &Path, file: &Path, source: &str) ->
     let body = &module.body;
     let mut tests = Vec::new();
     collect_tests_from_body(body, body, root, file, source, &line_index, &[], &mut tests);
+    collect_doctests_from_body(body, root, file, &line_index, "", &mut tests);
     tests
 }
 
@@ -1600,5 +1692,114 @@ def test_second():
         for pair in items.windows(2) {
             assert!(pair[0].line_number < pair[1].line_number);
         }
+    }
+
+    #[test]
+    fn discovers_function_doctest() {
+        let source = r#"
+def add(a, b):
+    """Add two numbers.
+
+    >>> add(1, 2)
+    3
+    """
+    return a + b
+"#;
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "add");
+        assert_eq!(items[0].doctest_object, Some("add".to_string()));
+        assert_eq!(items[0].display_name, Some("doctest: add".to_string()));
+    }
+
+    #[test]
+    fn discovers_class_and_method_doctests() {
+        let source = r#"
+class Calc:
+    """A calculator.
+
+    >>> c = Calc()
+    >>> c.value
+    0
+    """
+
+    def __init__(self):
+        self.value = 0
+
+    def add(self, n):
+        """Add n.
+
+        >>> c = Calc()
+        >>> c.add(5)
+        >>> c.value
+        5
+        """
+        self.value += n
+"#;
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].doctest_object, Some("Calc".to_string()));
+        assert_eq!(items[1].doctest_object, Some("Calc.add".to_string()));
+    }
+
+    #[test]
+    fn discovers_module_level_doctest() {
+        let source = r#"
+"""Module with doctest.
+
+>>> 1 + 1
+2
+"""
+
+def helper():
+    pass
+"#;
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "__module__");
+        assert_eq!(items[0].doctest_object, Some(String::new()));
+    }
+
+    #[test]
+    fn no_doctests_without_chevrons() {
+        let source = r#"
+def foo():
+    """Just a plain docstring."""
+    pass
+"#;
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn doctests_and_decorated_tests_coexist() {
+        let source = r#"
+from tryke import test, expect
+
+def add(a, b):
+    """Add two numbers.
+
+    >>> add(1, 2)
+    3
+    """
+    return a + b
+
+@test
+def test_add():
+    expect(add(1, 2)).to_equal(3)
+"#;
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(items.len(), 2);
+        // Decorated test comes first (collect_tests_from_body runs first)
+        assert_eq!(items[0].name, "test_add");
+        assert!(items[0].doctest_object.is_none());
+        // Doctest comes second
+        assert_eq!(items[1].name, "add");
+        assert_eq!(items[1].doctest_object, Some("add".to_string()));
     }
 }

@@ -33,6 +33,12 @@ pub struct RunTestParams {
 }
 
 #[derive(Debug, Serialize)]
+pub struct RunDoctestParams {
+    pub module: String,
+    pub object_path: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ReloadParams {
     pub modules: Vec<String>,
 }

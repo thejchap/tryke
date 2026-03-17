@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import doctest
 import importlib
 import inspect
 import io
@@ -73,6 +74,12 @@ def _dispatch(method: str, params: dict, modules: dict[str, object]) -> object:
             params["function"],
             modules,
             xfail=params.get("xfail"),
+        )
+    if method == "run_doctest":
+        return _run_doctest(
+            params["module"],
+            params.get("object_path", ""),
+            modules,
         )
     if method == "reload":
         return _reload(params.get("modules", []), modules)
@@ -300,6 +307,64 @@ def _extract_assertions(exc: AssertionError) -> list[dict]:
                 }
             ]
     return []
+
+
+def _run_doctest(
+    module_name: str,
+    object_path: str,
+    modules: dict[str, object],
+) -> dict:
+    if module_name not in modules:
+        mod = importlib.import_module(module_name)
+        modules[module_name] = mod
+    else:
+        mod = modules[module_name]
+
+    # Resolve the target object whose docstring we want to test.
+    obj = mod
+    if object_path:
+        for attr in object_path.split("."):
+            obj = getattr(obj, attr)
+
+    finder = doctest.DocTestFinder(verbose=False, recurse=False)
+    tests = finder.find(obj, name=object_path or module_name)
+
+    output_buf = io.StringIO()
+    stdout_buf = io.StringIO()
+    stderr_buf = io.StringIO()
+
+    runner = doctest.DocTestRunner(
+        verbose=False,
+        optionflags=doctest.ELLIPSIS,
+    )
+
+    start = time.monotonic()
+    with (
+        contextlib.redirect_stdout(stdout_buf),
+        contextlib.redirect_stderr(stderr_buf),
+    ):
+        for dt in tests:
+            runner.run(dt, out=output_buf.write, clear_globs=False)
+
+    duration_ms = int((time.monotonic() - start) * 1000)
+    summary = runner.summarize(verbose=False)
+
+    if summary.failed > 0:
+        return {
+            "outcome": "failed",
+            "message": output_buf.getvalue(),
+            "traceback": None,
+            "assertions": [],
+            "duration_ms": duration_ms,
+            "stdout": stdout_buf.getvalue(),
+            "stderr": stderr_buf.getvalue(),
+        }
+    return {
+        "outcome": "passed",
+        "duration_ms": duration_ms,
+        "stdout": stdout_buf.getvalue(),
+        "stderr": stderr_buf.getvalue(),
+    }
 
 
 def _reload(module_names: list[str], modules: dict[str, object]) -> None:

@@ -11,7 +11,7 @@ run `cargo run test` to test tryke's own python code, using tryke
 
 ## updating CLI docs
 
-run `cargo run --bin generate-cli-docs --` after changing the Rust CLI definitions
+run `cargo run -p tryke_dev --bin generate-cli-docs --` after changing the Rust CLI definitions
 or their help text. this rewrites `docs/reference/cli.md` from the clap metadata in
 `crates/tryke/src/cli.rs`.
 

@@ -13,7 +13,7 @@ fn main() -> ExitCode {
             Ok(existing) if normalize_generated_markdown(&existing) == docs => ExitCode::SUCCESS,
             Ok(_) => {
                 eprintln!(
-                    "generated CLI docs are out of date: regenerate with `cargo run --bin generate-cli-docs --`"
+                    "generated CLI docs are out of date: regenerate with `cargo run -p tryke_dev --bin generate-cli-docs --`"
                 );
                 ExitCode::FAILURE
             }

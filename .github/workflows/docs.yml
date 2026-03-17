@@ -17,7 +17,7 @@ jobs:
       - uses: actions/configure-pages@v5
       - uses: actions/checkout@v6
       - run: rustup show
-      - run: cargo run --bin generate-cli-docs -- --check
+      - run: cargo run -p tryke_dev --bin generate-cli-docs -- --check
       - uses: astral-sh/setup-uv@v7
       - uses: actions/setup-python@v6
         with:

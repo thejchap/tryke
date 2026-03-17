@@ -1,4 +1,4 @@
-# Discovery
+# Test Discovery
 
 tryke discovers tests without running your code. It uses a Rust-powered Python parser
 ([Ruff](https://github.com/astral-sh/ruff)) to read your source files at startup, build

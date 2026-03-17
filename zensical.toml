@@ -6,15 +6,27 @@ site_author = "Justin Chapman"
 copyright = "Copyright &copy; 2025 Justin Chapman"
 repo_url = "https://github.com/thejchap/tryke"
 repo_name = "tryke"
+extra_css = ["stylesheets/extra.css"]
 nav = [
   { "Introduction" = "index.md" },
   { "Guides" = [
     "guides/installation.md",
+    "guides/writing-tests.md",
     "guides/running-tests.md",
+    "guides/filtering.md",
+    "guides/async.md",
+    "guides/doctests.md",
+    "guides/watch-mode.md",
+    "guides/changed-mode.md",
+    "guides/reporters.md",
+    "guides/configuration.md",
     "guides/editor-integration.md",
   ] },
   { "Concepts" = [
     "concepts/discovery.md",
+    "concepts/soft-assertions.md",
+    "concepts/concurrency.md",
+    "concepts/client-server.md",
   ] },
   { "Reference" = [
     "reference/api.md",
@@ -36,9 +48,9 @@ features = [
   "navigation.sections",
   "navigation.path",
   "search.highlight",
-  "toc.integrate",
   "navigation.tracking",
   "navigation.tabs",
+  "navigation.tabs.sticky",
   "navigation.expand",
   "navigation.path",
   "toc.follow",
@@ -57,15 +69,19 @@ toggle.name = "Switch to light mode"
 
 [[project.theme.palette]]
 media = "(prefers-color-scheme: light)"
-scheme = "default"
 toggle.icon = "lucide/sun"
 toggle.name = "Switch to dark mode"
+scheme = "default"
+primary = "teal"
+accent = "teal"
 
 [[project.theme.palette]]
 media = "(prefers-color-scheme: dark)"
 scheme = "slate"
 toggle.icon = "lucide/moon"
 toggle.name = "Switch to system preference"
+primary = "teal"
+accent = "teal"
 
 [[project.extra.social]]
 icon = "fontawesome/brands/github"
@@ -85,3 +101,11 @@ members_order = "source"
 merge_init_into_class = true
 show_signature_annotations = true
 separate_signature = true
+
+[project.markdown_extensions.pymdownx.highlight]
+anchor_linenums = true
+line_spans = "__span"
+pygments_lang_class = true
+[project.markdown_extensions.pymdownx.inlinehilite]
+[project.markdown_extensions.pymdownx.snippets]
+[project.markdown_extensions.pymdownx.superfences]

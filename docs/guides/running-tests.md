@@ -65,6 +65,18 @@ tryke runs tests in parallel by default. The worker count defaults to `min(test_
 tryke test -j 4
 ```
 
+### Distribution mode
+
+By default, each test is its own work unit and can run on any worker (`--dist test`). Use `--dist` to control how tests are partitioned across workers:
+
+```bash
+tryke test --dist file    # All tests from a file go to one worker
+tryke test --dist group   # Tests within a describe() group go to one worker
+tryke test --dist test    # Each test is independent (default)
+```
+
+`file` mode is useful when tests share module-level state. `group` mode balances between parallelism and isolation within describe blocks.
+
 See [concurrency](../concepts/concurrency.md) for details on the worker pool model.
 
 ## Project root

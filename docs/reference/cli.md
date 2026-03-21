@@ -167,8 +167,18 @@ Options:
   -j, --workers <WORKERS>
           Number of worker processes (default: min(test_count, cpu_count))
 
+      --dist <DIST>
+          How tests are distributed across workers
+
+          Possible values:
+          - test:  Each test is its own work unit (maximum parallelism)
+          - file:  All tests from a file go to one worker
+          - group: Tests within a describe() group go to one worker
+
+          [default: test]
+
   -h, --help
-          Print help
+          Print help (see a summary with '-h')
 ```
 
 ### `tryke watch`
@@ -217,6 +227,16 @@ Options:
   -j, --workers <WORKERS>
           Number of worker processes (default: cpu_count)
 
+      --dist <DIST>
+          How tests are distributed across workers
+
+          Possible values:
+          - test:  Each test is its own work unit (maximum parallelism)
+          - file:  All tests from a file go to one worker
+          - group: Tests within a describe() group go to one worker
+
+          [default: test]
+
   -h, --help
-          Print help
+          Print help (see a summary with '-h')
 ```

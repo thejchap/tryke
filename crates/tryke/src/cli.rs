@@ -3,6 +3,28 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 use clap_verbosity_flag::{Verbosity as LogVerbosity, WarnLevel};
 
+/// How tests are distributed across workers.
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+pub enum Dist {
+    /// Each test is its own work unit (maximum parallelism)
+    #[default]
+    Test,
+    /// All tests from a file go to one worker
+    File,
+    /// Tests within a describe() group go to one worker
+    Group,
+}
+
+impl From<Dist> for tryke_runner::DistMode {
+    fn from(d: Dist) -> Self {
+        match d {
+            Dist::Test => Self::Test,
+            Dist::File => Self::File,
+            Dist::Group => Self::Group,
+        }
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(version, about, long_about = None)]
 pub struct Cli {
@@ -70,6 +92,9 @@ pub enum Commands {
         /// Number of worker processes (default: min(test_count, cpu_count))
         #[arg(short = 'j', long = "workers")]
         workers: Option<usize>,
+        /// How tests are distributed across workers
+        #[arg(long, default_value = "test")]
+        dist: Dist,
     },
     /// Watch files and rerun affected tests.
     Watch {
@@ -100,6 +125,9 @@ pub enum Commands {
         /// Number of worker processes (default: cpu_count)
         #[arg(short = 'j', long = "workers")]
         workers: Option<usize>,
+        /// How tests are distributed across workers
+        #[arg(long, default_value = "test")]
+        dist: Dist,
     },
     /// Start a persistent worker server.
     Server {

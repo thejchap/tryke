@@ -6,7 +6,7 @@ use std::{
 use anyhow::Result;
 use tryke_discovery::Discoverer;
 use tryke_reporter::Reporter;
-use tryke_runner::{WorkerPool, check_python_version, resolve_python};
+use tryke_runner::{DistMode, WorkerPool, check_python_version, resolve_python};
 use tryke_types::{DiscoveryWarning, DiscoveryWarningKind, filter::TestFilter};
 
 use crate::execution::{report_cycle, worker_pool_size};
@@ -39,6 +39,7 @@ pub async fn run_watch(
     test_filter: &TestFilter,
     maxfail: Option<usize>,
     workers: Option<usize>,
+    dist: DistMode,
 ) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let root = root.unwrap_or(&cwd);
@@ -55,7 +56,7 @@ pub async fn run_watch(
     let tests = test_filter.apply(discoverer.rediscover());
     let disc_dur = Some(disc_start.elapsed());
     emit_dynamic_import_warnings(reporter, &discoverer);
-    report_cycle(reporter, tests, &pool, maxfail, disc_dur, None).await?;
+    report_cycle(reporter, tests, &pool, maxfail, dist, disc_dur, None).await?;
 
     let (tx, rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
     let _debouncer = tryke_server::watcher::spawn_watcher(root, excludes, tx)?;
@@ -71,7 +72,7 @@ pub async fn run_watch(
         let tests = test_filter.apply(discoverer.tests_for_changed(&paths));
         let disc_dur = Some(disc_start.elapsed());
         emit_dynamic_import_warnings(reporter, &discoverer);
-        report_cycle(reporter, tests, &pool, maxfail, disc_dur, None).await?;
+        report_cycle(reporter, tests, &pool, maxfail, dist, disc_dur, None).await?;
     }
 
     pool.shutdown();

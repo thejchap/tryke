@@ -3,19 +3,21 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use tokio_stream::StreamExt;
 use tryke_reporter::Reporter;
-use tryke_runner::{WorkerPool, check_python_version, resolve_python};
+use tryke_runner::{DistMode, WorkerPool, check_python_version, partition, resolve_python};
 use tryke_types::{ChangedSelectionSummary, RunSummary, TestOutcome};
 
 pub fn worker_pool_size() -> usize {
     std::thread::available_parallelism().map_or(4, std::num::NonZero::get)
 }
 
+#[expect(clippy::too_many_arguments)]
 pub async fn run_tests(
     reporter: &mut dyn Reporter,
     root: &std::path::Path,
     tests: Vec<tryke_types::TestItem>,
     maxfail: Option<usize>,
     workers: Option<usize>,
+    dist: DistMode,
     discovery_duration: Option<Duration>,
     changed_selection: Option<ChangedSelectionSummary>,
 ) -> Result<()> {
@@ -29,6 +31,7 @@ pub async fn run_tests(
         tests,
         &pool,
         maxfail,
+        dist,
         discovery_duration,
         changed_selection,
     )
@@ -58,6 +61,7 @@ pub async fn report_cycle(
     tests: Vec<tryke_types::TestItem>,
     pool: &WorkerPool,
     maxfail: Option<usize>,
+    dist: DistMode,
     discovery_duration: Option<Duration>,
     changed_selection: Option<ChangedSelectionSummary>,
 ) -> Result<()> {
@@ -128,7 +132,8 @@ pub async fn report_cycle(
     }
 
     let mut hit_maxfail = false;
-    let mut stream = pool.run(run_tests);
+    let units = partition(run_tests, dist);
+    let mut stream = pool.run(units);
     while let Some(result) = stream.next().await {
         match &result.outcome {
             TestOutcome::Passed => passed += 1,
@@ -222,7 +227,16 @@ mod tests {
         discoverer: &mut Discoverer,
         pool: &WorkerPool,
     ) -> anyhow::Result<()> {
-        report_cycle(reporter, discoverer.rediscover(), pool, None, None, None).await
+        report_cycle(
+            reporter,
+            discoverer.rediscover(),
+            pool,
+            None,
+            DistMode::Test,
+            None,
+            None,
+        )
+        .await
     }
 
     #[tokio::test]
@@ -232,9 +246,18 @@ mod tests {
         let excludes = resolved_excludes(&root, &[], &[]);
         let tests = discover_tests(&root, false, None, &excludes).tests;
         assert!(
-            run_tests(&mut reporter, &root, tests, None, None, None, None)
-                .await
-                .is_ok()
+            run_tests(
+                &mut reporter,
+                &root,
+                tests,
+                None,
+                None,
+                DistMode::Test,
+                None,
+                None
+            )
+            .await
+            .is_ok()
         );
     }
 
@@ -245,9 +268,18 @@ mod tests {
         let excludes = resolved_excludes(&root, &[], &[]);
         let tests = discover_tests(&root, false, None, &excludes).tests;
         assert!(
-            run_tests(&mut reporter, &root, tests, None, None, None, None)
-                .await
-                .is_ok()
+            run_tests(
+                &mut reporter,
+                &root,
+                tests,
+                None,
+                None,
+                DistMode::Test,
+                None,
+                None
+            )
+            .await
+            .is_ok()
         );
     }
 
@@ -258,9 +290,18 @@ mod tests {
         let excludes = resolved_excludes(&root, &[], &[]);
         let tests = discover_tests(&root, false, None, &excludes).tests;
         assert!(
-            run_tests(&mut reporter, &root, tests, None, None, None, None)
-                .await
-                .is_ok()
+            run_tests(
+                &mut reporter,
+                &root,
+                tests,
+                None,
+                None,
+                DistMode::Test,
+                None,
+                None
+            )
+            .await
+            .is_ok()
         );
     }
 
@@ -271,9 +312,18 @@ mod tests {
         let excludes = resolved_excludes(&root, &[], &[]);
         let tests = discover_tests(&root, false, None, &excludes).tests;
         assert!(
-            run_tests(&mut reporter, &root, tests, None, None, None, None)
-                .await
-                .is_ok()
+            run_tests(
+                &mut reporter,
+                &root,
+                tests,
+                None,
+                None,
+                DistMode::Test,
+                None,
+                None
+            )
+            .await
+            .is_ok()
         );
     }
 
@@ -327,9 +377,18 @@ mod tests {
         // Non-git directory → git_changed_files returns None → discover_tests runs all (0 here)
         let tests = discover_tests(dir.path(), true, None, &[]).tests;
         assert!(
-            run_tests(&mut reporter, dir.path(), tests, None, None, None, None)
-                .await
-                .is_ok()
+            run_tests(
+                &mut reporter,
+                dir.path(),
+                tests,
+                None,
+                None,
+                DistMode::Test,
+                None,
+                None
+            )
+            .await
+            .is_ok()
         );
     }
 
@@ -373,7 +432,8 @@ def test_failing():
             &[dir.path().to_path_buf(), python_dir],
         );
         pool.warm().await;
-        let mut results: Vec<_> = pool.run(tests).collect().await;
+        let units = partition(tests, DistMode::Test);
+        let mut results: Vec<_> = pool.run(units).collect().await;
         results.sort_by(|a, b| a.test.name.cmp(&b.test.name));
 
         assert_eq!(results.len(), 2);

@@ -64,6 +64,7 @@ fn main() -> Result<()> {
             fail_fast,
             maxfail,
             workers,
+            dist,
             include,
         } => {
             if base_branch.is_some() && !changed && !changed_first {
@@ -124,6 +125,7 @@ fn main() -> Result<()> {
                     tests,
                     resolved_maxfail,
                     *workers,
+                    (*dist).into(),
                     Some(discovery_duration),
                     changed_selection,
                 ))
@@ -138,6 +140,7 @@ fn main() -> Result<()> {
             fail_fast,
             maxfail,
             workers,
+            dist,
             include,
         } => {
             let resolved_maxfail = if *fail_fast { Some(1) } else { *maxfail };
@@ -154,6 +157,7 @@ fn main() -> Result<()> {
                 &test_filter,
                 resolved_maxfail,
                 *workers,
+                (*dist).into(),
             ))
         }
         Commands::Server {

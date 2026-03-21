@@ -11,6 +11,8 @@ license.workspace = true
 
 [dependencies]
 anyhow = "1"
+async-channel = { workspace = true }
+indexmap = "2"
 log = "0.4"
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -1,6 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use log::{debug, trace};
@@ -8,20 +6,21 @@ use log::{debug, trace};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::Stream;
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tryke_types::{TestItem, TestOutcome, TestResult};
+use tryke_types::{TestOutcome, TestResult};
 
+use crate::schedule::WorkUnit;
 use crate::worker::WorkerProcess;
 
 enum WorkerMsg {
     Ping(oneshot::Sender<()>),
-    Test(Box<TestItem>, oneshot::Sender<TestResult>),
+    Unit(WorkUnit, mpsc::UnboundedSender<TestResult>),
     Reload(Vec<String>, oneshot::Sender<()>),
     Shutdown,
 }
 
 pub struct WorkerPool {
-    worker_txs: Vec<mpsc::UnboundedSender<WorkerMsg>>,
-    next: Arc<AtomicUsize>,
+    work_tx: async_channel::Sender<WorkerMsg>,
+    size: usize,
 }
 
 impl WorkerPool {
@@ -38,46 +37,39 @@ impl WorkerPool {
         python_path: &[PathBuf],
     ) -> Self {
         let size = size.max(1);
-        let mut worker_txs = Vec::with_capacity(size);
         let python_path = python_path.to_vec();
         let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let (work_tx, work_rx) = async_channel::unbounded();
         for _ in 0..size {
-            let (tx, rx) = mpsc::unbounded_channel();
             let bin = python_bin.to_owned();
+            let rx = work_rx.clone();
             tokio::spawn(worker_task(bin, python_path.clone(), root.clone(), rx));
-            worker_txs.push(tx);
         }
-        Self {
-            worker_txs,
-            next: Arc::new(AtomicUsize::new(0)),
-        }
+        Self { work_tx, size }
     }
 
-    pub fn run(&self, tests: Vec<TestItem>) -> impl Stream<Item = TestResult> + use<> {
+    pub fn run(&self, units: Vec<WorkUnit>) -> impl Stream<Item = TestResult> + use<> {
         let (stream_tx, stream_rx) = mpsc::unbounded_channel();
-        let n = self.worker_txs.len();
-        let next = Arc::clone(&self.next);
 
-        for test in tests {
-            let (result_tx, result_rx) = oneshot::channel();
-            let idx = next.fetch_add(1, Ordering::Relaxed) % n;
-            let _ = self.worker_txs[idx].send(WorkerMsg::Test(Box::new(test), result_tx));
-            let stx = stream_tx.clone();
-            tokio::spawn(async move {
-                if let Ok(result) = result_rx.await {
-                    let _ = stx.send(result);
-                }
-            });
+        for unit in units {
+            let _ = self
+                .work_tx
+                .send_blocking(WorkerMsg::Unit(unit, stream_tx.clone()));
         }
 
         UnboundedReceiverStream::new(stream_rx)
     }
 
     pub async fn reload(&self, modules: Vec<String>) {
-        let mut ack_rxs = Vec::with_capacity(self.worker_txs.len());
-        for tx in &self.worker_txs {
+        // Reload must reach every worker, so we send N messages (one per worker)
+        // and wait for all acknowledgements.
+        let mut ack_rxs = Vec::with_capacity(self.size);
+        for _ in 0..self.size {
             let (ack_tx, ack_rx) = oneshot::channel();
-            let _ = tx.send(WorkerMsg::Reload(modules.clone(), ack_tx));
+            let _ = self
+                .work_tx
+                .send(WorkerMsg::Reload(modules.clone(), ack_tx))
+                .await;
             ack_rxs.push(ack_rx);
         }
         for ack_rx in ack_rxs {
@@ -88,10 +80,11 @@ impl WorkerPool {
     /// Pre-spawn all worker processes in parallel so Python startup
     /// latency is not on the critical path of the first tests.
     pub async fn warm(&self) {
-        let mut ack_rxs = Vec::with_capacity(self.worker_txs.len());
-        for tx in &self.worker_txs {
+        // Send one Ping per worker so each worker spawns its process.
+        let mut ack_rxs = Vec::with_capacity(self.size);
+        for _ in 0..self.size {
             let (ack_tx, ack_rx) = oneshot::channel();
-            let _ = tx.send(WorkerMsg::Ping(ack_tx));
+            let _ = self.work_tx.send(WorkerMsg::Ping(ack_tx)).await;
             ack_rxs.push(ack_rx);
         }
         for ack_rx in ack_rxs {
@@ -100,24 +93,100 @@ impl WorkerPool {
     }
 
     pub fn shutdown(self) {
-        for tx in self.worker_txs {
-            let _ = tx.send(WorkerMsg::Shutdown);
+        for _ in 0..self.size {
+            let _ = self.work_tx.send_blocking(WorkerMsg::Shutdown);
         }
     }
 }
 
 pub use tryke_types::path_to_module;
 
+/// Ensure a worker process is spawned, returning a mutable reference.
+/// On spawn failure, sends an error result for `test` and returns `None`.
+fn ensure_worker<'a>(
+    worker: &'a mut Option<WorkerProcess>,
+    python_bin: &str,
+    path_refs: &[&Path],
+    root: &Path,
+    test: &tryke_types::TestItem,
+    result_tx: &mpsc::UnboundedSender<TestResult>,
+) -> Option<&'a mut WorkerProcess> {
+    if worker.is_none() {
+        trace!("worker_task: spawning process");
+        match WorkerProcess::spawn(python_bin, path_refs, root) {
+            Ok(w) => *worker = Some(w),
+            Err(e) => {
+                let msg = format!("worker spawn failed: {e}");
+                debug!("worker_task: {msg}");
+                let _ = result_tx.send(TestResult {
+                    test: test.clone(),
+                    outcome: TestOutcome::Error { message: msg },
+                    duration: Duration::ZERO,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+                return None;
+            }
+        }
+    }
+    worker.as_mut()
+}
+
+/// Execute a single test on the worker, retrying once on failure.
+async fn run_single_test(
+    worker: &mut Option<WorkerProcess>,
+    python_bin: &str,
+    path_refs: &[&Path],
+    root: &Path,
+    test: tryke_types::TestItem,
+    result_tx: &mpsc::UnboundedSender<TestResult>,
+) {
+    let Some(w) = ensure_worker(worker, python_bin, path_refs, root, &test, result_tx) else {
+        return;
+    };
+    match w.run_test(&test).await {
+        Ok(result) => {
+            trace!("worker_task: test {} done", test.name);
+            let _ = result_tx.send(result);
+        }
+        Err(first_err) => {
+            debug!("worker_task: run_test error, respawning for retry");
+            let stderr_output = w.drain_stderr().await;
+            *worker = WorkerProcess::spawn(python_bin, path_refs, root).ok();
+            if let Some(w) = worker.as_mut()
+                && let Ok(result) = w.run_test(&test).await
+            {
+                debug!("worker_task: retry succeeded for {}", test.name);
+                let _ = result_tx.send(result);
+            } else {
+                let mut msg = format!("worker error: {first_err}");
+                if !stderr_output.is_empty() {
+                    msg.push_str("\nworker stderr:\n");
+                    msg.push_str(&stderr_output);
+                }
+                debug!("worker_task: retry failed for {}", test.name);
+                let _ = result_tx.send(TestResult {
+                    test,
+                    outcome: TestOutcome::Error { message: msg },
+                    duration: Duration::ZERO,
+                    stdout: String::new(),
+                    stderr: stderr_output,
+                });
+            }
+        }
+    }
+}
+
 async fn worker_task(
     python_bin: String,
     python_path: Vec<std::path::PathBuf>,
     root: PathBuf,
-    mut rx: mpsc::UnboundedReceiver<WorkerMsg>,
+    rx: async_channel::Receiver<WorkerMsg>,
 ) {
     let path_refs: Vec<&Path> = python_path.iter().map(PathBuf::as_path).collect();
     let mut worker: Option<WorkerProcess> = None;
 
-    while let Some(msg) = rx.recv().await {
+    while let Ok(msg) = rx.recv().await {
         match msg {
             WorkerMsg::Ping(ack_tx) => {
                 trace!("worker_task: ping (pre-warm)");
@@ -132,71 +201,18 @@ async fn worker_task(
                 }
                 let _ = ack_tx.send(());
             }
-            WorkerMsg::Test(boxed_test, result_tx) => {
-                let test = *boxed_test;
-                trace!("worker_task: running test {}", test.name);
-                if worker.is_none() {
-                    trace!("worker_task: spawning process");
-                    match WorkerProcess::spawn(&python_bin, &path_refs, &root) {
-                        Ok(w) => worker = Some(w),
-                        Err(e) => {
-                            let msg = format!("worker spawn failed: {e}");
-                            debug!("worker_task: {msg}");
-                            let _ = result_tx.send(TestResult {
-                                test,
-                                outcome: TestOutcome::Error { message: msg },
-                                duration: Duration::ZERO,
-                                stdout: String::new(),
-                                stderr: String::new(),
-                            });
-                            continue;
-                        }
-                    }
-                }
-                let Some(w) = worker.as_mut() else {
-                    // Cannot happen: the None branch above either assigns
-                    // Some or continues the loop.  Handle gracefully anyway.
-                    let _ = result_tx.send(TestResult {
+            WorkerMsg::Unit(unit, result_tx) => {
+                for test in unit.tests {
+                    trace!("worker_task: running test {}", test.name);
+                    run_single_test(
+                        &mut worker,
+                        &python_bin,
+                        &path_refs,
+                        &root,
                         test,
-                        outcome: TestOutcome::Error {
-                            message: "no worker available".into(),
-                        },
-                        duration: Duration::ZERO,
-                        stdout: String::new(),
-                        stderr: String::new(),
-                    });
-                    continue;
-                };
-                match w.run_test(&test).await {
-                    Ok(result) => {
-                        trace!("worker_task: test {} done", test.name);
-                        let _ = result_tx.send(result);
-                    }
-                    Err(first_err) => {
-                        debug!("worker_task: run_test error, respawning for retry");
-                        let stderr_output = w.drain_stderr().await;
-                        worker = WorkerProcess::spawn(&python_bin, &path_refs, &root).ok();
-                        if let Some(w) = worker.as_mut()
-                            && let Ok(result) = w.run_test(&test).await
-                        {
-                            debug!("worker_task: retry succeeded for {}", test.name);
-                            let _ = result_tx.send(result);
-                        } else {
-                            let mut msg = format!("worker error: {first_err}");
-                            if !stderr_output.is_empty() {
-                                msg.push_str("\nworker stderr:\n");
-                                msg.push_str(&stderr_output);
-                            }
-                            debug!("worker_task: retry failed for {}", test.name);
-                            let _ = result_tx.send(TestResult {
-                                test,
-                                outcome: TestOutcome::Error { message: msg },
-                                duration: Duration::ZERO,
-                                stdout: String::new(),
-                                stderr: stderr_output,
-                            });
-                        }
-                    }
+                        &result_tx,
+                    )
+                    .await;
                 }
             }
             WorkerMsg::Reload(modules, ack_tx) => {

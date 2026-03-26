@@ -13,7 +13,7 @@ import traceback
 import unittest
 from pathlib import Path
 
-from tryke.expect import ExpectationError
+from tryke.expect import ExpectationError, SoftFailure
 
 # Use sys.modules to get the actual module — `tryke.expect` the attribute
 # is shadowed by the `expect` function re-exported in tryke/__init__.py.
@@ -250,7 +250,7 @@ def _run_test(  # noqa: C901, PLR0911, PLR0912
 
 
 def _extract_soft_failures(
-    failures: list[tuple[ExpectationError, traceback.FrameSummary | None]],
+    failures: list[SoftFailure],
 ) -> list[dict]:
     result = []
     for err, frame in failures:

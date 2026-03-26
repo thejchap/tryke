@@ -5,16 +5,46 @@ from __future__ import annotations
 import re
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING, overload
+from typing import TYPE_CHECKING, NamedTuple, overload
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from typing import ClassVar, Self
 
 type _Fn = Callable[[], None]
 type _Decorator = Callable[[_Fn], _Fn]
 
 
-class _SkipMarker:
+class _Marker:
+    """Base for test markers that stamp a dunder attribute on the decorated function."""
+
+    _attr: ClassVar[str]
+
+    def __init_subclass__(cls, *, attr: str, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        cls._attr = attr
+
+    def __get__(self, obj: object, objtype: type | None = None) -> Self:
+        return self
+
+    def _resolve(
+        self,
+        fn_or_text: _Fn | str | None,
+        text: str | None,
+    ) -> _Fn | _Decorator:
+        if callable(fn_or_text):
+            setattr(fn_or_text, self._attr, "")
+            return fn_or_text
+        resolved = fn_or_text or text or ""
+
+        def decorator(f: _Fn) -> _Fn:
+            setattr(f, self._attr, resolved)
+            return f
+
+        return decorator
+
+
+class _SkipMarker(_Marker, attr="__tryke_skip__"):
     """Skip a test unconditionally.
 
     Can be used as a bare decorator or called with a reason string.
@@ -30,9 +60,6 @@ class _SkipMarker:
             ...
         ```
     """
-
-    def __get__(self, obj: object, objtype: type | None = None) -> _SkipMarker:
-        return self
 
     def __call__(
         self,
@@ -52,19 +79,10 @@ class _SkipMarker:
             name: Optional test name override.
             tags: Optional list of tags for filtering.
         """
-        if callable(fn_or_reason):
-            fn_or_reason.__tryke_skip__ = ""  # type: ignore[attr-defined]
-            return fn_or_reason
-        actual_reason = fn_or_reason or reason or ""
-
-        def decorator(f: _Fn) -> _Fn:
-            f.__tryke_skip__ = actual_reason  # type: ignore[attr-defined]
-            return f
-
-        return decorator
+        return self._resolve(fn_or_reason, reason)
 
 
-class _TodoMarker:
+class _TodoMarker(_Marker, attr="__tryke_todo__"):
     """Mark a test as a placeholder — it will be collected but not executed.
 
     Can be used as a bare decorator or called with a description string.
@@ -80,9 +98,6 @@ class _TodoMarker:
             ...
         ```
     """
-
-    def __get__(self, obj: object, objtype: type | None = None) -> _TodoMarker:
-        return self
 
     def __call__(
         self,
@@ -103,19 +118,10 @@ class _TodoMarker:
             name: Optional test name override.
             tags: Optional list of tags for filtering.
         """
-        if callable(fn_or_desc):
-            fn_or_desc.__tryke_todo__ = ""  # type: ignore[attr-defined]
-            return fn_or_desc
-        actual_desc = fn_or_desc or description or ""
-
-        def decorator(f: _Fn) -> _Fn:
-            f.__tryke_todo__ = actual_desc  # type: ignore[attr-defined]
-            return f
-
-        return decorator
+        return self._resolve(fn_or_desc, description)
 
 
-class _XfailMarker:
+class _XfailMarker(_Marker, attr="__tryke_xfail__"):
     """Mark a test as expected to fail.
 
     Can be used as a bare decorator or called with a reason string.
@@ -131,9 +137,6 @@ class _XfailMarker:
             ...
         ```
     """
-
-    def __get__(self, obj: object, objtype: type | None = None) -> _XfailMarker:
-        return self
 
     def __call__(
         self,
@@ -154,16 +157,7 @@ class _XfailMarker:
             name: Optional test name override.
             tags: Optional list of tags for filtering.
         """
-        if callable(fn_or_reason):
-            fn_or_reason.__tryke_xfail__ = ""  # type: ignore[attr-defined]
-            return fn_or_reason
-        actual_reason = fn_or_reason or reason or ""
-
-        def decorator(f: _Fn) -> _Fn:
-            f.__tryke_xfail__ = actual_reason  # type: ignore[attr-defined]
-            return f
-
-        return decorator
+        return self._resolve(fn_or_reason, reason)
 
 
 class _TestBuilder:
@@ -200,17 +194,27 @@ class _TestBuilder:
     xfail = _XfailMarker()
 
     @overload
-    def __call__(self, fn: Callable[[], None], /) -> Callable[[], None]: ...
+    def __call__(self, fn: _Fn, /) -> _Fn: ...
+    @overload
+    def __call__(self, name: str, /) -> _Decorator: ...
     @overload
     def __call__(
-        self, name: str, /
-    ) -> Callable[[Callable[[], None]], Callable[[], None]]: ...
-    @overload
-    def __call__(
-        self, *, name: str
-    ) -> Callable[[Callable[[], None]], Callable[[], None]]: ...
+        self,
+        fn: None = None,
+        /,
+        *,
+        name: str | None = None,
+        tags: list[str] | None = None,
+    ) -> _Decorator: ...
 
-    def __call__(self, fn=None, /, *, name=None, tags=None):  # noqa: ARG002
+    def __call__(
+        self,
+        fn=None,
+        /,
+        *,
+        name=None,  # noqa: ARG002 - only used by static analysis/test discovery
+        tags=None,  # noqa: ARG002 - only used by static analysis/test discovery
+    ):
         """Register a function as a test.
 
         Can be used as a bare decorator (`@test`) or called with keyword
@@ -229,7 +233,12 @@ class _TestBuilder:
 
         return decorator
 
-    def skip_if(self, condition: bool, *, reason: str = "") -> _Decorator:  # noqa: FBT001
+    def skip_if(
+        self,
+        condition: bool,  # noqa: FBT001 - this is clear enough with the method name
+        *,
+        reason: str = "",
+    ) -> _Decorator:
         """Skip a test conditionally, evaluated at import time.
 
         Args:
@@ -248,7 +257,7 @@ class _TestBuilder:
 
         def decorator(f: _Fn) -> _Fn:
             if condition:
-                f.__tryke_skip__ = reason  # type: ignore[attr-defined]
+                f.__tryke_skip__ = reason
             return f
 
         return decorator
@@ -310,9 +319,16 @@ class MatchResult:
             raise self._error
 
 
+class SoftFailure(NamedTuple):
+    """A single soft-assertion failure with its call-site frame."""
+
+    error: ExpectationError
+    frame: traceback.FrameSummary | None
+
+
 class SoftContext:
     def __init__(self) -> None:
-        self.failures: list[tuple[ExpectationError, traceback.FrameSummary | None]] = []
+        self.failures: list[SoftFailure] = []
 
 
 _soft_context: SoftContext | None = None
@@ -358,7 +374,7 @@ class Expectation[T]:
 
     def _assert(
         self,
-        passed: bool,  # noqa: FBT001
+        passed: bool,  # noqa: FBT001 - clear enough
         message: str,
         *,
         expected: str,
@@ -373,7 +389,7 @@ class Expectation[T]:
             )
             if _soft_context is not None:
                 frame = _caller_frame()
-                _soft_context.failures.append((err, frame))
+                _soft_context.failures.append(SoftFailure(err, frame))
                 return MatchResult(err)
             raise err
         return MatchResult(None)
@@ -484,7 +500,7 @@ class Expectation[T]:
             f"{self._value!r} to be greater than {n!r}",
             expected=f"> {n!r}",
             received=repr(self._value),
-        )  # type: ignore[operator]
+        )
 
     def to_be_less_than(self, n: T) -> MatchResult:
         """Assert the value is less than `n`.
@@ -502,7 +518,7 @@ class Expectation[T]:
             f"{self._value!r} to be less than {n!r}",
             expected=f"< {n!r}",
             received=repr(self._value),
-        )  # type: ignore[operator]
+        )
 
     def to_be_greater_than_or_equal(self, n: T) -> MatchResult:
         """Assert the value is greater than or equal to `n`.
@@ -516,7 +532,7 @@ class Expectation[T]:
             MatchResult(ok)
         """
         return self._assert(
-            self._value >= n,  # type: ignore[operator]
+            self._value >= n,
             f"{self._value!r} to be greater than or equal to {n!r}",
             expected=f">= {n!r}",
             received=repr(self._value),
@@ -534,13 +550,13 @@ class Expectation[T]:
             MatchResult(ok)
         """
         return self._assert(
-            self._value <= n,  # type: ignore[operator]
+            self._value <= n,
             f"{self._value!r} to be less than or equal to {n!r}",
             expected=f"<= {n!r}",
             received=repr(self._value),
         )
 
-    def to_contain(self, item: T) -> MatchResult:
+    def to_contain(self, item: object) -> MatchResult:
         """Assert the value contains `item`.
 
         Works on lists, strings, and any container supporting `in`.
@@ -560,7 +576,7 @@ class Expectation[T]:
             f"{self._value!r} to contain {item!r}",
             expected=f"contains {item!r}",
             received=repr(self._value),
-        )  # type: ignore[operator]
+        )
 
     def to_have_length(self, n: int) -> MatchResult:
         """Assert the value has length `n`.
@@ -575,7 +591,7 @@ class Expectation[T]:
             >>> expect("hello").to_have_length(5)
             MatchResult(ok)
         """
-        actual = len(self._value)  # type: ignore[arg-type]
+        actual = len(self._value)
         return self._assert(
             actual == n,
             f"{self._value!r} to have length {n}, got {actual}",
@@ -666,7 +682,10 @@ class Expectation[T]:
         )
 
 
-def expect[T](expr: T, name: str | None = None) -> Expectation[T]:  # noqa: ARG001
+def expect[T](
+    expr: T,
+    name: str | None = None,  # noqa: ARG001 - only used by static analysis/test discovery
+) -> Expectation[T]:
     """Create an [`Expectation`][tryke.expect.Expectation] for `expr`.
 
     Args:

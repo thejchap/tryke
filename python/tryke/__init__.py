@@ -14,7 +14,9 @@ from .expect import expect, test
 
 
 @contextmanager
-def describe(name: str) -> Generator[None, None, None]:  # noqa: ARG001
+def describe(
+    name: str,  # noqa: ARG001 - only used by static analysis/test discovery
+) -> Generator[None, None, None]:
     """Group tests visually in output.
 
     The describe name is used as a prefix in test names during reporting.

@@ -1,2 +1,5 @@
 config:
   MD013: false
+  MD033:
+    allowed_elements:
+      - img

@@ -12,285 +12,242 @@ import time
 import traceback
 import unittest
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict
 
-from tryke.expect import ExpectationError, SoftFailure
+from tryke.expect import ExpectationError, SoftContext, SoftFailure
 
-# Use sys.modules to get the actual module — `tryke.expect` the attribute
-# is shadowed by the `expect` function re-exported in tryke/__init__.py.
-_expect_mod = sys.modules["tryke.expect"]
+if TYPE_CHECKING:
+    from collections.abc import Generator
+    from types import ModuleType
+    from typing import TextIO
 
 _TRYKE_PKG = str(Path(__file__).resolve().parent)
 
 
-def main() -> None:
-    modules: dict[str, object] = {}
-    for raw in sys.stdin:
-        line = raw.strip()
-        if not line:
-            continue
-        try:
-            req = json.loads(line)
-        except json.JSONDecodeError as exc:
-            _write(
-                {
-                    "jsonrpc": "2.0",
-                    "id": None,
-                    "error": {"code": -32700, "message": str(exc)},
-                }
-            )
-            continue
-
-        id_ = req.get("id")
-        method = req.get("method", "")
-        params = req.get("params") or {}
-
-        try:
-            result = _dispatch(method, params, modules)
-            _write({"jsonrpc": "2.0", "id": id_, "result": result})
-        except Exception as exc:  # noqa: BLE001
-            _write(
-                {
-                    "jsonrpc": "2.0",
-                    "id": id_,
-                    "error": {
-                        "code": -32603,
-                        "message": str(exc),
-                        "traceback": traceback.format_exc(),
-                    },
-                }
-            )
+# -- Wire-format TypedDicts (mirror crates/tryke_runner/src/protocol.rs) ------
 
 
-def _write(obj: object) -> None:
-    print(json.dumps(obj), flush=True)  # noqa: T201
+class _AssertionWire(TypedDict):
+    expression: str
+    expected: str
+    received: str
+    line: NotRequired[int]
+    file: NotRequired[str]
 
 
-def _dispatch(method: str, params: dict, modules: dict[str, object]) -> object:
-    if method == "ping":
-        return "pong"
-    if method == "run_test":
-        return _run_test(
-            params["module"],
-            params["function"],
-            modules,
-            xfail=params.get("xfail"),
-        )
-    if method == "run_doctest":
-        return _run_doctest(
-            params["module"],
-            params.get("object_path", ""),
-            modules,
-        )
-    if method == "reload":
-        return _reload(params.get("modules", []), modules)
-    msg = f"unknown method: {method}"
-    raise ValueError(msg)
+class _PassedResult(TypedDict):
+    outcome: Literal["passed"]
+    duration_ms: int
+    stdout: str
+    stderr: str
 
 
-def _run_test(  # noqa: C901, PLR0911, PLR0912
-    module_name: str,
-    function_name: str,
-    modules: dict[str, object],
-    *,
-    xfail: str | None = None,
-) -> dict:
-    if module_name not in modules:
-        mod = importlib.import_module(module_name)
-        modules[module_name] = mod
-    else:
-        mod = modules[module_name]
-
-    fn = getattr(mod, function_name)
-
-    # Runtime skip/todo checks (handles skip_if resolved at import time)
-    if hasattr(fn, "__tryke_skip__"):
-        return {
-            "outcome": "skipped",
-            "reason": fn.__tryke_skip__,
-            "duration_ms": 0,
-            "stdout": "",
-            "stderr": "",
-        }
-
-    if hasattr(fn, "__tryke_todo__"):
-        return {
-            "outcome": "todo",
-            "description": fn.__tryke_todo__,
-            "duration_ms": 0,
-            "stdout": "",
-            "stderr": "",
-        }
-
-    # Determine if xfail — from wire param or runtime attribute
-    is_xfail = xfail is not None or hasattr(fn, "__tryke_xfail__")
-    xfail_reason = xfail if xfail is not None else getattr(fn, "__tryke_xfail__", None)
-
-    stdout_buf = io.StringIO()
-    stderr_buf = io.StringIO()
-    start = time.monotonic()
-
-    ctx = _expect_mod.SoftContext()
-    _expect_mod._soft_context = ctx  # noqa: SLF001
-    try:
-        with (
-            contextlib.redirect_stdout(stdout_buf),
-            contextlib.redirect_stderr(stderr_buf),
-        ):
-            if inspect.iscoroutinefunction(fn):
-                asyncio.run(fn())
-            else:
-                fn()
-        if ctx.failures:
-            duration_ms = int((time.monotonic() - start) * 1000)
-            if is_xfail:
-                return {
-                    "outcome": "xfailed",
-                    "reason": xfail_reason or None,
-                    "duration_ms": duration_ms,
-                    "stdout": stdout_buf.getvalue(),
-                    "stderr": stderr_buf.getvalue(),
-                }
-            assertions = _extract_soft_failures(ctx.failures)
-            return {
-                "outcome": "failed",
-                "message": "assertion failed",
-                "traceback": "",
-                "assertions": assertions,
-                "duration_ms": duration_ms,
-                "stdout": stdout_buf.getvalue(),
-                "stderr": stderr_buf.getvalue(),
-            }
-        duration_ms = int((time.monotonic() - start) * 1000)
-        if is_xfail:
-            # Test passed but was expected to fail → xpassed (hard failure)
-            return {
-                "outcome": "xpassed",
-                "duration_ms": duration_ms,
-                "stdout": stdout_buf.getvalue(),
-                "stderr": stderr_buf.getvalue(),
-            }
-        return {
-            "outcome": "passed",
-            "duration_ms": duration_ms,
-            "stdout": stdout_buf.getvalue(),
-            "stderr": stderr_buf.getvalue(),
-        }
-    except unittest.SkipTest as exc:
-        duration_ms = int((time.monotonic() - start) * 1000)
-        return {
-            "outcome": "skipped",
-            "duration_ms": duration_ms,
-            "reason": str(exc),
-            "stdout": stdout_buf.getvalue(),
-            "stderr": stderr_buf.getvalue(),
-        }
-    except ExpectationError as exc:
-        duration_ms = int((time.monotonic() - start) * 1000)
-        if is_xfail:
-            return {
-                "outcome": "xfailed",
-                "reason": xfail_reason or None,
-                "duration_ms": duration_ms,
-                "stdout": stdout_buf.getvalue(),
-                "stderr": stderr_buf.getvalue(),
-            }
-        # .fatal() raised — include it plus any prior soft failures
-        assertions = _extract_soft_failures(ctx.failures)
-        assertions.append(_extract_single(exc))
-        return {
-            "outcome": "failed",
-            "message": str(exc) or "assertion failed",
-            "traceback": traceback.format_exc(),
-            "assertions": assertions,
-            "duration_ms": duration_ms,
-            "stdout": stdout_buf.getvalue(),
-            "stderr": stderr_buf.getvalue(),
-        }
-    except AssertionError as exc:
-        duration_ms = int((time.monotonic() - start) * 1000)
-        if is_xfail:
-            return {
-                "outcome": "xfailed",
-                "reason": xfail_reason or None,
-                "duration_ms": duration_ms,
-                "stdout": stdout_buf.getvalue(),
-                "stderr": stderr_buf.getvalue(),
-            }
-        assertions = _extract_assertions(exc)
-        return {
-            "outcome": "failed",
-            "message": str(exc) or "assertion failed",
-            "traceback": traceback.format_exc(),
-            "assertions": assertions,
-            "duration_ms": duration_ms,
-            "stdout": stdout_buf.getvalue(),
-            "stderr": stderr_buf.getvalue(),
-        }
-    except Exception as exc:  # noqa: BLE001
-        duration_ms = int((time.monotonic() - start) * 1000)
-        if is_xfail:
-            return {
-                "outcome": "xfailed",
-                "reason": xfail_reason or None,
-                "duration_ms": duration_ms,
-                "stdout": stdout_buf.getvalue(),
-                "stderr": stderr_buf.getvalue(),
-            }
-        return {
-            "outcome": "failed",
-            "message": f"{type(exc).__name__}: {exc}",
-            "traceback": traceback.format_exc(),
-            "assertions": [],
-            "duration_ms": duration_ms,
-            "stdout": stdout_buf.getvalue(),
-            "stderr": stderr_buf.getvalue(),
-        }
-    finally:
-        _expect_mod._soft_context = None  # noqa: SLF001
+class _FailedResult(TypedDict):
+    outcome: Literal["failed"]
+    duration_ms: int
+    message: str
+    traceback: str | None
+    assertions: list[_AssertionWire]
+    stdout: str
+    stderr: str
 
 
-def _extract_soft_failures(
-    failures: list[SoftFailure],
-) -> list[dict]:
-    result = []
-    for err, frame in failures:
-        entry: dict = {
-            "expression": "",
-            "expected": err.expected,
-            "received": err.received,
-        }
-        if frame is not None:
-            entry["expression"] = (frame.line or "").strip()
-            entry["line"] = frame.lineno
-            entry["file"] = frame.filename
-        result.append(entry)
-    return result
+class _SkippedResult(TypedDict):
+    outcome: Literal["skipped"]
+    duration_ms: int
+    reason: str | None
+    stdout: str
+    stderr: str
 
 
-def _extract_single(exc: ExpectationError) -> dict:
-    tb = sys.exc_info()[2]
-    frames = traceback.extract_tb(tb)
-    for frame in reversed(frames):
-        if _is_user_frame(frame):
-            return {
-                "expression": (frame.line or "").strip(),
-                "expected": exc.expected,
-                "received": exc.received,
-                "line": frame.lineno,
-                "file": frame.filename,
-            }
+class _XFailedResult(TypedDict):
+    outcome: Literal["xfailed"]
+    duration_ms: int
+    reason: str | None
+    stdout: str
+    stderr: str
+
+
+class _XPassedResult(TypedDict):
+    outcome: Literal["xpassed"]
+    duration_ms: int
+    stdout: str
+    stderr: str
+
+
+class _TodoResult(TypedDict):
+    outcome: Literal["todo"]
+    duration_ms: int
+    description: str | None
+    stdout: str
+    stderr: str
+
+
+type _TestResult = (
+    _PassedResult
+    | _FailedResult
+    | _SkippedResult
+    | _XFailedResult
+    | _XPassedResult
+    | _TodoResult
+)
+
+type _DispatchResult = _TestResult | str | None
+
+
+class _InvalidParamsError(Exception):
+    """Missing or invalid JSON-RPC method parameter."""
+
+
+def _passed(
+    duration_ms: int,
+    stdout: str,
+    stderr: str,
+) -> _PassedResult:
     return {
-        "expression": "",
-        "expected": exc.expected,
-        "received": exc.received,
+        "outcome": "passed",
+        "duration_ms": duration_ms,
+        "stdout": stdout,
+        "stderr": stderr,
+    }
+
+
+def _failed(  # noqa: PLR0913
+    duration_ms: int,
+    message: str,
+    tb: str | None,
+    assertions: list[_AssertionWire],
+    stdout: str,
+    stderr: str,
+) -> _FailedResult:
+    return {
+        "outcome": "failed",
+        "duration_ms": duration_ms,
+        "message": message,
+        "traceback": tb,
+        "assertions": assertions,
+        "stdout": stdout,
+        "stderr": stderr,
+    }
+
+
+def _skipped(
+    duration_ms: int,
+    reason: str | None,
+    stdout: str,
+    stderr: str,
+) -> _SkippedResult:
+    return {
+        "outcome": "skipped",
+        "duration_ms": duration_ms,
+        "reason": reason,
+        "stdout": stdout,
+        "stderr": stderr,
+    }
+
+
+def _xfailed(
+    duration_ms: int,
+    reason: str | None,
+    stdout: str,
+    stderr: str,
+) -> _XFailedResult:
+    return {
+        "outcome": "xfailed",
+        "duration_ms": duration_ms,
+        "reason": reason,
+        "stdout": stdout,
+        "stderr": stderr,
+    }
+
+
+def _xpassed(
+    duration_ms: int,
+    stdout: str,
+    stderr: str,
+) -> _XPassedResult:
+    return {
+        "outcome": "xpassed",
+        "duration_ms": duration_ms,
+        "stdout": stdout,
+        "stderr": stderr,
+    }
+
+
+def _todo(
+    duration_ms: int,
+    description: str | None,
+    stdout: str,
+    stderr: str,
+) -> _TodoResult:
+    return {
+        "outcome": "todo",
+        "duration_ms": duration_ms,
+        "description": description,
+        "stdout": stdout,
+        "stderr": stderr,
     }
 
 
 def _is_user_frame(frame: traceback.FrameSummary) -> bool:
-    return not str(Path(frame.filename).resolve()).startswith(_TRYKE_PKG)
+    return not str(
+        Path(frame.filename).resolve(),
+    ).startswith(_TRYKE_PKG)
 
 
-def _extract_assertions(exc: AssertionError) -> list[dict]:
+def _make_assertion_wire(
+    *,
+    expression: str,
+    expected: str,
+    received: str,
+    frame: traceback.FrameSummary | None = None,
+) -> _AssertionWire:
+    wire: _AssertionWire = {
+        "expression": expression,
+        "expected": expected,
+        "received": received,
+    }
+    if frame is not None:
+        wire["line"] = frame.lineno
+        wire["file"] = frame.filename
+    return wire
+
+
+def _extract_soft_failures(
+    failures: list[SoftFailure],
+) -> list[_AssertionWire]:
+    return [
+        _make_assertion_wire(
+            expression=(frame.line or "").strip() if frame else "",
+            expected=err.expected,
+            received=err.received,
+            frame=frame,
+        )
+        for err, frame in failures
+    ]
+
+
+def _extract_single(exc: ExpectationError) -> _AssertionWire:
+    tb = sys.exc_info()[2]
+    frames = traceback.extract_tb(tb)
+    for frame in reversed(frames):
+        if _is_user_frame(frame):
+            return _make_assertion_wire(
+                expression=(frame.line or "").strip(),
+                expected=exc.expected,
+                received=exc.received,
+                frame=frame,
+            )
+    return _make_assertion_wire(
+        expression="",
+        expected=exc.expected,
+        received=exc.received,
+    )
+
+
+def _extract_assertions(
+    exc: AssertionError,
+) -> list[_AssertionWire]:
     if not isinstance(exc, ExpectationError):
         return []
     tb = sys.exc_info()[2]
@@ -298,80 +255,356 @@ def _extract_assertions(exc: AssertionError) -> list[dict]:
     for frame in reversed(frames):
         if _is_user_frame(frame):
             return [
-                {
-                    "expression": (frame.line or "").strip(),
-                    "expected": exc.expected,
-                    "received": exc.received,
-                    "line": frame.lineno,
-                    "file": frame.filename,
-                }
+                _make_assertion_wire(
+                    expression=(frame.line or "").strip(),
+                    expected=exc.expected,
+                    received=exc.received,
+                    frame=frame,
+                )
             ]
     return []
 
 
-def _run_doctest(
-    module_name: str,
-    object_path: str,
-    modules: dict[str, object],
-) -> dict:
-    if module_name not in modules:
-        mod = importlib.import_module(module_name)
-        modules[module_name] = mod
-    else:
-        mod = modules[module_name]
+class Worker:
+    def __init__(
+        self,
+        input_stream: TextIO,
+        output_stream: TextIO,
+    ) -> None:
+        self._input = input_stream
+        self._output = output_stream
+        self._modules: dict[str, ModuleType] = {}
+        # Use sys.modules — `tryke.expect` the attribute is shadowed
+        # by the `expect` function re-exported in tryke/__init__.py.
+        self._expect_mod = sys.modules["tryke.expect"]
 
-    # Resolve the target object whose docstring we want to test.
-    obj = mod
-    if object_path:
-        for attr in object_path.split("."):
-            obj = getattr(obj, attr)
+    def run(self) -> None:
+        for raw in self._input:
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                req = json.loads(line)
+            except json.JSONDecodeError as exc:
+                self._write(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {
+                            "code": -32700,
+                            "message": str(exc),
+                        },
+                    }
+                )
+                continue
 
-    finder = doctest.DocTestFinder(verbose=False, recurse=False)
-    tests = finder.find(obj, name=object_path or module_name)
+            id_ = req.get("id")
+            method = req.get("method", "")
+            params = req.get("params") or {}
 
-    output_buf = io.StringIO()
-    stdout_buf = io.StringIO()
-    stderr_buf = io.StringIO()
+            try:
+                result = self._dispatch(method, params)
+                self._write(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": id_,
+                        "result": result,
+                    }
+                )
+            except _InvalidParamsError as exc:
+                self._write(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": id_,
+                        "error": {
+                            "code": -32602,
+                            "message": str(exc),
+                        },
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._write(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": id_,
+                        "error": {
+                            "code": -32603,
+                            "message": str(exc),
+                            "traceback": traceback.format_exc(),
+                        },
+                    }
+                )
 
-    runner = doctest.DocTestRunner(
-        verbose=False,
-        optionflags=doctest.ELLIPSIS,
-    )
+    def _write(self, obj: dict[str, object]) -> None:
+        self._output.write(json.dumps(obj) + "\n")
+        self._output.flush()
 
-    start = time.monotonic()
-    with (
-        contextlib.redirect_stdout(stdout_buf),
-        contextlib.redirect_stderr(stderr_buf),
-    ):
-        for dt in tests:
-            runner.run(dt, out=output_buf.write, clear_globs=False)
+    def _require_str(
+        self,
+        params: dict[str, object],
+        key: str,
+        method: str,
+    ) -> str:
+        if key not in params:
+            msg = f"method '{method}' requires parameter '{key}'"
+            raise _InvalidParamsError(msg)
+        value = params[key]
+        if not isinstance(value, str):
+            msg = (
+                f"method '{method}' parameter '{key}'"
+                f" must be a string, got {type(value).__name__}"
+            )
+            raise _InvalidParamsError(msg)
+        return value
 
-    duration_ms = int((time.monotonic() - start) * 1000)
-    summary = runner.summarize(verbose=False)
+    def _dispatch(
+        self,
+        method: str,
+        params: dict[str, object],
+    ) -> _DispatchResult:
+        if method == "ping":
+            return "pong"
+        if method == "run_test":
+            xfail_raw = params.get("xfail")
+            return self._run_test(
+                self._require_str(params, "module", method),
+                self._require_str(params, "function", method),
+                xfail=(str(xfail_raw) if xfail_raw is not None else None),
+            )
+        if method == "run_doctest":
+            return self._run_doctest(
+                self._require_str(params, "module", method),
+                str(params.get("object_path", "")),
+            )
+        if method == "reload":
+            raw = params.get("modules", [])
+            if not isinstance(raw, list):
+                msg = "method 'reload' parameter 'modules' must be a list"
+                raise _InvalidParamsError(msg)
+            return self._reload(raw)
+        msg = f"unknown method: {method}"
+        raise ValueError(msg)
 
-    if summary.failed > 0:
-        return {
-            "outcome": "failed",
-            "message": output_buf.getvalue(),
-            "traceback": None,
-            "assertions": [],
-            "duration_ms": duration_ms,
-            "stdout": stdout_buf.getvalue(),
-            "stderr": stderr_buf.getvalue(),
-        }
-    return {
-        "outcome": "passed",
-        "duration_ms": duration_ms,
-        "stdout": stdout_buf.getvalue(),
-        "stderr": stderr_buf.getvalue(),
-    }
+    def _get_module(self, module_name: str) -> ModuleType:
+        if module_name not in self._modules:
+            mod = importlib.import_module(module_name)
+            self._modules[module_name] = mod
+            return mod
+        return self._modules[module_name]
+
+    @contextlib.contextmanager
+    def _soft_assertion_context(
+        self,
+    ) -> Generator[SoftContext, None, None]:
+        ctx = SoftContext()
+        self._expect_mod._soft_context = ctx  # noqa: SLF001
+        try:
+            yield ctx
+        finally:
+            self._expect_mod._soft_context = None  # noqa: SLF001
+
+    def _run_test(  # noqa: C901, PLR0911, PLR0912
+        self,
+        module_name: str,
+        function_name: str,
+        *,
+        xfail: str | None = None,
+    ) -> _TestResult:
+        mod = self._get_module(module_name)
+        fn = getattr(mod, function_name)
+
+        # Runtime skip/todo (handles skip_if resolved at import time)
+        if hasattr(fn, "__tryke_skip__"):
+            return _skipped(0, fn.__tryke_skip__, "", "")
+
+        if hasattr(fn, "__tryke_todo__"):
+            return _todo(0, fn.__tryke_todo__, "", "")
+
+        is_xfail = xfail is not None or hasattr(fn, "__tryke_xfail__")
+        xfail_reason = (
+            xfail if xfail is not None else getattr(fn, "__tryke_xfail__", None)
+        )
+
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+        start = time.monotonic()
+
+        with self._soft_assertion_context() as ctx:
+            try:
+                with (
+                    contextlib.redirect_stdout(stdout_buf),
+                    contextlib.redirect_stderr(stderr_buf),
+                ):
+                    if inspect.iscoroutinefunction(fn):
+                        asyncio.run(fn())
+                    else:
+                        fn()
+
+                ms = int((time.monotonic() - start) * 1000)
+                out = stdout_buf.getvalue()
+                err = stderr_buf.getvalue()
+
+                if ctx.failures:
+                    if is_xfail:
+                        return _xfailed(
+                            ms,
+                            xfail_reason,
+                            out,
+                            err,
+                        )
+                    return _failed(
+                        ms,
+                        "assertion failed",
+                        "",
+                        _extract_soft_failures(ctx.failures),
+                        out,
+                        err,
+                    )
+                if is_xfail:
+                    return _xpassed(ms, out, err)
+                return _passed(ms, out, err)
+
+            except unittest.SkipTest as exc:
+                ms = int((time.monotonic() - start) * 1000)
+                return _skipped(
+                    ms,
+                    str(exc),
+                    stdout_buf.getvalue(),
+                    stderr_buf.getvalue(),
+                )
+
+            except ExpectationError as exc:
+                ms = int((time.monotonic() - start) * 1000)
+                out = stdout_buf.getvalue()
+                err = stderr_buf.getvalue()
+                if is_xfail:
+                    return _xfailed(
+                        ms,
+                        xfail_reason,
+                        out,
+                        err,
+                    )
+                assertions = _extract_soft_failures(
+                    ctx.failures,
+                )
+                assertions.append(_extract_single(exc))
+                return _failed(
+                    ms,
+                    str(exc) or "assertion failed",
+                    traceback.format_exc(),
+                    assertions,
+                    out,
+                    err,
+                )
+
+            except AssertionError as exc:
+                ms = int((time.monotonic() - start) * 1000)
+                out = stdout_buf.getvalue()
+                err = stderr_buf.getvalue()
+                if is_xfail:
+                    return _xfailed(
+                        ms,
+                        xfail_reason,
+                        out,
+                        err,
+                    )
+                return _failed(
+                    ms,
+                    str(exc) or "assertion failed",
+                    traceback.format_exc(),
+                    _extract_assertions(exc),
+                    out,
+                    err,
+                )
+
+            except Exception as exc:  # noqa: BLE001
+                ms = int((time.monotonic() - start) * 1000)
+                out = stdout_buf.getvalue()
+                err = stderr_buf.getvalue()
+                if is_xfail:
+                    return _xfailed(
+                        ms,
+                        xfail_reason,
+                        out,
+                        err,
+                    )
+                return _failed(
+                    ms,
+                    f"{type(exc).__name__}: {exc}",
+                    traceback.format_exc(),
+                    [],
+                    out,
+                    err,
+                )
+
+    def _run_doctest(
+        self,
+        module_name: str,
+        object_path: str,
+    ) -> _TestResult:
+        mod = self._get_module(module_name)
+
+        # Resolve the target object whose docstring we want to test.
+        obj = mod
+        if object_path:
+            for attr in object_path.split("."):
+                obj = getattr(obj, attr)
+
+        finder = doctest.DocTestFinder(
+            verbose=False,
+            recurse=False,
+        )
+        tests = finder.find(
+            obj,
+            name=object_path or module_name,
+        )
+
+        output_buf = io.StringIO()
+        stdout_buf = io.StringIO()
+        stderr_buf = io.StringIO()
+
+        runner = doctest.DocTestRunner(
+            verbose=False,
+            optionflags=doctest.ELLIPSIS,
+        )
+
+        start = time.monotonic()
+        with (
+            contextlib.redirect_stdout(stdout_buf),
+            contextlib.redirect_stderr(stderr_buf),
+        ):
+            for dt in tests:
+                runner.run(
+                    dt,
+                    out=output_buf.write,
+                    clear_globs=False,
+                )
+
+        ms = int((time.monotonic() - start) * 1000)
+        summary = runner.summarize(verbose=False)
+        out = stdout_buf.getvalue()
+        err = stderr_buf.getvalue()
+
+        if summary.failed > 0:
+            return _failed(
+                ms,
+                output_buf.getvalue(),
+                None,
+                [],
+                out,
+                err,
+            )
+        return _passed(ms, out, err)
+
+    def _reload(self, module_names: list[str]) -> None:
+        for name in module_names:
+            if name in sys.modules:
+                reloaded = importlib.reload(sys.modules[name])
+                self._modules[name] = reloaded
 
 
-def _reload(module_names: list[str], modules: dict[str, object]) -> None:
-    for name in module_names:
-        if name in sys.modules:
-            reloaded = importlib.reload(sys.modules[name])
-            modules[name] = reloaded
+def main() -> None:
+    Worker(sys.stdin, sys.stdout).run()
 
 
 if __name__ == "__main__":

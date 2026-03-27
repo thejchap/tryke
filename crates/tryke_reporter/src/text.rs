@@ -80,7 +80,7 @@ impl<W: io::Write> TextReporter<W> {
     }
 }
 
-fn write_expected_assertions<W: io::Write>(writer: &mut W, result: &TestResult) {
+fn write_expected_assertions<W: io::Write>(writer: &mut W, indent: &str, result: &TestResult) {
     let failed_lines: HashSet<usize> =
         if let TestOutcome::Failed { assertions, .. } = &result.outcome {
             assertions.iter().map(|a| a.line).collect()
@@ -96,9 +96,9 @@ fn write_expected_assertions<W: io::Write>(writer: &mut W, result: &TestResult) 
         );
         let text = a.label.as_deref().unwrap_or(&assertion);
         if failed_lines.contains(&(a.line as usize)) {
-            let _ = writeln!(writer, "  {} {}", "✗".red(), text.dimmed());
+            let _ = writeln!(writer, "{indent}{} {}", "✗".red(), text.dimmed());
         } else {
-            let _ = writeln!(writer, "  {} {}", "✓".green(), text.dimmed());
+            let _ = writeln!(writer, "{indent}{} {}", "✓".green(), text.dimmed());
         }
     }
 }
@@ -187,7 +187,8 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                         format!("[{}]", format_duration(result.duration)).dimmed()
                     );
                     if matches!(self.verbosity, Verbosity::Verbose) {
-                        write_expected_assertions(&mut self.writer, result);
+                        let assert_indent = "  ".repeat(test_groups.len() + 2);
+                        write_expected_assertions(&mut self.writer, &assert_indent, result);
                     }
                 }
             }
@@ -204,7 +205,8 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                     format!("[{}]", format_duration(result.duration)).dimmed()
                 );
                 if matches!(self.verbosity, Verbosity::Verbose) {
-                    write_expected_assertions(&mut self.writer, result);
+                    let assert_indent = "  ".repeat(test_groups.len() + 2);
+                    write_expected_assertions(&mut self.writer, &assert_indent, result);
                 }
                 if !assertions.is_empty() {
                     let test_file = result

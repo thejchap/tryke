@@ -77,6 +77,13 @@ impl Client {
                         serde_json::from_value::<RunSummary>(val["params"]["summary"].clone())
                     {
                         reporter.on_run_complete(&summary);
+                        if summary.failed > 0 || summary.errors > 0 {
+                            return Err(anyhow::anyhow!(
+                                "{} failed, {} error(s)",
+                                summary.failed,
+                                summary.errors
+                            ));
+                        }
                     }
                     break;
                 }

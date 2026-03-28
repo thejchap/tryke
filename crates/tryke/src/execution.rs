@@ -196,7 +196,11 @@ pub async fn report_cycle(
         changed_selection,
     });
 
-    Ok(())
+    if failed > 0 || errors > 0 {
+        Err(anyhow::anyhow!("{failed} failed, {errors} error(s)"))
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -245,20 +249,18 @@ mod tests {
         let root = cwd();
         let excludes = resolved_excludes(&root, &[], &[]);
         let tests = discover_tests(&root, false, None, &excludes).tests;
-        assert!(
-            run_tests(
-                &mut reporter,
-                &root,
-                tests,
-                None,
-                None,
-                DistMode::Test,
-                None,
-                None
-            )
-            .await
-            .is_ok()
-        );
+        // ignore pass/fail result — this test verifies the reporter doesn't panic
+        let _ = run_tests(
+            &mut reporter,
+            &root,
+            tests,
+            None,
+            None,
+            DistMode::Test,
+            None,
+            None,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -267,20 +269,17 @@ mod tests {
         let root = cwd();
         let excludes = resolved_excludes(&root, &[], &[]);
         let tests = discover_tests(&root, false, None, &excludes).tests;
-        assert!(
-            run_tests(
-                &mut reporter,
-                &root,
-                tests,
-                None,
-                None,
-                DistMode::Test,
-                None,
-                None
-            )
-            .await
-            .is_ok()
-        );
+        let _ = run_tests(
+            &mut reporter,
+            &root,
+            tests,
+            None,
+            None,
+            DistMode::Test,
+            None,
+            None,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -289,20 +288,17 @@ mod tests {
         let root = cwd();
         let excludes = resolved_excludes(&root, &[], &[]);
         let tests = discover_tests(&root, false, None, &excludes).tests;
-        assert!(
-            run_tests(
-                &mut reporter,
-                &root,
-                tests,
-                None,
-                None,
-                DistMode::Test,
-                None,
-                None
-            )
-            .await
-            .is_ok()
-        );
+        let _ = run_tests(
+            &mut reporter,
+            &root,
+            tests,
+            None,
+            None,
+            DistMode::Test,
+            None,
+            None,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -311,20 +307,17 @@ mod tests {
         let root = cwd();
         let excludes = resolved_excludes(&root, &[], &[]);
         let tests = discover_tests(&root, false, None, &excludes).tests;
-        assert!(
-            run_tests(
-                &mut reporter,
-                &root,
-                tests,
-                None,
-                None,
-                DistMode::Test,
-                None,
-                None
-            )
-            .await
-            .is_ok()
-        );
+        let _ = run_tests(
+            &mut reporter,
+            &root,
+            tests,
+            None,
+            None,
+            DistMode::Test,
+            None,
+            None,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -456,5 +449,79 @@ def test_failing():
         }
 
         pool.shutdown();
+    }
+
+    #[tokio::test]
+    async fn report_cycle_returns_ok_when_all_pass() {
+        let python_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../python")
+            .canonicalize()
+            .expect("python/ dir must exist");
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        std::fs::write(
+            dir.path().join("test_pass.py"),
+            "from tryke import test, expect\n\n@test\ndef test_ok():\n    expect(1 + 1).to_equal(2)\n",
+        )
+        .expect("write test file");
+        let tests = discover_tests(dir.path(), false, None, &[]).tests;
+        let mut reporter = TextReporter::with_writer(Vec::new());
+        let pool = WorkerPool::with_python_path(
+            1,
+            &test_python_bin(),
+            dir.path(),
+            &[dir.path().to_path_buf(), python_dir],
+        );
+        let result = report_cycle(
+            &mut reporter,
+            tests,
+            &pool,
+            None,
+            DistMode::Test,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "expected Ok when all tests pass, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn report_cycle_returns_err_when_tests_fail() {
+        let python_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../python")
+            .canonicalize()
+            .expect("python/ dir must exist");
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        std::fs::write(
+            dir.path().join("test_fail.py"),
+            "from tryke import test, expect\n\n@test\ndef test_bad():\n    expect(1 + 1).to_equal(3)\n",
+        )
+        .expect("write test file");
+        let tests = discover_tests(dir.path(), false, None, &[]).tests;
+        let mut reporter = TextReporter::with_writer(Vec::new());
+        let pool = WorkerPool::with_python_path(
+            1,
+            &test_python_bin(),
+            dir.path(),
+            &[dir.path().to_path_buf(), python_dir],
+        );
+        let result = report_cycle(
+            &mut reporter,
+            tests,
+            &pool,
+            None,
+            DistMode::Test,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "expected Err when tests fail, got {result:?}"
+        );
     }
 }

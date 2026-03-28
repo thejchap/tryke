@@ -216,7 +216,9 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                         .map(|p| p.to_string_lossy().into_owned());
                     let mut buf = String::new();
                     render_assertions(test_file.as_deref(), assertions, &mut buf);
-                    let _ = write!(self.writer, "{buf}");
+                    for line in buf.lines() {
+                        let _ = writeln!(self.writer, "{group_indent}{line}");
+                    }
                 } else if !message.is_empty() {
                     let verbose = matches!(self.verbosity, Verbosity::Verbose);
                     let mut buf = String::new();

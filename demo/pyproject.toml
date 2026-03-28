@@ -1,2 +1,8 @@
 [project]
 name = "tryke-demo"
+version = "0.1.0"
+
+[dependency-groups]
+dev = [
+    "tryke>=0.0.12",
+]

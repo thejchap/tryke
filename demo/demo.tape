@@ -1,33 +1,31 @@
 Output demo.gif
-
-Require cargo
+Output demo.gif
+Output demo.mp4
+Output demo.webm
 
 Set Shell "bash"
-Set FontSize 22
+Set FontSize 18
 Set Width 1200
 Set Height 700
-Set Theme "Catppuccin Mocha"
+Set Theme "TokyoNight"
 Set WindowBar Colorful
-Set WindowBarSize 40
-Set TypingSpeed 40ms
-Set Padding 20
 
-# Pre-build and set up environment
 Hide
-Type "cd /Users/justinchapman/src/tryke" Enter
-Sleep 200ms
-Type "export PYTHONPATH=$(pwd)/python" Enter
-Sleep 200ms
-Type "cargo build 2>/dev/null" Enter
-Sleep 10s
-Type "clear" Enter
+Type "(sleep 6 && sed -i '' 's|expect(10 / 3|expect(9 / 3|' tests/test_math.py) &"
+Enter
 Sleep 500ms
+Type "clear"
+Enter
 Show
 
-# Show the test file
-Type "cat demo/tests/test_math.py" Sleep 500ms Enter
-Sleep 3s
+Type "uvx tryke watch -v"
+Sleep 500ms
+Enter
+Sleep 10s
 
-# Run tryke
-Type "cargo run -- test --root demo" Sleep 500ms Enter
-Sleep 5s
+Hide
+Ctrl+C
+Sleep 1s
+Type "sed -i '' 's|expect(9 / 3|expect(10 / 3|' tests/test_math.py"
+Enter
+Sleep 1s

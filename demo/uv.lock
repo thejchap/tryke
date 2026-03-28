@@ -1,0 +1,28 @@
+version = 1
+revision = 3
+requires-python = ">=3.13"
+
+[[package]]
+name = "tryke"
+version = "0.0.12"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d0/31/3c680695614548363ff7e08e4730451be57b37ee43467d33f0735e3cd4bf/tryke-0.0.12-py3-none-macosx_11_0_arm64.whl", hash = "sha256:cc7c958747c705012dc5773473de018a47fe2faef2293cbcfaac048a623ab6fc", size = 4180823, upload-time = "2026-03-26T02:29:54.872Z" },
+    { url = "https://files.pythonhosted.org/packages/d1/8a/9ea3c0346731317d124adeb924cbff987348866f3765a6af7f5bfe42d2d5/tryke-0.0.12-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:08940c684ebbaa84842e29c59daba531fa87f456072cb658cdc3033eb127bae5", size = 4526979, upload-time = "2026-03-26T02:29:52.301Z" },
+    { url = "https://files.pythonhosted.org/packages/72/14/ac4a7de437174f62ca760256544fc223a7ca33c246335d6987681f653563/tryke-0.0.12-py3-none-win_amd64.whl", hash = "sha256:a95fa7997a30ff16f5e1edf9c671d5a2295502263f9927d56a14a4f3e74d0c2e", size = 3908926, upload-time = "2026-03-26T02:29:56.469Z" },
+]
+
+[[package]]
+name = "tryke-demo"
+version = "0.1.0"
+source = { virtual = "." }
+
+[package.dev-dependencies]
+dev = [
+    { name = "tryke" },
+]
+
+[package.metadata]
+
+[package.metadata.requires-dev]
+dev = [{ name = "tryke", specifier = ">=0.0.12" }]

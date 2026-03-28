@@ -184,9 +184,21 @@ fn build_pythonpath(extra: &[&Path]) -> String {
 
 fn convert_assertion(wire: AssertionWire, expected_arg_span: Option<(usize, usize)>) -> Assertion {
     let (span_offset, span_length) = compute_subject_span(&wire.expression);
+    // Make absolute paths relative to cwd so diagnostics show short paths.
+    let file = wire.file.map(|f| {
+        std::env::current_dir()
+            .ok()
+            .and_then(|cwd| {
+                Path::new(&f)
+                    .strip_prefix(&cwd)
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned())
+            })
+            .unwrap_or(f)
+    });
     Assertion {
         expression: wire.expression,
-        file: wire.file,
+        file,
         line: wire.line as usize,
         span_offset,
         span_length,

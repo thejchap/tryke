@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -10,7 +10,8 @@ use tryke_types::{DiscoveryError, DiscoveryWarning};
 
 use crate::Reporter;
 use crate::diagnostic::{
-    render_assertions, render_captured_output, render_error_message, render_failure_message,
+    render_assertion, render_assertions, render_captured_output, render_error_message,
+    render_failure_message,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -204,16 +205,56 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                     display,
                     format!("[{}]", format_duration(result.duration)).dimmed()
                 );
-                if matches!(self.verbosity, Verbosity::Verbose) {
+                let test_file = result
+                    .test
+                    .file_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned());
+                if matches!(self.verbosity, Verbosity::Verbose)
+                    && !result.test.expected_assertions.is_empty()
+                {
+                    // Interleave verbose assertion lines with inline diagnostics
                     let assert_indent = "  ".repeat(test_groups.len() + 2);
-                    write_expected_assertions(&mut self.writer, &assert_indent, result);
-                }
-                if !assertions.is_empty() {
-                    let test_file = result
-                        .test
-                        .file_path
-                        .as_ref()
-                        .map(|p| p.to_string_lossy().into_owned());
+                    let failed_by_line: HashMap<usize, &_> =
+                        assertions.iter().map(|a| (a.line, a)).collect();
+                    for ea in &result.test.expected_assertions {
+                        let not_part = if ea.negated { "not_." } else { "" };
+                        let args_str = ea.args.join(", ");
+                        let full = format!(
+                            "expect({}).{}{}({})",
+                            ea.subject, not_part, ea.matcher, args_str
+                        );
+                        let text = ea.label.as_deref().unwrap_or(&full);
+                        if let Some(fa) = failed_by_line.get(&(ea.line as usize)) {
+                            let _ = writeln!(
+                                self.writer,
+                                "{assert_indent}{} {}",
+                                "✗".red(),
+                                text.dimmed()
+                            );
+                            let mut buf = String::new();
+                            render_assertion(test_file.as_deref(), fa, &mut buf);
+                            for line in buf.lines() {
+                                let _ = writeln!(self.writer, "{group_indent}  {line}");
+                            }
+                        } else {
+                            let _ = writeln!(
+                                self.writer,
+                                "{assert_indent}{} {}",
+                                "✓".green(),
+                                text.dimmed()
+                            );
+                        }
+                    }
+                    if !assertions.is_empty() {
+                        let _ = writeln!(
+                            self.writer,
+                            "{group_indent}  {}/{} assertions failed",
+                            assertions.len(),
+                            result.test.expected_assertions.len()
+                        );
+                    }
+                } else if !assertions.is_empty() {
                     let mut buf = String::new();
                     render_assertions(test_file.as_deref(), assertions, &mut buf);
                     for line in buf.lines() {

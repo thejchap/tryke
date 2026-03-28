@@ -66,6 +66,12 @@ impl Diagnostic for AssertionReport {
     }
 }
 
+/// Render the miette diagnostic for a single assertion (no summary line).
+pub fn render_assertion(test_file: Option<&str>, assertion: &Assertion, buf: &mut String) {
+    let handler = GraphicalReportHandler::new_themed(GraphicalTheme::unicode());
+    render_one(&handler, test_file, assertion, buf);
+}
+
 pub fn render_assertions(test_file: Option<&str>, assertions: &[Assertion], buf: &mut String) {
     render_assertions_themed(test_file, assertions, GraphicalTheme::unicode(), true, buf);
 }
@@ -82,6 +88,60 @@ pub fn render_assertions_plain(
         false,
         buf,
     );
+}
+
+fn render_one(
+    handler: &GraphicalReportHandler,
+    test_file: Option<&str>,
+    assertion: &Assertion,
+    buf: &mut String,
+) {
+    // Prefer the assertion's own file, fall back to the test's file
+    let source_name = assertion
+        .file
+        .as_deref()
+        .or(test_file)
+        .unwrap_or("<unknown>");
+    let offset_source = OffsetSource {
+        source: assertion.expression.clone(),
+        line_offset: assertion.line.saturating_sub(1),
+    };
+    let source = NamedSource::new(source_name, offset_source);
+
+    let labels = if let Some((exp_offset, exp_len)) = assertion.expected_arg_span {
+        vec![
+            LabeledSpan::new(
+                Some(format!("received {}", assertion.received)),
+                assertion.span_offset,
+                assertion.span_length,
+            ),
+            LabeledSpan::new(
+                Some(format!("expected {}", assertion.expected)),
+                exp_offset,
+                exp_len,
+            ),
+        ]
+    } else {
+        vec![LabeledSpan::new(
+            Some(format!(
+                "expected {}, received {}",
+                assertion.expected, assertion.received
+            )),
+            assertion.span_offset,
+            assertion.span_length,
+        )]
+    };
+
+    let report = AssertionReport { source, labels };
+    let report = Report::new(report);
+
+    let mut rendered = String::new();
+    if handler
+        .render_report(&mut rendered, report.as_ref())
+        .is_ok()
+    {
+        buf.push_str(&rendered);
+    }
 }
 
 fn render_assertions_themed(
@@ -103,60 +163,17 @@ fn render_assertions_themed(
     } else {
         handler.without_syntax_highlighting()
     };
-    let mut failed = 0;
 
     for assertion in assertions {
-        // Prefer the assertion's own file, fall back to the test's file
-        let source_name = assertion
-            .file
-            .as_deref()
-            .or(test_file)
-            .unwrap_or("<unknown>");
-        let offset_source = OffsetSource {
-            source: assertion.expression.clone(),
-            line_offset: assertion.line.saturating_sub(1),
-        };
-        let source = NamedSource::new(source_name, offset_source);
-
-        let labels = if let Some((exp_offset, exp_len)) = assertion.expected_arg_span {
-            vec![
-                LabeledSpan::new(
-                    Some(format!("received {}", assertion.received)),
-                    assertion.span_offset,
-                    assertion.span_length,
-                ),
-                LabeledSpan::new(
-                    Some(format!("expected {}", assertion.expected)),
-                    exp_offset,
-                    exp_len,
-                ),
-            ]
-        } else {
-            vec![LabeledSpan::new(
-                Some(format!(
-                    "expected {}, received {}",
-                    assertion.expected, assertion.received
-                )),
-                assertion.span_offset,
-                assertion.span_length,
-            )]
-        };
-
-        let report = AssertionReport { source, labels };
-        let report = Report::new(report);
-
-        let mut rendered = String::new();
-        if handler
-            .render_report(&mut rendered, report.as_ref())
-            .is_ok()
-        {
-            buf.push_str(&rendered);
-        }
-
-        failed += 1;
+        render_one(&handler, test_file, assertion, buf);
     }
 
-    let _ = writeln!(buf, "  {failed}/{} assertions failed", assertions.len());
+    let _ = writeln!(
+        buf,
+        "  {}/{} assertions failed",
+        assertions.len(),
+        assertions.len()
+    );
 }
 
 /// Extract the last frame from a Python traceback string.

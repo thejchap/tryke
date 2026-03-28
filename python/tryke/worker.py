@@ -581,7 +581,8 @@ class Worker:
                 )
 
         ms = int((time.monotonic() - start) * 1000)
-        summary = runner.summarize(verbose=False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            summary = runner.summarize(verbose=False)
         out = stdout_buf.getvalue()
         err = stderr_buf.getvalue()
 

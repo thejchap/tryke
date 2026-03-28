@@ -332,6 +332,53 @@ with describe("run_doctest"):
         result = _run_doctest_fn(bad, fn_name="bad")
         expect(result["outcome"]).to_equal("failed")
 
+    @test(name="failing doctest does not leak summarize output to stdout")
+    def test_doctest_fail_no_stdout_leak() -> None:
+        # When the worker's output stream IS sys.stdout (the production
+        # setup), DocTestRunner.summarize() must not write to it —
+        # otherwise the extra text corrupts the JSON-RPC channel.
+        def _impl() -> int:
+            return 1
+
+        globs: dict[str, object] = {}
+        bad = types.FunctionType(
+            _impl.__code__,
+            globs,
+            "bad",
+        )
+        bad.__doc__ = ">>> bad()\n99\n"
+        globs["bad"] = bad
+
+        mod_name = "_tw_dt_leak"
+        mod = types.ModuleType(mod_name)
+        mod.bad = bad
+
+        req: dict[str, object] = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "run_doctest",
+            "params": {"module": mod_name, "object_path": "bad"},
+        }
+        input_buf = io.StringIO(json.dumps(req) + "\n")
+        output_buf = io.StringIO()
+
+        # Simulate production: worker writes to the same stream as
+        # sys.stdout so summarize() pollution would be visible.
+        old_stdout = sys.stdout
+        sys.stdout = output_buf
+        try:
+            worker = Worker(input_buf, output_buf)
+            worker._modules[mod_name] = mod  # noqa: SLF001
+            worker.run()
+        finally:
+            sys.stdout = old_stdout
+
+        raw = output_buf.getvalue()
+        lines = [line for line in raw.splitlines() if line.strip()]
+        expect(len(lines)).to_equal(1)
+        resp = json.loads(lines[0])
+        expect(resp["result"]["outcome"]).to_equal("failed")
+
 
 # -- Assertion helpers --------------------------------------------------------
 

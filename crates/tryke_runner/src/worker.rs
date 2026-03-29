@@ -72,7 +72,25 @@ impl WorkerProcess {
             return Err(anyhow!("worker process closed stdout"));
         }
         trace!("worker rpc <- {}", resp_line.trim());
-        let resp: RpcResponse = serde_json::from_str(resp_line.trim())?;
+        let trimmed = resp_line.trim();
+        let resp: RpcResponse = serde_json::from_str(trimmed).map_err(|e| {
+            if trimmed.is_empty() {
+                anyhow!(
+                    "expected JSON-RPC response from worker but got an empty line \
+                     (a library may have written to stdout during import)"
+                )
+            } else {
+                let preview = if trimmed.len() > 200 {
+                    format!("{}...", &trimmed[..200])
+                } else {
+                    trimmed.to_string()
+                };
+                anyhow!(
+                    "expected JSON-RPC response from worker but got: {preview}\n\
+                     parse error: {e}"
+                )
+            }
+        })?;
         if let Some(err) = resp.error {
             let detail = if let Some(tb) = &err.traceback {
                 format!("rpc error {}: {}\n{tb}", err.code, err.message)

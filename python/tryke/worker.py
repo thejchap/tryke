@@ -387,7 +387,15 @@ class Worker:
 
     def _get_module(self, module_name: str) -> ModuleType:
         if module_name not in self._modules:
-            mod = importlib.import_module(module_name)
+            # redirect stdout during import so that libraries which write to
+            # stdout on failure (e.g. weasyprint) don't corrupt the json-rpc
+            # channel.  captured output is re-emitted on stderr instead.
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                mod = importlib.import_module(module_name)
+            captured = buf.getvalue()
+            if captured:
+                sys.stderr.write(captured)
             self._modules[module_name] = mod
             return mod
         return self._modules[module_name]

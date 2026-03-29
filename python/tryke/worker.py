@@ -418,8 +418,18 @@ class Worker:
         *,
         xfail: str | None = None,
     ) -> _TestResult:
-        mod = self._get_module(module_name)
-        fn = getattr(mod, function_name)
+        try:
+            mod = self._get_module(module_name)
+            fn = getattr(mod, function_name)
+        except Exception as exc:  # noqa: BLE001
+            return _failed(
+                0,
+                f"{type(exc).__name__}: {exc}",
+                traceback.format_exc(),
+                [],
+                "",
+                "",
+            )
 
         # Runtime skip/todo (handles skip_if resolved at import time)
         if hasattr(fn, "__tryke_skip__"):
@@ -550,13 +560,23 @@ class Worker:
         module_name: str,
         object_path: str,
     ) -> _TestResult:
-        mod = self._get_module(module_name)
+        try:
+            mod = self._get_module(module_name)
 
-        # Resolve the target object whose docstring we want to test.
-        obj = mod
-        if object_path:
-            for attr in object_path.split("."):
-                obj = getattr(obj, attr)
+            # Resolve the target object whose docstring we want to test.
+            obj = mod
+            if object_path:
+                for attr in object_path.split("."):
+                    obj = getattr(obj, attr)
+        except Exception as exc:  # noqa: BLE001
+            return _failed(
+                0,
+                f"{type(exc).__name__}: {exc}",
+                traceback.format_exc(),
+                [],
+                "",
+                "",
+            )
 
         finder = doctest.DocTestFinder(
             verbose=False,

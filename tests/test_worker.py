@@ -270,6 +270,45 @@ with describe("run_test outcomes"):
         expect(result["stdout"]).to_contain("hello stdout")
         expect(result["stderr"]).to_contain("hello stderr")
 
+    @test(name="import error returns failed with traceback")
+    def test_import_error() -> None:
+        resp = _send(
+            _rpc(
+                "run_test",
+                module="nonexistent_module_xyz_12345",
+                function="test_fn",
+            ),
+        )
+        # Should be a successful RPC response (result, not error)
+        expect("result" in resp).to_be_truthy()
+        expect("error" in resp).to_be_falsy()
+        result = resp["result"]
+        expect(result["outcome"]).to_equal("failed")
+        expect(result["message"]).to_contain("ModuleNotFoundError")
+        expect(result["traceback"]).to_be_truthy()
+        expect(result["traceback"]).to_contain("ModuleNotFoundError")
+
+    @test(name="attribute error returns failed with traceback")
+    def test_attribute_error() -> None:
+        # Module exists but function does not
+        mod = types.ModuleType("_tw_attr")
+        req = _rpc(
+            "run_test",
+            module="_tw_attr",
+            function="no_such_function",
+        )
+        input_buf = io.StringIO(json.dumps(req) + "\n")
+        output_buf = io.StringIO()
+        worker = Worker(input_buf, output_buf)
+        worker._modules["_tw_attr"] = mod  # noqa: SLF001
+        worker.run()
+        resp = json.loads(output_buf.getvalue().strip())
+        expect("result" in resp).to_be_truthy()
+        result = resp["result"]
+        expect(result["outcome"]).to_equal("failed")
+        expect(result["message"]).to_contain("AttributeError")
+        expect(result["traceback"]).to_be_truthy()
+
 
 # -- run_doctest --------------------------------------------------------------
 
@@ -378,6 +417,42 @@ with describe("run_doctest"):
         expect(len(lines)).to_equal(1)
         resp = json.loads(lines[0])
         expect(resp["result"]["outcome"]).to_equal("failed")
+
+    @test(name="import error in doctest returns failed with traceback")
+    def test_doctest_import_error() -> None:
+        resp = _send(
+            _rpc(
+                "run_doctest",
+                module="nonexistent_module_xyz_12345",
+                object_path="Foo",
+            ),
+        )
+        expect("result" in resp).to_be_truthy()
+        expect("error" in resp).to_be_falsy()
+        result = resp["result"]
+        expect(result["outcome"]).to_equal("failed")
+        expect(result["message"]).to_contain("ModuleNotFoundError")
+        expect(result["traceback"]).to_be_truthy()
+
+    @test(name="attribute error in doctest returns failed with traceback")
+    def test_doctest_attribute_error() -> None:
+        mod = types.ModuleType("_tw_dt_attr")
+        req = _rpc(
+            "run_doctest",
+            module="_tw_dt_attr",
+            object_path="no_such_attr",
+        )
+        input_buf = io.StringIO(json.dumps(req) + "\n")
+        output_buf = io.StringIO()
+        worker = Worker(input_buf, output_buf)
+        worker._modules["_tw_dt_attr"] = mod  # noqa: SLF001
+        worker.run()
+        resp = json.loads(output_buf.getvalue().strip())
+        expect("result" in resp).to_be_truthy()
+        result = resp["result"]
+        expect(result["outcome"]).to_equal("failed")
+        expect(result["message"]).to_contain("AttributeError")
+        expect(result["traceback"]).to_be_truthy()
 
 
 # -- Assertion helpers --------------------------------------------------------

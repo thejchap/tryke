@@ -7,6 +7,7 @@ import importlib
 import inspect
 import io
 import json
+import os
 import sys
 import time
 import traceback
@@ -387,15 +388,22 @@ class Worker:
 
     def _get_module(self, module_name: str) -> ModuleType:
         if module_name not in self._modules:
-            # redirect stdout during import so that libraries which write to
-            # stdout on failure (e.g. weasyprint) don't corrupt the json-rpc
-            # channel.  captured output is re-emitted on stderr instead.
+            # Redirect both sys.stdout (Python-level) and fd 1 (C-level)
+            # during import so that libraries which write to the real stdout
+            # via cffi/ctypes (e.g. weasyprint) don't corrupt the json-rpc
+            # channel.  Captured output is re-emitted on stderr instead.
             buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                mod = importlib.import_module(module_name)
-            captured = buf.getvalue()
-            if captured:
-                sys.stderr.write(captured)
+            saved_fd = os.dup(1)
+            os.dup2(2, 1)  # point fd 1 at stderr
+            try:
+                with contextlib.redirect_stdout(buf):
+                    mod = importlib.import_module(module_name)
+            finally:
+                os.dup2(saved_fd, 1)
+                os.close(saved_fd)
+                captured = buf.getvalue()
+                if captured:
+                    sys.stderr.write(captured)
             self._modules[module_name] = mod
             return mod
         return self._modules[module_name]

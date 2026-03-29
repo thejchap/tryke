@@ -64,33 +64,49 @@ impl WorkerProcess {
         trace!("worker rpc -> {}", line.trim());
         self.stdin.write_all(line.as_bytes()).await?;
         self.stdin.flush().await?;
-        trace!("worker rpc: waiting for response");
-        let mut resp_line = String::new();
-        let n = self.stdout.read_line(&mut resp_line).await?;
-        if n == 0 {
-            trace!("worker rpc: stdout EOF");
-            return Err(anyhow!("worker process closed stdout"));
-        }
-        trace!("worker rpc <- {}", resp_line.trim());
-        let trimmed = resp_line.trim();
-        let resp: RpcResponse = serde_json::from_str(trimmed).map_err(|e| {
-            if trimmed.is_empty() {
-                anyhow!(
-                    "expected JSON-RPC response from worker but got an empty line \
-                     (a library may have written to stdout during import)"
-                )
-            } else {
-                let preview = if trimmed.len() > 200 {
-                    format!("{}...", &trimmed[..200])
+        // Read lines from stdout, skipping non-JSON garbage that a native
+        // library may have written to fd 1 during import (e.g. weasyprint via
+        // cffi).  Collect leaked lines so we can surface them in errors.
+        let mut leaked_stdout: Vec<String> = Vec::new();
+        let resp: RpcResponse = loop {
+            let mut resp_line = String::new();
+            let n = self.stdout.read_line(&mut resp_line).await?;
+            if n == 0 {
+                trace!("worker rpc: stdout EOF");
+                return Err(if leaked_stdout.is_empty() {
+                    anyhow!("worker process closed stdout")
                 } else {
-                    trimmed.to_string()
-                };
-                anyhow!(
-                    "expected JSON-RPC response from worker but got: {preview}\n\
-                     parse error: {e}"
-                )
+                    anyhow!(
+                        "worker process closed stdout after writing non-JSON output \
+                         (a library may have written to stdout during import):\n{}",
+                        leaked_stdout.join("")
+                    )
+                });
             }
-        })?;
+            trace!("worker rpc <- {}", resp_line.trim());
+            let trimmed = resp_line.trim();
+            if !trimmed.is_empty()
+                && let Ok(resp) = serde_json::from_str::<RpcResponse>(trimmed)
+            {
+                if !leaked_stdout.is_empty() {
+                    trace!(
+                        "worker rpc: skipped {} non-JSON line(s) on stdout",
+                        leaked_stdout.len()
+                    );
+                }
+                break resp;
+            }
+            leaked_stdout.push(resp_line);
+            if leaked_stdout.len() >= 50 {
+                return Err(anyhow!(
+                    "expected JSON-RPC response from worker but got {} lines of \
+                     non-JSON output (a library may have written to stdout during \
+                     import):\n{}",
+                    leaked_stdout.len(),
+                    leaked_stdout.join("")
+                ));
+            }
+        };
         if let Some(err) = resp.error {
             let detail = if let Some(tb) = &err.traceback {
                 format!("rpc error {}: {}\n{tb}", err.code, err.message)

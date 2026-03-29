@@ -4,9 +4,11 @@ import asyncio
 import io
 import json
 import sys
+import tempfile
 import traceback
 import types
 import unittest
+from pathlib import Path
 
 from tryke import describe, expect, test
 from tryke.expect import ExpectationError, SoftFailure
@@ -308,6 +310,40 @@ with describe("run_test outcomes"):
         expect(result["outcome"]).to_equal("failed")
         expect(result["message"]).to_contain("AttributeError")
         expect(result["traceback"]).to_be_truthy()
+
+    @test(name="fd 1 writes during import don't corrupt the channel")
+    def test_fd1_import_noise() -> None:
+        # Simulates a library like weasyprint that writes to the real fd 1
+        # (via cffi/ctypes) during import and then raises an error.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mod_path = Path(tmpdir) / "_tw_fd1_fail.py"
+            with open(mod_path, "w") as f:  # noqa: PTH123
+                f.write(
+                    "import os\n"
+                    "os.write(1, b'-----\\n')\n"
+                    "os.write(1, b'Library could not load deps\\n')\n"
+                    "os.write(1, b'-----\\n')\n"
+                    "raise OSError('cannot load library libfoo')\n"
+                )
+
+            sys.path.insert(0, tmpdir)
+            try:
+                resp = _send(
+                    _rpc(
+                        "run_test",
+                        module="_tw_fd1_fail",
+                        function="test_fn",
+                    ),
+                )
+            finally:
+                sys.path.remove(tmpdir)
+                sys.modules.pop("_tw_fd1_fail", None)
+
+        expect("result" in resp).to_be_truthy()
+        result = resp["result"]
+        expect(result["outcome"]).to_equal("failed")
+        expect(result["message"]).to_contain("OSError")
+        expect(result["message"]).to_contain("cannot load library libfoo")
 
 
 # -- run_doctest --------------------------------------------------------------

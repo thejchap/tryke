@@ -1511,8 +1511,8 @@ dependencies = [
  "is-macro",
  "memchr",
  "ruff_python_trivia",
- "ruff_source_file",
- "ruff_text_size",
+ "ruff_source_file 0.0.0 (git+https://github.com/astral-sh/ruff?tag=0.15.4)",
+ "ruff_text_size 0.0.0 (git+https://github.com/astral-sh/ruff?tag=0.15.4)",
  "rustc-hash",
  "thiserror",
 ]
@@ -1529,7 +1529,7 @@ dependencies = [
  "memchr",
  "ruff_python_ast",
  "ruff_python_trivia",
- "ruff_text_size",
+ "ruff_text_size 0.0.0 (git+https://github.com/astral-sh/ruff?tag=0.15.4)",
  "rustc-hash",
  "static_assertions",
  "unicode-ident",
@@ -1543,8 +1543,8 @@ version = "0.0.0"
 source = "git+https://github.com/astral-sh/ruff?tag=0.15.4#f14edd8661e2803254f89265548c7487f47a09f6"
 dependencies = [
  "itertools",
- "ruff_source_file",
- "ruff_text_size",
+ "ruff_source_file 0.0.0 (git+https://github.com/astral-sh/ruff?tag=0.15.4)",
+ "ruff_text_size 0.0.0 (git+https://github.com/astral-sh/ruff?tag=0.15.4)",
  "unicode-ident",
 ]
 
@@ -1554,7 +1554,16 @@ version = "0.0.0"
 source = "git+https://github.com/astral-sh/ruff?tag=0.15.4#f14edd8661e2803254f89265548c7487f47a09f6"
 dependencies = [
  "memchr",
- "ruff_text_size",
+ "ruff_text_size 0.0.0 (git+https://github.com/astral-sh/ruff?tag=0.15.4)",
+]
+
+[[package]]
+name = "ruff_source_file"
+version = "0.0.0"
+source = "git+https://github.com/astral-sh/ruff?tag=0.15.8#c2a8815842f9dc5d24ec19385eae0f1a7188b0d9"
+dependencies = [
+ "memchr",
+ "ruff_text_size 0.0.0 (git+https://github.com/astral-sh/ruff?tag=0.15.8)",
 ]
 
 [[package]]
@@ -1564,6 +1573,11 @@ source = "git+https://github.com/astral-sh/ruff?tag=0.15.4#f14edd8661e2803254f89
 dependencies = [
  "get-size2",
 ]
+
+[[package]]
+name = "ruff_text_size"
+version = "0.0.0"
+source = "git+https://github.com/astral-sh/ruff?tag=0.15.8#c2a8815842f9dc5d24ec19385eae0f1a7188b0d9"
 
 [[package]]
 name = "rustc-demangle"
@@ -2059,7 +2073,7 @@ dependencies = [
 
 [[package]]
 name = "tryke"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2084,7 +2098,7 @@ dependencies = [
 
 [[package]]
 name = "tryke_config"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "serde",
  "tempfile",
@@ -2093,22 +2107,22 @@ dependencies = [
 
 [[package]]
 name = "tryke_dev"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "tryke",
 ]
 
 [[package]]
 name = "tryke_discovery"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "ignore",
  "log",
  "rayon",
  "ruff_python_ast",
  "ruff_python_parser",
- "ruff_source_file",
- "ruff_text_size",
+ "ruff_source_file 0.0.0 (git+https://github.com/astral-sh/ruff?tag=0.15.8)",
+ "ruff_text_size 0.0.0 (git+https://github.com/astral-sh/ruff?tag=0.15.4)",
  "salsa",
  "serde",
  "tempfile",
@@ -2118,7 +2132,7 @@ dependencies = [
 
 [[package]]
 name = "tryke_reporter"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "miette",
  "owo-colors",
@@ -2129,7 +2143,7 @@ dependencies = [
 
 [[package]]
 name = "tryke_runner"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -2146,7 +2160,7 @@ dependencies = [
 
 [[package]]
 name = "tryke_server"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2168,7 +2182,7 @@ dependencies = [
 
 [[package]]
 name = "tryke_types"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "serde",
  "serde_json",

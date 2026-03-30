@@ -26,7 +26,14 @@ pub struct WorkerPool {
 impl WorkerPool {
     #[must_use]
     pub fn new(size: usize, python_bin: &str, root: &Path) -> Self {
-        Self::with_python_path(size, python_bin, root, &[root.to_path_buf()])
+        let mut python_path = vec![root.to_path_buf()];
+        // pyproject.toml declares python-source = "python" — add it to
+        // PYTHONPATH so the tryke package is importable even without a venv.
+        let src_dir = root.join("python");
+        if src_dir.is_dir() {
+            python_path.push(src_dir);
+        }
+        Self::with_python_path(size, python_bin, root, &python_path)
     }
 
     #[must_use]

@@ -11,6 +11,15 @@ from collections.abc import Generator
 from contextlib import contextmanager
 
 from .expect import expect, test
+from .hooks import (
+    Depends,
+    after_all,
+    after_each,
+    before_all,
+    before_each,
+    wrap_all,
+    wrap_each,
+)
 
 
 @contextmanager
@@ -41,4 +50,15 @@ def describe(
     yield
 
 
-__all__ = ["describe", "expect", "test"]
+__all__ = [
+    "Depends",
+    "after_all",
+    "after_each",
+    "before_all",
+    "before_each",
+    "describe",
+    "expect",
+    "test",
+    "wrap_all",
+    "wrap_each",
+]

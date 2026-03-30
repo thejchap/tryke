@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use indexmap::IndexMap;
-use tryke_types::TestItem;
+use tryke_types::{HookItem, TestItem};
 
 /// How tests are partitioned into work units for distribution across workers.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -23,16 +23,34 @@ pub enum DistMode {
 #[derive(Debug)]
 pub struct WorkUnit {
     pub tests: Vec<TestItem>,
+    /// Hooks relevant to the tests in this unit, sent once before execution.
+    pub hooks: Vec<HookItem>,
 }
 
 /// Partition a flat list of tests into work units according to `mode`,
 /// then sort largest-first for optimal load balancing.
+///
+/// When `hooks` are provided, each unit receives the hooks relevant to
+/// its tests (matched by file path).
 #[must_use]
 pub fn partition(tests: Vec<TestItem>, mode: DistMode) -> Vec<WorkUnit> {
+    partition_with_hooks(tests, &[], mode)
+}
+
+/// Like [`partition`], but attaches discovered hooks to each work unit.
+#[must_use]
+pub fn partition_with_hooks(
+    tests: Vec<TestItem>,
+    hooks: &[HookItem],
+    mode: DistMode,
+) -> Vec<WorkUnit> {
     let mut units: Vec<WorkUnit> = match mode {
         DistMode::Test => tests
             .into_iter()
-            .map(|t| WorkUnit { tests: vec![t] })
+            .map(|t| WorkUnit {
+                tests: vec![t],
+                hooks: vec![],
+            })
             .collect(),
         DistMode::File => {
             let mut by_file: IndexMap<Option<PathBuf>, Vec<TestItem>> = IndexMap::new();
@@ -41,7 +59,10 @@ pub fn partition(tests: Vec<TestItem>, mode: DistMode) -> Vec<WorkUnit> {
             }
             by_file
                 .into_values()
-                .map(|tests| WorkUnit { tests })
+                .map(|tests| WorkUnit {
+                    tests,
+                    hooks: vec![],
+                })
                 .collect()
         }
         DistMode::Group => {
@@ -56,10 +77,22 @@ pub fn partition(tests: Vec<TestItem>, mode: DistMode) -> Vec<WorkUnit> {
             }
             by_group
                 .into_values()
-                .map(|tests| WorkUnit { tests })
+                .map(|tests| WorkUnit {
+                    tests,
+                    hooks: vec![],
+                })
                 .collect()
         }
     };
+    // Attach hooks to each work unit.
+    // For now, attach all provided hooks to every unit. The worker
+    // filters by scope at runtime. This is refined in Step 6.
+    if !hooks.is_empty() {
+        for unit in &mut units {
+            unit.hooks = hooks.to_vec();
+        }
+    }
+
     // Largest units first: longest-pole-first scheduling minimises tail latency.
     units.sort_by(|a, b| b.tests.len().cmp(&a.tests.len()));
     units

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use tryke_types::TestItem;
+use tryke_types::ParsedFile;
 
 #[salsa::db]
 pub trait Db: salsa::Database {}
@@ -16,7 +16,7 @@ pub struct SourceFile {
 }
 
 #[salsa::tracked]
-pub fn parse_tests(db: &dyn Db, file: SourceFile) -> Vec<TestItem> {
+pub fn parse_tests(db: &dyn Db, file: SourceFile) -> ParsedFile {
     crate::parse_tests_from_source(file.root(db), file.path(db), file.text(db))
 }
 

@@ -1,0 +1,340 @@
+"""Hook decorators and Depends() for test setup/teardown.
+
+Provides six lifecycle hooks that can be scoped to describe blocks
+or module level, and a FastAPI-style ``Depends()`` for typed,
+explicit dependency injection between hooks and tests.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import inspect
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, overload
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator, Callable, Generator
+    from typing import Any, TypeVar
+
+    T = TypeVar("T")
+
+# ---------------------------------------------------------------------------
+# Depends
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Depends:
+    """Sentinel returned by :func:`Depends` at runtime.
+
+    The worker inspects function signatures for ``_Depends`` defaults
+    and resolves them before calling the function.
+    """
+
+    dependency: Callable[..., Any]
+
+
+if TYPE_CHECKING:
+
+    @overload
+    def Depends(dep: Callable[..., Generator[T, None, None]], /) -> T: ...  # noqa: UP047
+    @overload
+    def Depends(dep: Callable[..., AsyncGenerator[T, None]], /) -> T: ...  # noqa: UP047
+    @overload
+    def Depends(dep: Callable[..., T], /) -> T: ...  # noqa: UP047
+
+
+def Depends(dep: Callable[..., Any], /) -> Any:  # noqa: N802 - matches FastAPI convention
+    """Declare a dependency on another hook or fixture.
+
+    Used in function signatures to request a resolved value::
+
+        @before_all
+        def db() -> Connection:
+            return create_connection()
+
+        @test
+        def my_test(conn: Connection = Depends(db)):
+            ...
+
+    The type checker sees ``Depends(db)`` as returning ``Connection``.
+    At runtime it returns a :class:`_Depends` sentinel that the worker
+    resolves before calling the function.
+    """
+    return _Depends(dep)
+
+
+# ---------------------------------------------------------------------------
+# Hook decorators
+# ---------------------------------------------------------------------------
+
+type _Fn = Callable[..., Any]
+
+
+def _make_hook_decorator(attr: str) -> Callable[..., Any]:
+    """Build a decorator that stamps *attr* on the decorated function.
+
+    Supports both bare (``@before_each``) and call (``@before_each()``)
+    forms.
+    """
+
+    def decorator(fn: _Fn | None = None, /) -> _Fn | Callable[[_Fn], _Fn]:
+        if fn is not None:
+            setattr(fn, attr, True)
+            return fn
+
+        # Call form: @hook()
+        def inner(f: _Fn) -> _Fn:
+            setattr(f, attr, True)
+            return f
+
+        return inner
+
+    return decorator
+
+
+before_each = _make_hook_decorator("__tryke_before_each__")
+before_all = _make_hook_decorator("__tryke_before_all__")
+after_each = _make_hook_decorator("__tryke_after_each__")
+after_all = _make_hook_decorator("__tryke_after_all__")
+wrap_each = _make_hook_decorator("__tryke_wrap_each__")
+wrap_all = _make_hook_decorator("__tryke_wrap_all__")
+
+# Dunder → hook category mapping.
+_HOOK_ATTRS = {
+    "__tryke_before_each__": "before_each",
+    "__tryke_before_all__": "before_all",
+    "__tryke_after_each__": "after_each",
+    "__tryke_after_all__": "after_all",
+    "__tryke_wrap_each__": "wrap_each",
+    "__tryke_wrap_all__": "wrap_all",
+}
+
+_EACH_CATEGORIES = {"before_each", "after_each", "wrap_each"}
+
+
+def _hook_category(fn: Callable[..., Any]) -> str | None:
+    """Return the hook category for a stamped function, or None."""
+    for attr, category in _HOOK_ATTRS.items():
+        if hasattr(fn, attr):
+            return category
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
+
+class CyclicDependencyError(Exception):
+    """Raised when Depends() forms a cycle."""
+
+
+# ---------------------------------------------------------------------------
+# DependencyResolver
+# ---------------------------------------------------------------------------
+
+
+class DependencyResolver:
+    """Resolve ``Depends()`` in function signatures, cache results by scope."""
+
+    def __init__(self) -> None:
+        self._cache: dict[Callable[..., Any], Any] = {}
+        self._active_generators: list[
+            tuple[Callable[..., Any], Generator[Any, None, None]]
+        ] = []
+        self._resolving: set[int] = set()  # ids of functions currently being resolved
+
+    def resolve(self, fn: Callable[..., Any]) -> dict[str, Any]:
+        """Inspect *fn*'s signature and resolve all ``Depends()`` defaults.
+
+        Returns a dict of ``{param_name: resolved_value}`` suitable for
+        passing as keyword arguments.
+        """
+        kwargs: dict[str, Any] = {}
+        sig = inspect.signature(fn)
+        for name, param in sig.parameters.items():
+            if isinstance(param.default, _Depends):
+                dep_fn = param.default.dependency
+                kwargs[name] = self.resolve_hook(dep_fn)
+        return kwargs
+
+    def resolve_hook(self, fn: Callable[..., Any]) -> Any:  # noqa: ANN401
+        """Resolve a single hook function, returning its cached value."""
+        if fn in self._cache:
+            return self._cache[fn]
+
+        fn_id = id(fn)
+        if fn_id in self._resolving:
+            msg = f"Cyclic dependency detected involving {fn.__name__}"
+            raise CyclicDependencyError(msg)
+
+        self._resolving.add(fn_id)
+        try:
+            # Recursively resolve this hook's own dependencies
+            kwargs = self.resolve(fn)
+
+            if inspect.isgeneratorfunction(fn):
+                gen = fn(**kwargs)
+                value = next(gen)
+                self._active_generators.append((fn, gen))
+            elif inspect.isasyncgenfunction(fn):
+
+                async def _run_async_gen() -> object:
+                    agen = fn(**kwargs)
+                    return await agen.__anext__()
+
+                value = asyncio.run(_run_async_gen())
+            elif inspect.iscoroutinefunction(fn):
+                value = asyncio.run(fn(**kwargs))
+            else:
+                value = fn(**kwargs)
+
+            self._cache[fn] = value
+            return value
+        finally:
+            self._resolving.discard(fn_id)
+
+    def clear_each_cache(self) -> None:
+        """Clear cached values for per-test hooks (``_each`` category)."""
+        to_remove = [fn for fn in self._cache if _hook_category(fn) in _EACH_CATEGORIES]
+        for fn in to_remove:
+            del self._cache[fn]
+
+    def teardown_generators(self) -> None:
+        """Run the post-yield portion of all active generators (LIFO)."""
+        while self._active_generators:
+            _fn, gen = self._active_generators.pop()
+            with contextlib.suppress(StopIteration):
+                next(gen)
+
+    def clear_all(self) -> None:
+        """Reset all state."""
+        self.teardown_generators()
+        self._cache.clear()
+        self._resolving.clear()
+
+
+# ---------------------------------------------------------------------------
+# HookExecutor
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _RegisteredHook:
+    """A hook function with its metadata."""
+
+    fn: Callable[..., Any]
+    category: str
+    groups: list[str]
+    line_number: int = 0
+
+
+class HookExecutor:
+    """Orchestrate hook execution around tests.
+
+    Hooks are registered with their scope (groups) and executed in the
+    correct order: outer-to-inner for setup, inner-to-outer for teardown.
+    """
+
+    def __init__(self) -> None:
+        self._hooks: list[_RegisteredHook] = []
+        self._resolver = DependencyResolver()
+        self._all_initialized: set[tuple[str, ...]] = set()
+
+    def register_hook(
+        self,
+        fn: Callable[..., Any],
+        *,
+        groups: list[str],
+        line_number: int = 0,
+    ) -> None:
+        """Register a hook function with its scope."""
+        category = _hook_category(fn)
+        if category is None:
+            msg = f"{fn.__name__} is not a decorated hook"
+            raise ValueError(msg)
+        self._hooks.append(
+            _RegisteredHook(
+                fn=fn, category=category, groups=groups, line_number=line_number
+            )
+        )
+
+    def run_test(
+        self,
+        test_fn: Callable[..., Any],
+        *,
+        groups: list[str],
+    ) -> None:
+        """Execute hooks in correct order around *test_fn*."""
+        # Build the scope chain: [], ["a"], ["a", "b"], ...
+        scopes: list[tuple[str, ...]] = [
+            (),
+            *[tuple(groups[: i + 1]) for i in range(len(groups))],
+        ]
+
+        # Collect hooks per scope
+        setup_sequence: list[_RegisteredHook] = []
+        teardown_sequence: list[_RegisteredHook] = []
+
+        for scope in scopes:
+            scope_hooks = [h for h in self._hooks if tuple(h.groups) == scope]
+
+            # Before_all: run once per scope
+            for h in sorted(
+                (h for h in scope_hooks if h.category == "before_all"),
+                key=lambda h: h.line_number,
+            ):
+                if (h.category, *h.groups) not in self._all_initialized:  # type: ignore[arg-type]
+                    self._resolver.resolve_hook(h.fn)
+                    self._all_initialized.add((h.category, *h.groups))  # type: ignore[arg-type]
+
+            # Before_each: setup order (definition order)
+            setup_sequence.extend(
+                sorted(
+                    (h for h in scope_hooks if h.category == "before_each"),
+                    key=lambda h: h.line_number,
+                )
+            )
+
+            # Wrap_each: setup half
+            setup_sequence.extend(
+                sorted(
+                    (h for h in scope_hooks if h.category == "wrap_each"),
+                    key=lambda h: h.line_number,
+                )
+            )
+
+            # After_each: collect in definition order; final reversal handles
+            # both inner-to-outer and within-scope reverse ordering.
+            teardown_sequence.extend(
+                sorted(
+                    (h for h in scope_hooks if h.category == "after_each"),
+                    key=lambda h: h.line_number,
+                )
+            )
+
+        # Run setup
+        for h in setup_sequence:
+            self._resolver.resolve_hook(h.fn)
+
+        # Run test with Depends injection
+        test_kwargs = self._resolver.resolve(test_fn)
+        if inspect.iscoroutinefunction(test_fn):
+            asyncio.run(test_fn(**test_kwargs))
+        else:
+            test_fn(**test_kwargs)
+
+        # Run teardown (inner-to-outer, reverse order)
+        teardown_sequence.reverse()
+        for h in teardown_sequence:
+            kwargs = self._resolver.resolve(h.fn)
+            if inspect.iscoroutinefunction(h.fn):
+                asyncio.run(h.fn(**kwargs))
+            else:
+                h.fn(**kwargs)
+
+        # Teardown generators (wrap hooks), then clear per-test caches
+        self._resolver.teardown_generators()
+        self._resolver.clear_each_cache()

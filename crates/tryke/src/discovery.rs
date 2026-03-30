@@ -3,12 +3,14 @@ use std::path::Path;
 use log::{debug, warn};
 use tryke_config::load_effective_config;
 use tryke_discovery::Discoverer;
-use tryke_types::{DiscoveryWarning, DiscoveryWarningKind};
+use tryke_types::{DiscoveryWarning, DiscoveryWarningKind, HookItem};
 
 use crate::git::resolve_changed_files;
 
 pub struct DiscoverySelection {
     pub tests: Vec<tryke_types::TestItem>,
+    /// Lifecycle hooks discovered alongside tests.
+    pub hooks: Vec<HookItem>,
     pub changed_files: Option<usize>,
     /// In changed-first mode, how many tests at the front are "changed" tests.
     pub changed_prefix_len: Option<usize>,
@@ -63,6 +65,7 @@ pub fn discover_tests(
     let mut discoverer = Discoverer::new_with_excludes(root, excludes);
     discoverer.rediscover();
     let warnings = dynamic_import_warnings(&discoverer);
+    let hooks = discoverer.hooks();
 
     if changed {
         match resolve_changed_files(root, base_branch) {
@@ -70,6 +73,7 @@ pub fn discover_tests(
                 debug!("--changed: {} git-changed files", changed_files.len());
                 DiscoverySelection {
                     tests: discoverer.tests_for_changed(&changed_files),
+                    hooks,
                     changed_files: Some(changed_files.len()),
                     changed_prefix_len: None,
                     warnings,
@@ -79,6 +83,7 @@ pub fn discover_tests(
                 warn!("--changed: no changed files found via git, running all tests");
                 DiscoverySelection {
                     tests: discoverer.tests(),
+                    hooks,
                     changed_files: None,
                     changed_prefix_len: None,
                     warnings,
@@ -88,6 +93,7 @@ pub fn discover_tests(
                 warn!("--changed: git unavailable or failed, running all tests");
                 DiscoverySelection {
                     tests: discoverer.tests(),
+                    hooks,
                     changed_files: None,
                     changed_prefix_len: None,
                     warnings,
@@ -97,6 +103,7 @@ pub fn discover_tests(
     } else {
         DiscoverySelection {
             tests: discoverer.tests(),
+            hooks,
             changed_files: None,
             changed_prefix_len: None,
             warnings,
@@ -113,6 +120,7 @@ pub fn discover_tests_changed_first(
     let mut discoverer = Discoverer::new_with_excludes(root, excludes);
     discoverer.rediscover();
     let warnings = dynamic_import_warnings(&discoverer);
+    let hooks = discoverer.hooks();
     let changed_files = resolve_changed_files(root, base_branch);
     let all_tests = discoverer.tests();
     match changed_files {
@@ -128,6 +136,7 @@ pub fn discover_tests_changed_first(
             tests.extend(rest);
             DiscoverySelection {
                 tests,
+                hooks,
                 changed_files: Some(cf.len()),
                 changed_prefix_len: Some(changed_prefix_len),
                 warnings,
@@ -137,6 +146,7 @@ pub fn discover_tests_changed_first(
             warn!("--changed-first: no changed files found, running all tests in default order");
             DiscoverySelection {
                 tests: all_tests,
+                hooks,
                 changed_files: None,
                 changed_prefix_len: None,
                 warnings,
@@ -146,6 +156,7 @@ pub fn discover_tests_changed_first(
             warn!("--changed-first: git unavailable, running all tests in default order");
             DiscoverySelection {
                 tests: all_tests,
+                hooks,
                 changed_files: None,
                 changed_prefix_len: None,
                 warnings,

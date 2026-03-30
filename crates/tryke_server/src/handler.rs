@@ -134,7 +134,10 @@ async fn execute_run(
     pool: &WorkerPool,
 ) -> RunSummary {
     let discovery_start = Instant::now();
-    let all_tests = disc.lock().await.tests();
+    let guard = disc.lock().await;
+    let all_tests = guard.tests();
+    let hooks = guard.hooks();
+    drop(guard);
     let mut tests = match &rp.tests {
         Some(ids) => all_tests
             .into_iter()
@@ -167,7 +170,7 @@ async fn execute_run(
 
     let test_start = Instant::now();
     // Server uses test-level distribution by default.
-    let units = partition_with_hooks(tests, &[], DistMode::Test);
+    let units = partition_with_hooks(tests, &hooks, DistMode::Test);
     let mut stream = pool.run(units);
     let mut passed = 0usize;
     let mut failed = 0usize;

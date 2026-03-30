@@ -420,6 +420,150 @@ with describe("error handling"):
         expect(log).to_contain("teardown")
 
 
+with describe("generator lifecycle"):
+
+    @test(name="multi-yield generator raises RuntimeError")
+    def test_multi_yield_raises() -> None:
+        @wrap_each
+        def bad_hook() -> Generator[str, None, None]:
+            yield "first"
+            yield "second"
+
+        resolver = DependencyResolver()
+        resolver.resolve_hook(bad_hook)
+        expect(lambda: resolver.teardown_generators()).to_raise(  # noqa: PLW0108
+            RuntimeError, match="yielded more than once"
+        )
+
+    @test(name="gen.close() is called even on teardown error")
+    def test_gen_close_called() -> None:
+        close_called = False
+
+        @wrap_each
+        def tracked_hook() -> Generator[str, None, None]:
+            nonlocal close_called
+            try:
+                yield "value"
+            finally:
+                close_called = True
+
+        resolver = DependencyResolver()
+        resolver.resolve_hook(tracked_hook)
+        resolver.teardown_generators()
+        expect(close_called).to_be_truthy()
+
+
+with describe("async generator lifecycle"):
+
+    @test(name="async generator teardown runs post-yield code")
+    def test_async_gen_teardown() -> None:
+        teardown_ran = False
+
+        @wrap_each
+        async def async_resource():  # noqa: ANN202
+            nonlocal teardown_ran
+            yield "async_val"
+            teardown_ran = True
+
+        resolver = DependencyResolver()
+        value = resolver.resolve_hook(async_resource)
+        expect(value).to_equal("async_val")
+        expect(teardown_ran).to_be_falsy()
+
+        resolver.teardown_generators()
+        expect(teardown_ran).to_be_truthy()
+
+
+with describe("after_all and wrap_all execution"):
+
+    @test(name="after_all runs on finalize")
+    def test_after_all_runs() -> None:
+        log: list[str] = []
+
+        @after_all
+        def cleanup() -> None:
+            log.append("after_all")
+
+        def my_test() -> None:
+            log.append("test")
+
+        executor = HookExecutor()
+        executor.register_hook(cleanup, groups=[])
+        executor.run_test(my_test, groups=[])
+        expect(log).to_equal(["test"])
+
+        executor.finalize()
+        expect(log).to_equal(["test", "after_all"])
+
+    @test(name="wrap_all setup runs on first test, teardown on finalize")
+    def test_wrap_all_lifecycle() -> None:
+        log: list[str] = []
+
+        @wrap_all
+        def wrapper() -> Generator[str, None, None]:
+            log.append("wrap_setup")
+            yield "ctx"
+            log.append("wrap_teardown")
+
+        def test_a() -> None:
+            log.append("test_a")
+
+        def test_b() -> None:
+            log.append("test_b")
+
+        executor = HookExecutor()
+        executor.register_hook(wrapper, groups=[])
+        executor.run_test(test_a, groups=[])
+        executor.run_test(test_b, groups=[])
+        expect(log).to_equal(["wrap_setup", "test_a", "test_b"])
+
+        executor.finalize()
+        expect(log).to_equal(["wrap_setup", "test_a", "test_b", "wrap_teardown"])
+
+    @test(name="after_all runs in reverse order on finalize")
+    def test_after_all_reverse_order() -> None:
+        log: list[str] = []
+
+        @after_all
+        def first_cleanup() -> None:
+            log.append("first")
+
+        @after_all
+        def second_cleanup() -> None:
+            log.append("second")
+
+        def my_test() -> None:
+            log.append("test")
+
+        executor = HookExecutor()
+        executor.register_hook(first_cleanup, groups=[], line_number=1)
+        executor.register_hook(second_cleanup, groups=[], line_number=2)
+        executor.run_test(my_test, groups=[])
+        executor.finalize()
+        # After_all should run in reverse definition order
+        expect(log).to_equal(["test", "second", "first"])
+
+    @test(name="finalize runs after_all even if test failed")
+    def test_finalize_runs_after_failure() -> None:
+        log: list[str] = []
+
+        @after_all
+        def cleanup() -> None:
+            log.append("after_all")
+
+        def failing_test() -> None:
+            msg = "boom"
+            raise RuntimeError(msg)
+
+        executor = HookExecutor()
+        executor.register_hook(cleanup, groups=[])
+        expect(lambda: executor.run_test(failing_test, groups=[])).to_raise(
+            RuntimeError
+        )
+        executor.finalize()
+        expect(log).to_contain("after_all")
+
+
 with describe("Depends typing"):
 
     @test(name="assert_type validates Depends return type for plain function")

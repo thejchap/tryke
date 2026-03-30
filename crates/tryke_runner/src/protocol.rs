@@ -53,6 +53,11 @@ pub struct RegisterHooksParams {
 }
 
 #[derive(Debug, Serialize)]
+pub struct FinalizeHooksParams {
+    pub module: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct RunDoctestParams {
     pub module: String,
     pub object_path: String,

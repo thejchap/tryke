@@ -56,7 +56,7 @@ pub async fn run_watch(
     let tests = test_filter.apply(discoverer.rediscover());
     let disc_dur = Some(disc_start.elapsed());
     emit_dynamic_import_warnings(reporter, &discoverer);
-    report_cycle(reporter, tests, &pool, maxfail, dist, disc_dur, None).await?;
+    report_cycle(reporter, tests, &[], &pool, maxfail, dist, disc_dur, None).await?;
 
     let (tx, rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
     let _debouncer = tryke_server::watcher::spawn_watcher(root, excludes, tx)?;
@@ -72,7 +72,7 @@ pub async fn run_watch(
         let tests = test_filter.apply(discoverer.tests_for_changed(&paths));
         let disc_dur = Some(disc_start.elapsed());
         emit_dynamic_import_warnings(reporter, &discoverer);
-        report_cycle(reporter, tests, &pool, maxfail, dist, disc_dur, None).await?;
+        report_cycle(reporter, tests, &[], &pool, maxfail, dist, disc_dur, None).await?;
     }
 
     pool.shutdown();

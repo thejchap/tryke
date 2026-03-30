@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict
 
 from tryke.expect import ExpectationError, SoftContext, SoftFailure
+from tryke.hooks import HookExecutor, _hook_category
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -275,6 +276,10 @@ class Worker:
         self._input = input_stream
         self._output = output_stream
         self._modules: dict[str, ModuleType] = {}
+        # Hook metadata registered per module by the runner.
+        self._hook_metadata: dict[str, list[dict[str, object]]] = {}
+        # Hook executors cached per module.
+        self._executors: dict[str, HookExecutor] = {}
         # Use sys.modules — `tryke.expect` the attribute is shadowed
         # by the `expect` function re-exported in tryke/__init__.py.
         self._expect_mod = sys.modules["tryke.expect"]
@@ -365,12 +370,20 @@ class Worker:
     ) -> _DispatchResult:
         if method == "ping":
             return "pong"
+        if method == "register_hooks":
+            return self._register_hooks(
+                self._require_str(params, "module", method),
+                params.get("hooks", []),
+            )
         if method == "run_test":
             xfail_raw = params.get("xfail")
+            raw_groups = params.get("groups", [])
+            groups = list(raw_groups) if isinstance(raw_groups, list) else []
             return self._run_test(
                 self._require_str(params, "module", method),
                 self._require_str(params, "function", method),
                 xfail=(str(xfail_raw) if xfail_raw is not None else None),
+                groups=groups,
             )
         if method == "run_doctest":
             return self._run_doctest(
@@ -408,6 +421,40 @@ class Worker:
             return mod
         return self._modules[module_name]
 
+    def _register_hooks(
+        self,
+        module_name: str,
+        hooks: object,
+    ) -> None:
+        """Store hook metadata for a module, sent by the runner before tests."""
+        if not isinstance(hooks, list):
+            return
+        self._hook_metadata[module_name] = hooks  # type: ignore[assignment]
+        # Invalidate any cached executor for this module.
+        self._executors.pop(module_name, None)
+
+    def _get_executor(self, module_name: str) -> HookExecutor | None:
+        """Build (or return cached) HookExecutor for a module."""
+        if module_name in self._executors:
+            return self._executors[module_name]
+
+        hook_meta = self._hook_metadata.get(module_name)
+        if not hook_meta:
+            return None
+
+        mod = self._get_module(module_name)
+        executor = HookExecutor()
+        for h in hook_meta:
+            name = h.get("name", "")
+            groups = list(h.get("groups", []))
+            line_number = h.get("line_number", 0) or 0
+            fn = getattr(mod, name, None)
+            if fn is not None and _hook_category(fn) is not None:
+                executor.register_hook(fn, groups=groups, line_number=int(line_number))
+
+        self._executors[module_name] = executor
+        return executor
+
     @contextlib.contextmanager
     def _soft_assertion_context(
         self,
@@ -425,6 +472,7 @@ class Worker:
         function_name: str,
         *,
         xfail: str | None = None,
+        groups: list[str] | None = None,
     ) -> _TestResult:
         try:
             mod = self._get_module(module_name)
@@ -461,7 +509,10 @@ class Worker:
                     contextlib.redirect_stdout(stdout_buf),
                     contextlib.redirect_stderr(stderr_buf),
                 ):
-                    if inspect.iscoroutinefunction(fn):
+                    executor = self._get_executor(module_name)
+                    if executor is not None:
+                        executor.run_test(fn, groups=groups or [])
+                    elif inspect.iscoroutinefunction(fn):
                         asyncio.run(fn())
                     else:
                         fn()
@@ -638,6 +689,8 @@ class Worker:
             if name in sys.modules:
                 reloaded = importlib.reload(sys.modules[name])
                 self._modules[name] = reloaded
+            # Clear cached executor so hooks are re-discovered on next run.
+            self._executors.pop(name, None)
 
 
 def main() -> None:

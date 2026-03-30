@@ -8,8 +8,8 @@ use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tryke_types::{Assertion, ExpectedAssertion, TestItem, TestOutcome, TestResult};
 
 use crate::protocol::{
-    AssertionWire, ReloadParams, RpcRequest, RpcResponse, RunDoctestParams, RunTestParams,
-    RunTestResultWire,
+    AssertionWire, RegisterHooksParams, ReloadParams, RpcRequest, RpcResponse, RunDoctestParams,
+    RunTestParams, RunTestResultWire,
 };
 
 pub struct WorkerProcess {
@@ -128,9 +128,20 @@ impl WorkerProcess {
             module: test.module_path.clone(),
             function: test.name.clone(),
             xfail: test.xfail.clone(),
+            groups: test.groups.clone(),
         })?;
         let wire: RunTestResultWire = self.call("run_test", Some(params)).await?;
         Ok(convert_result(test.clone(), wire))
+    }
+
+    /// Send hook metadata for a module to the Python worker.
+    /// Must be called before running any tests from that module.
+    #[expect(clippy::missing_errors_doc)]
+    pub async fn register_hooks(&mut self, params: RegisterHooksParams) -> Result<()> {
+        let value = serde_json::to_value(params)?;
+        self.call::<serde_json::Value>("register_hooks", Some(value))
+            .await?;
+        Ok(())
     }
 
     async fn run_doctest(&mut self, test: &TestItem, object_path: &str) -> Result<TestResult> {

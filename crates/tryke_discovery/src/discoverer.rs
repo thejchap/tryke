@@ -6,7 +6,7 @@ use std::{
 use log::{debug, trace};
 use ruff_python_parser::parse_module;
 use salsa::Setter;
-use tryke_types::TestItem;
+use tryke_types::{HookItem, TestItem};
 
 use crate::{
     db::{Database, SourceFile, parse_tests},
@@ -91,7 +91,7 @@ impl Discoverer {
         let tests: Vec<TestItem> = self
             .inputs
             .values()
-            .flat_map(|f| parse_tests(&self.db, *f))
+            .flat_map(|f| parse_tests(&self.db, *f).tests)
             .collect();
         debug!("rediscover: discovered {} tests total", tests.len());
         tests
@@ -100,7 +100,15 @@ impl Discoverer {
     pub fn tests(&self) -> Vec<TestItem> {
         self.inputs
             .values()
-            .flat_map(|f| parse_tests(&self.db, *f))
+            .flat_map(|f| parse_tests(&self.db, *f).tests)
+            .collect()
+    }
+
+    /// Returns all hooks discovered across all known files.
+    pub fn hooks(&self) -> Vec<HookItem> {
+        self.inputs
+            .values()
+            .flat_map(|f| parse_tests(&self.db, *f).hooks)
             .collect()
     }
 
@@ -155,7 +163,7 @@ impl Discoverer {
         let tests: Vec<TestItem> = self
             .inputs
             .values()
-            .flat_map(|f| parse_tests(&self.db, *f))
+            .flat_map(|f| parse_tests(&self.db, *f).tests)
             .collect();
         debug!("rediscover_changed: {} tests after update", tests.len());
         tests

@@ -185,6 +185,49 @@ pub struct DiscoveryWarning {
     pub message: String,
 }
 
+/// The kind of lifecycle hook declared by a decorator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookType {
+    BeforeEach,
+    BeforeAll,
+    AfterEach,
+    AfterAll,
+    WrapEach,
+    WrapAll,
+}
+
+impl HookType {
+    /// Returns `true` for hook types that force all tests in their scope
+    /// onto the same worker (because they cache state across tests).
+    #[must_use]
+    pub fn constrains_scheduling(&self) -> bool {
+        matches!(self, Self::BeforeAll | Self::AfterAll | Self::WrapAll)
+    }
+}
+
+/// A lifecycle hook discovered by static analysis.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct HookItem {
+    pub name: String,
+    pub hook_type: HookType,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
+    /// Function names extracted from ``Depends()`` in parameter defaults.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_number: Option<u32>,
+}
+
+/// The complete result of parsing a single Python source file.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ParsedFile {
+    pub tests: Vec<TestItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hooks: Vec<HookItem>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,5 +273,66 @@ mod tests {
         let root = PathBuf::from("/project");
         let path = PathBuf::from("/project");
         assert_eq!(path_to_module(&root, &path), None);
+    }
+
+    #[test]
+    fn hook_type_serializes_to_snake_case() {
+        let json = serde_json::to_string(&HookType::BeforeEach).expect("serialize");
+        assert_eq!(json, r#""before_each""#);
+
+        let json = serde_json::to_string(&HookType::WrapAll).expect("serialize");
+        assert_eq!(json, r#""wrap_all""#);
+    }
+
+    #[test]
+    fn hook_type_constrains_scheduling() {
+        assert!(HookType::BeforeAll.constrains_scheduling());
+        assert!(HookType::AfterAll.constrains_scheduling());
+        assert!(HookType::WrapAll.constrains_scheduling());
+        assert!(!HookType::BeforeEach.constrains_scheduling());
+        assert!(!HookType::AfterEach.constrains_scheduling());
+        assert!(!HookType::WrapEach.constrains_scheduling());
+    }
+
+    #[test]
+    fn hook_item_round_trips_through_serde() {
+        let hook = HookItem {
+            name: "setup_db".into(),
+            hook_type: HookType::BeforeAll,
+            groups: vec!["users".into()],
+            depends_on: vec!["config".into()],
+            line_number: Some(10),
+        };
+        let json = serde_json::to_string(&hook).expect("serialize");
+        let back: HookItem = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(hook, back);
+    }
+
+    #[test]
+    fn parsed_file_default_is_empty() {
+        let pf = ParsedFile::default();
+        assert!(pf.tests.is_empty());
+        assert!(pf.hooks.is_empty());
+    }
+
+    #[test]
+    fn parsed_file_round_trips_through_serde() {
+        let pf = ParsedFile {
+            tests: vec![TestItem {
+                name: "test_foo".into(),
+                module_path: "tests.test_foo".into(),
+                ..Default::default()
+            }],
+            hooks: vec![HookItem {
+                name: "db".into(),
+                hook_type: HookType::BeforeAll,
+                groups: vec![],
+                depends_on: vec![],
+                line_number: Some(5),
+            }],
+        };
+        let json = serde_json::to_string(&pf).expect("serialize");
+        let back: ParsedFile = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(pf, back);
     }
 }

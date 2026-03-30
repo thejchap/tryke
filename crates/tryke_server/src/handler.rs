@@ -8,7 +8,7 @@ use tokio::{
     sync::{Mutex, broadcast},
 };
 use tokio_stream::StreamExt;
-use tryke_runner::{DistMode, WorkerPool, partition};
+use tryke_runner::{DistMode, WorkerPool, partition_with_hooks};
 use tryke_types::filter::TestFilter;
 use tryke_types::{RunSummary, TestOutcome};
 
@@ -167,7 +167,7 @@ async fn execute_run(
 
     let test_start = Instant::now();
     // Server uses test-level distribution by default.
-    let units = partition(tests, DistMode::Test);
+    let units = partition_with_hooks(tests, &[], DistMode::Test);
     let mut stream = pool.run(units);
     let mut passed = 0usize;
     let mut failed = 0usize;

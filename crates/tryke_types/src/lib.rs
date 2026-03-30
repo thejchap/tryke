@@ -210,6 +210,8 @@ impl HookType {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HookItem {
     pub name: String,
+    /// Dotted Python module path (e.g. ``tests.test_math``).
+    pub module_path: String,
     pub hook_type: HookType,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
@@ -298,6 +300,7 @@ mod tests {
     fn hook_item_round_trips_through_serde() {
         let hook = HookItem {
             name: "setup_db".into(),
+            module_path: "tests.test_setup".into(),
             hook_type: HookType::BeforeAll,
             groups: vec!["users".into()],
             depends_on: vec!["config".into()],
@@ -325,6 +328,7 @@ mod tests {
             }],
             hooks: vec![HookItem {
                 name: "db".into(),
+                module_path: "tests.test_foo".into(),
                 hook_type: HookType::BeforeAll,
                 groups: vec![],
                 depends_on: vec![],

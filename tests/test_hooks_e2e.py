@@ -51,10 +51,10 @@ with describe("hooks e2e"):
         _ = table  # Reference the hook to verify it ran
         expect(_log).to_contain("setup:test_db")
 
-    @test(name="after_each runs after test")
+    @test(name="before_each runs independently per test")
     def test_after_runs() -> None:
-        # _log was cleared by before_each, meaning the previous test's
-        # after_each + this test's before_each ran.
+        # _log was cleared by clear_log() in before_each for this test,
+        # so this only verifies that the per-test setup hook ran.
         expect(_log).to_contain("setup:test_db")
 
 

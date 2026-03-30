@@ -375,6 +375,10 @@ class Worker:
                 self._require_str(params, "module", method),
                 params.get("hooks", []),
             )
+        if method == "finalize_hooks":
+            return self._finalize_hooks(
+                self._require_str(params, "module", method),
+            )
         if method == "run_test":
             xfail_raw = params.get("xfail")
             raw_groups = params.get("groups", [])
@@ -432,6 +436,12 @@ class Worker:
         self._hook_metadata[module_name] = hooks  # type: ignore[assignment]
         # Invalidate any cached executor for this module.
         self._executors.pop(module_name, None)
+
+    def _finalize_hooks(self, module_name: str) -> None:
+        """Run scope-level teardown (after_all, wrap_all) for a module."""
+        executor = self._executors.get(module_name)
+        if executor is not None:
+            executor.finalize()
 
     def _get_executor(self, module_name: str) -> HookExecutor | None:
         """Build (or return cached) HookExecutor for a module."""

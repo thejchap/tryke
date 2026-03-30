@@ -719,6 +719,7 @@ fn collect_tests_from_body(
             {
                 hooks_out.push(HookItem {
                     name: func.name.id.as_str().to_owned(),
+                    module_path: path_to_module(root, file),
                     hook_type,
                     groups: groups.to_vec(),
                     depends_on: extract_depends_from_params(func),

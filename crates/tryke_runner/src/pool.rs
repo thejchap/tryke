@@ -197,10 +197,10 @@ async fn register_hooks_for_unit(
     let mut seen = std::collections::HashSet::new();
     for test in tests {
         if seen.insert(test.module_path.clone()) {
-            // Send all hooks in the unit for this module.
-            // Hooks are already scoped to the work unit's file/group.
+            // Send only hooks belonging to this module.
             let module_hooks: Vec<crate::protocol::HookWire> = hooks
                 .iter()
+                .filter(|h| h.module_path == test.module_path)
                 .map(|h| crate::protocol::HookWire {
                     name: h.name.clone(),
                     hook_type: serde_json::to_value(h.hook_type)
@@ -276,6 +276,13 @@ async fn worker_task(
                     )
                     .await;
                 }
+                // Track modules in this unit for finalization.
+                let mut finalize_modules = std::collections::HashSet::new();
+                for test in &unit.tests {
+                    if !unit.hooks.is_empty() {
+                        finalize_modules.insert(test.module_path.clone());
+                    }
+                }
                 for test in unit.tests {
                     trace!("worker_task: running test {}", test.name);
                     run_single_test(
@@ -287,6 +294,14 @@ async fn worker_task(
                         &result_tx,
                     )
                     .await;
+                }
+                // Finalize hooks for each module in this unit.
+                for module in finalize_modules {
+                    if let Some(w) = worker.as_mut()
+                        && let Err(e) = w.finalize_hooks(module).await
+                    {
+                        debug!("worker_task: finalize_hooks failed: {e}");
+                    }
                 }
             }
             WorkerMsg::Reload(modules, ack_tx) => {

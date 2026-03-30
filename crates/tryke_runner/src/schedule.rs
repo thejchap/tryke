@@ -43,74 +43,98 @@ pub fn partition(tests: Vec<TestItem>, mode: DistMode) -> Vec<WorkUnit> {
 /// - File-scope `_all` hooks (empty groups) force file-level grouping
 /// - Group-scope `_all` hooks force group-level grouping
 #[must_use]
+fn group_by_file(tests: Vec<TestItem>) -> Vec<WorkUnit> {
+    let mut by_file: IndexMap<Option<PathBuf>, Vec<TestItem>> = IndexMap::new();
+    for t in tests {
+        by_file.entry(t.file_path.clone()).or_default().push(t);
+    }
+    by_file
+        .into_values()
+        .map(|tests| WorkUnit {
+            tests,
+            hooks: vec![],
+        })
+        .collect()
+}
+
+fn group_by_describe(tests: Vec<TestItem>) -> Vec<WorkUnit> {
+    let mut by_group: IndexMap<(Option<PathBuf>, Option<String>), Vec<TestItem>> = IndexMap::new();
+    for t in tests {
+        let group_key = t.groups.first().cloned();
+        by_group
+            .entry((t.file_path.clone(), group_key))
+            .or_default()
+            .push(t);
+    }
+    by_group
+        .into_values()
+        .map(|tests| WorkUnit {
+            tests,
+            hooks: vec![],
+        })
+        .collect()
+}
+
+#[must_use]
 pub fn partition_with_hooks(
     tests: Vec<TestItem>,
     hooks: &[HookItem],
     mode: DistMode,
 ) -> Vec<WorkUnit> {
-    // Check if any _all hooks exist that constrain scheduling.
-    let effective_mode =
-        if mode == DistMode::Test && hooks.iter().any(|h| h.hook_type.constrains_scheduling()) {
-            // File-scope _all hooks (empty groups) → force DistMode::File.
-            // Group-scope _all hooks → force DistMode::Group.
-            if hooks
-                .iter()
-                .any(|h| h.hook_type.constrains_scheduling() && h.groups.is_empty())
-            {
-                DistMode::File
-            } else {
-                DistMode::Group
-            }
-        } else {
-            mode
-        };
+    let constrained_modules: std::collections::HashSet<&str> = hooks
+        .iter()
+        .filter(|h| h.hook_type.constrains_scheduling())
+        .map(|h| h.module_path.as_str())
+        .collect();
 
-    let mut units: Vec<WorkUnit> = match effective_mode {
-        DistMode::Test => tests
+    let needs_file = hooks
+        .iter()
+        .any(|h| h.hook_type.constrains_scheduling() && h.groups.is_empty());
+
+    // When mode is Test, constrained modules get upgraded; unconstrained stay per-test.
+    let mut units: Vec<WorkUnit> = if mode == DistMode::Test && !constrained_modules.is_empty() {
+        let (constrained, free): (Vec<_>, Vec<_>) = tests
+            .into_iter()
+            .partition(|t| constrained_modules.contains(t.module_path.as_str()));
+
+        let mut result: Vec<WorkUnit> = free
             .into_iter()
             .map(|t| WorkUnit {
                 tests: vec![t],
                 hooks: vec![],
             })
-            .collect(),
-        DistMode::File => {
-            let mut by_file: IndexMap<Option<PathBuf>, Vec<TestItem>> = IndexMap::new();
-            for t in tests {
-                by_file.entry(t.file_path.clone()).or_default().push(t);
-            }
-            by_file
-                .into_values()
-                .map(|tests| WorkUnit {
-                    tests,
-                    hooks: vec![],
-                })
-                .collect()
+            .collect();
+
+        if needs_file {
+            result.extend(group_by_file(constrained));
+        } else {
+            result.extend(group_by_describe(constrained));
         }
-        DistMode::Group => {
-            let mut by_group: IndexMap<(Option<PathBuf>, Option<String>), Vec<TestItem>> =
-                IndexMap::new();
-            for t in tests {
-                let group_key = t.groups.first().cloned();
-                by_group
-                    .entry((t.file_path.clone(), group_key))
-                    .or_default()
-                    .push(t);
-            }
-            by_group
-                .into_values()
-                .map(|tests| WorkUnit {
-                    tests,
+        result
+    } else {
+        match mode {
+            DistMode::Test => tests
+                .into_iter()
+                .map(|t| WorkUnit {
+                    tests: vec![t],
                     hooks: vec![],
                 })
-                .collect()
+                .collect(),
+            DistMode::File => group_by_file(tests),
+            DistMode::Group => group_by_describe(tests),
         }
     };
-    // Attach hooks to each work unit.
-    // For now, attach all provided hooks to every unit. The worker
-    // filters by scope at runtime. This is refined in Step 6.
+
+    // Attach hooks to each unit, filtered by the modules in that unit.
     if !hooks.is_empty() {
         for unit in &mut units {
-            unit.hooks = hooks.to_vec();
+            let unit_modules: std::collections::HashSet<&str> =
+                unit.tests.iter().map(|t| t.module_path.as_str()).collect();
+            unit.hooks = hooks
+                .iter()
+                .filter(|h| unit_modules.contains(h.module_path.as_str()))
+                .cloned()
+                .collect();
         }
     }
 
@@ -211,9 +235,15 @@ mod tests {
         assert_eq!(units[2].tests.len(), 1); // small.py
     }
 
+    /// Default hook helper — uses module "a" matching `item("a.py", ...)`.
     fn hook(name: &str, hook_type: HookType, groups: &[&str]) -> HookItem {
+        hook_for_module(name, "a", hook_type, groups)
+    }
+
+    fn hook_for_module(name: &str, module: &str, hook_type: HookType, groups: &[&str]) -> HookItem {
         HookItem {
             name: name.into(),
+            module_path: module.into(),
             hook_type,
             groups: groups.iter().map(|g| (*g).to_string()).collect(),
             depends_on: vec![],
@@ -228,10 +258,9 @@ mod tests {
             item("a.py", "t2", &[]),
             item("b.py", "t3", &[]),
         ];
+        // Hook is in test_mod (same as a.py items) — only a.py tests are constrained.
         let hooks = vec![hook("setup", HookType::BeforeAll, &[])];
         let units = partition_with_hooks(tests, &hooks, DistMode::Test);
-        // a.py tests must be grouped (before_all constrains), b.py is separate
-        // With file-scope before_all, all tests from a file go to one unit
         let a_units: Vec<_> = units
             .iter()
             .filter(|u| u.tests.iter().any(|t| t.name == "t1"))
@@ -255,5 +284,49 @@ mod tests {
         let units = partition_with_hooks(tests, &hooks, DistMode::Test);
         assert_eq!(units[0].hooks.len(), 1);
         assert_eq!(units[0].hooks[0].name, "db");
+    }
+
+    #[test]
+    fn hooks_from_different_modules_only_attach_to_matching_units() {
+        let tests = vec![item("a.py", "t1", &[]), item("b.py", "t2", &[])];
+        let hooks = vec![
+            hook_for_module("setup_a", "a", HookType::BeforeEach, &[]),
+            hook_for_module("setup_b", "b", HookType::BeforeEach, &[]),
+        ];
+        let units = partition_with_hooks(tests, &hooks, DistMode::Test);
+        assert_eq!(units.len(), 2);
+        for u in &units {
+            assert_eq!(u.hooks.len(), 1, "each unit should only have its own hook");
+            let test_mod = &u.tests[0].module_path;
+            assert_eq!(
+                u.hooks[0].module_path, *test_mod,
+                "hook module should match test module"
+            );
+        }
+    }
+
+    #[test]
+    fn before_all_in_one_module_does_not_constrain_other_modules() {
+        let tests = vec![
+            item("a.py", "t1", &[]),
+            item("a.py", "t2", &[]),
+            item("b.py", "t3", &[]),
+            item("b.py", "t4", &[]),
+        ];
+        // Only module "a" has a before_all hook.
+        let hooks = vec![hook_for_module("setup", "a", HookType::BeforeAll, &[])];
+        let units = partition_with_hooks(tests, &hooks, DistMode::Test);
+        // a.py tests are grouped (1 unit), b.py tests are individual (2 units)
+        let a_units: Vec<_> = units
+            .iter()
+            .filter(|u| u.tests.iter().any(|t| t.module_path == "a"))
+            .collect();
+        let b_units: Vec<_> = units
+            .iter()
+            .filter(|u| u.tests.iter().any(|t| t.module_path == "b"))
+            .collect();
+        assert_eq!(a_units.len(), 1, "a.py should be grouped into 1 unit");
+        assert_eq!(a_units[0].tests.len(), 2);
+        assert_eq!(b_units.len(), 2, "b.py tests should remain individual");
     }
 }

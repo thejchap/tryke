@@ -8,8 +8,8 @@ use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tryke_types::{Assertion, ExpectedAssertion, TestItem, TestOutcome, TestResult};
 
 use crate::protocol::{
-    AssertionWire, RegisterHooksParams, ReloadParams, RpcRequest, RpcResponse, RunDoctestParams,
-    RunTestParams, RunTestResultWire,
+    AssertionWire, FinalizeHooksParams, RegisterHooksParams, ReloadParams, RpcRequest, RpcResponse,
+    RunDoctestParams, RunTestParams, RunTestResultWire,
 };
 
 pub struct WorkerProcess {
@@ -140,6 +140,16 @@ impl WorkerProcess {
     pub async fn register_hooks(&mut self, params: RegisterHooksParams) -> Result<()> {
         let value = serde_json::to_value(params)?;
         self.call::<serde_json::Value>("register_hooks", Some(value))
+            .await?;
+        Ok(())
+    }
+
+    /// Tell the Python worker to run scope-level teardown (`after_all`, `wrap_all`)
+    /// for a module. Must be called after all tests from that module have run.
+    #[expect(clippy::missing_errors_doc)]
+    pub async fn finalize_hooks(&mut self, module: String) -> Result<()> {
+        let value = serde_json::to_value(FinalizeHooksParams { module })?;
+        self.call::<serde_json::Value>("finalize_hooks", Some(value))
             .await?;
         Ok(())
     }

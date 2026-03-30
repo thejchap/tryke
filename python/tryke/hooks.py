@@ -142,8 +142,16 @@ class DependencyResolver:
     def __init__(self) -> None:
         self._cache: dict[Callable[..., Any], Any] = {}
         self._active_generators: list[
-            tuple[Callable[..., Any], Generator[Any, None, None]]
-        ] = []
+            tuple[Callable[..., Any], Generator[Any, None, None], bool]
+        ] = []  # (fn, gen, is_all_scope)
+        self._active_async_generators: list[
+            tuple[
+                Callable[..., Any],
+                AsyncGenerator[Any, None],
+                asyncio.AbstractEventLoop,
+                bool,
+            ]
+        ] = []  # (fn, agen, loop, is_all_scope)
         self._resolving: set[int] = set()  # ids of functions currently being resolved
 
     def resolve(self, fn: Callable[..., Any]) -> dict[str, Any]:
@@ -160,8 +168,12 @@ class DependencyResolver:
                 kwargs[name] = self.resolve_hook(dep_fn)
         return kwargs
 
-    def resolve_hook(self, fn: Callable[..., Any]) -> Any:  # noqa: ANN401
-        """Resolve a single hook function, returning its cached value."""
+    def resolve_hook(self, fn: Callable[..., Any], *, all_scope: bool = False) -> Any:  # noqa: ANN401
+        """Resolve a single hook function, returning its cached value.
+
+        When *all_scope* is True, generator lifecycles are preserved until
+        :meth:`teardown_all_generators` rather than :meth:`teardown_generators`.
+        """
         if fn in self._cache:
             return self._cache[fn]
 
@@ -178,14 +190,12 @@ class DependencyResolver:
             if inspect.isgeneratorfunction(fn):
                 gen = fn(**kwargs)
                 value = next(gen)
-                self._active_generators.append((fn, gen))
+                self._active_generators.append((fn, gen, all_scope))
             elif inspect.isasyncgenfunction(fn):
-
-                async def _run_async_gen() -> object:
-                    agen = fn(**kwargs)
-                    return await agen.__anext__()
-
-                value = asyncio.run(_run_async_gen())
+                agen = fn(**kwargs)
+                loop = asyncio.new_event_loop()
+                value = loop.run_until_complete(agen.__anext__())
+                self._active_async_generators.append((fn, agen, loop, all_scope))
             elif inspect.iscoroutinefunction(fn):
                 value = asyncio.run(fn(**kwargs))
             else:
@@ -202,16 +212,81 @@ class DependencyResolver:
         for fn in to_remove:
             del self._cache[fn]
 
+    def _teardown_sync_generators(
+        self,
+        gens: list[tuple[Callable[..., Any], Generator[Any, None, None], bool]],
+    ) -> None:
+        while gens:
+            fn, gen, _all = gens.pop()
+            try:
+                try:
+                    next(gen)
+                except StopIteration:
+                    continue
+                else:
+                    msg = (
+                        f"Generator hook {fn.__name__} yielded more than once; "
+                        "only single-yield hooks are supported."
+                    )
+                    raise RuntimeError(msg)
+            finally:
+                with contextlib.suppress(Exception):
+                    gen.close()
+
+    def _teardown_async_generators(
+        self,
+        gens: list[
+            tuple[
+                Callable[..., Any],
+                AsyncGenerator[Any, None],
+                asyncio.AbstractEventLoop,
+                bool,
+            ]
+        ],
+    ) -> None:
+        while gens:
+            fn, agen, loop, _all = gens.pop()
+            try:
+                try:
+                    loop.run_until_complete(agen.__anext__())
+                except StopAsyncIteration:
+                    continue
+                else:
+                    msg = (
+                        f"Async generator hook {fn.__name__} yielded more than once; "
+                        "only single-yield hooks are supported."
+                    )
+                    raise RuntimeError(msg)
+            finally:
+                with contextlib.suppress(Exception):
+                    loop.run_until_complete(agen.aclose())
+                with contextlib.suppress(Exception):
+                    loop.close()
+
     def teardown_generators(self) -> None:
-        """Run the post-yield portion of all active generators (LIFO)."""
-        while self._active_generators:
-            _fn, gen = self._active_generators.pop()
-            with contextlib.suppress(StopIteration):
-                next(gen)
+        """Run the post-yield portion of per-test (``_each``) generators (LIFO)."""
+        # Partition: keep _all generators for later, tear down _each now.
+        keep = [entry for entry in self._active_generators if entry[2]]
+        tear = [entry for entry in self._active_generators if not entry[2]]
+        self._active_generators = keep
+        self._teardown_sync_generators(tear)
+
+        keep_async = [entry for entry in self._active_async_generators if entry[3]]
+        tear_async = [entry for entry in self._active_async_generators if not entry[3]]
+        self._active_async_generators = keep_async
+        self._teardown_async_generators(tear_async)
+
+    def teardown_all_generators(self) -> None:
+        """Run the post-yield portion of scope-level (``_all``) generators (LIFO)."""
+        self._teardown_sync_generators(self._active_generators)
+        self._active_generators = []
+        self._teardown_async_generators(self._active_async_generators)
+        self._active_async_generators = []
 
     def clear_all(self) -> None:
         """Reset all state."""
         self.teardown_generators()
+        self.teardown_all_generators()
         self._cache.clear()
         self._resolving.clear()
 
@@ -287,7 +362,17 @@ class HookExecutor:
                 key=lambda h: h.line_number,
             ):
                 if (h.category, *h.groups) not in self._all_initialized:  # type: ignore[arg-type]
-                    self._resolver.resolve_hook(h.fn)
+                    self._resolver.resolve_hook(h.fn, all_scope=True)
+                    self._all_initialized.add((h.category, *h.groups))  # type: ignore[arg-type]
+
+            # Wrap_all: resolve on first test in scope (like before_all).
+            # Generator setup runs now; teardown deferred to finalize().
+            for h in sorted(
+                (h for h in scope_hooks if h.category == "wrap_all"),
+                key=lambda h: h.line_number,
+            ):
+                if (h.category, *h.groups) not in self._all_initialized:  # type: ignore[arg-type]
+                    self._resolver.resolve_hook(h.fn, all_scope=True)
                     self._all_initialized.add((h.category, *h.groups))  # type: ignore[arg-type]
 
             # Before_each: setup order (definition order)
@@ -336,6 +421,45 @@ class HookExecutor:
                 else:
                     h.fn(**kwargs)
 
-            # Teardown generators (wrap hooks), then clear per-test caches
+            # Teardown wrap_each generators, then clear per-test caches
             self._resolver.teardown_generators()
             self._resolver.clear_each_cache()
+
+    def finalize(self) -> None:
+        """Run scope-level teardown: after_all hooks and wrap_all generators.
+
+        The worker calls this after all tests in a module have completed.
+        """
+        # Build the scope chain from all registered hooks
+        all_scopes: set[tuple[str, ...]] = set()
+        for h in self._hooks:
+            all_scopes.add(tuple(h.groups))
+        # Process scopes inner-to-outer (longest first for reverse ordering)
+        sorted_scopes = sorted(all_scopes, key=len, reverse=True)
+
+        # Collect after_all hooks across all scopes (inner-to-outer)
+        after_all_hooks: list[_RegisteredHook] = []
+        for scope in sorted_scopes:
+            scope_hooks = [h for h in self._hooks if tuple(h.groups) == scope]
+            # Within a scope, collect in definition order; the reversal
+            # at the end handles within-scope LIFO.
+            after_all_hooks.extend(
+                sorted(
+                    (h for h in scope_hooks if h.category == "after_all"),
+                    key=lambda h: h.line_number,
+                )
+            )
+
+        # Run after_all in reverse order (inner-to-outer, LIFO within scope)
+        after_all_hooks.reverse()
+        for h in after_all_hooks:
+            kwargs = self._resolver.resolve(h.fn)
+            if inspect.iscoroutinefunction(h.fn):
+                asyncio.run(h.fn(**kwargs))
+            else:
+                h.fn(**kwargs)
+
+        # Teardown wrap_all generators (stored by the resolver during
+        # resolve_hook when wrap_all was first initialized).
+        self._resolver.teardown_all_generators()
+        self._resolver.clear_all()

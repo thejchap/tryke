@@ -319,22 +319,23 @@ class HookExecutor:
         for h in setup_sequence:
             self._resolver.resolve_hook(h.fn)
 
-        # Run test with Depends injection
-        test_kwargs = self._resolver.resolve(test_fn)
-        if inspect.iscoroutinefunction(test_fn):
-            asyncio.run(test_fn(**test_kwargs))
-        else:
-            test_fn(**test_kwargs)
-
-        # Run teardown (inner-to-outer, reverse order)
-        teardown_sequence.reverse()
-        for h in teardown_sequence:
-            kwargs = self._resolver.resolve(h.fn)
-            if inspect.iscoroutinefunction(h.fn):
-                asyncio.run(h.fn(**kwargs))
+        # Run test with Depends injection, ensuring teardown always runs.
+        try:
+            test_kwargs = self._resolver.resolve(test_fn)
+            if inspect.iscoroutinefunction(test_fn):
+                asyncio.run(test_fn(**test_kwargs))
             else:
-                h.fn(**kwargs)
+                test_fn(**test_kwargs)
+        finally:
+            # Run teardown (inner-to-outer, reverse order)
+            teardown_sequence.reverse()
+            for h in teardown_sequence:
+                kwargs = self._resolver.resolve(h.fn)
+                if inspect.iscoroutinefunction(h.fn):
+                    asyncio.run(h.fn(**kwargs))
+                else:
+                    h.fn(**kwargs)
 
-        # Teardown generators (wrap hooks), then clear per-test caches
-        self._resolver.teardown_generators()
-        self._resolver.clear_each_cache()
+            # Teardown generators (wrap hooks), then clear per-test caches
+            self._resolver.teardown_generators()
+            self._resolver.clear_each_cache()

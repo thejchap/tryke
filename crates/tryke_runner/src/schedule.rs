@@ -38,13 +38,34 @@ pub fn partition(tests: Vec<TestItem>, mode: DistMode) -> Vec<WorkUnit> {
 }
 
 /// Like [`partition`], but attaches discovered hooks to each work unit.
+///
+/// When `_all` hooks are present, `DistMode::Test` is upgraded:
+/// - File-scope `_all` hooks (empty groups) force file-level grouping
+/// - Group-scope `_all` hooks force group-level grouping
 #[must_use]
 pub fn partition_with_hooks(
     tests: Vec<TestItem>,
     hooks: &[HookItem],
     mode: DistMode,
 ) -> Vec<WorkUnit> {
-    let mut units: Vec<WorkUnit> = match mode {
+    // Check if any _all hooks exist that constrain scheduling.
+    let effective_mode =
+        if mode == DistMode::Test && hooks.iter().any(|h| h.hook_type.constrains_scheduling()) {
+            // File-scope _all hooks (empty groups) → force DistMode::File.
+            // Group-scope _all hooks → force DistMode::Group.
+            if hooks
+                .iter()
+                .any(|h| h.hook_type.constrains_scheduling() && h.groups.is_empty())
+            {
+                DistMode::File
+            } else {
+                DistMode::Group
+            }
+        } else {
+            mode
+        };
+
+    let mut units: Vec<WorkUnit> = match effective_mode {
         DistMode::Test => tests
             .into_iter()
             .map(|t| WorkUnit {
@@ -100,6 +121,8 @@ pub fn partition_with_hooks(
 
 #[cfg(test)]
 mod tests {
+    use tryke_types::HookType;
+
     use super::*;
 
     fn item(file: &str, name: &str, groups: &[&str]) -> TestItem {
@@ -186,5 +209,51 @@ mod tests {
         assert_eq!(units[0].tests.len(), 3); // big.py
         assert_eq!(units[1].tests.len(), 2); // medium.py
         assert_eq!(units[2].tests.len(), 1); // small.py
+    }
+
+    fn hook(name: &str, hook_type: HookType, groups: &[&str]) -> HookItem {
+        HookItem {
+            name: name.into(),
+            hook_type,
+            groups: groups.iter().map(|g| (*g).to_string()).collect(),
+            depends_on: vec![],
+            line_number: None,
+        }
+    }
+
+    #[test]
+    fn test_mode_with_file_scope_before_all_forces_file_grouping() {
+        let tests = vec![
+            item("a.py", "t1", &[]),
+            item("a.py", "t2", &[]),
+            item("b.py", "t3", &[]),
+        ];
+        let hooks = vec![hook("setup", HookType::BeforeAll, &[])];
+        let units = partition_with_hooks(tests, &hooks, DistMode::Test);
+        // a.py tests must be grouped (before_all constrains), b.py is separate
+        // With file-scope before_all, all tests from a file go to one unit
+        let a_units: Vec<_> = units
+            .iter()
+            .filter(|u| u.tests.iter().any(|t| t.name == "t1"))
+            .collect();
+        assert_eq!(a_units.len(), 1);
+        assert_eq!(a_units[0].tests.len(), 2, "a.py tests should be grouped");
+    }
+
+    #[test]
+    fn test_mode_with_only_each_hooks_stays_individual() {
+        let tests = vec![item("a.py", "t1", &[]), item("a.py", "t2", &[])];
+        let hooks = vec![hook("setup", HookType::BeforeEach, &[])];
+        let units = partition_with_hooks(tests, &hooks, DistMode::Test);
+        assert_eq!(units.len(), 2, "each hooks don't constrain scheduling");
+    }
+
+    #[test]
+    fn work_unit_carries_hooks() {
+        let tests = vec![item("a.py", "t1", &[])];
+        let hooks = vec![hook("db", HookType::BeforeAll, &[])];
+        let units = partition_with_hooks(tests, &hooks, DistMode::Test);
+        assert_eq!(units[0].hooks.len(), 1);
+        assert_eq!(units[0].hooks[0].name, "db");
     }
 }

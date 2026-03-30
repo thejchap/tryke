@@ -356,6 +356,70 @@ with describe("HookExecutor"):
         expect(received["conn"]).to_equal("conn")
 
 
+with describe("error handling"):
+
+    @test(name="before_each failure marks test as error")
+    def test_before_each_failure() -> None:
+        @before_each
+        def bad_setup() -> None:
+            msg = "setup failed"
+            raise RuntimeError(msg)
+
+        log: list[str] = []
+
+        def my_test() -> None:
+            log.append("test")
+
+        executor = HookExecutor()
+        executor.register_hook(bad_setup, groups=[])
+        expect(lambda: executor.run_test(my_test, groups=[])).to_raise(RuntimeError)
+        # Test should NOT have run
+        expect(log).to_have_length(0)
+
+    @test(name="after_each still runs when test fails")
+    def test_after_runs_on_failure() -> None:
+        log: list[str] = []
+
+        @after_each
+        def cleanup() -> None:
+            log.append("cleanup")
+
+        def failing_test() -> None:
+            log.append("test")
+            msg = "test failed"
+            raise RuntimeError(msg)
+
+        executor = HookExecutor()
+        executor.register_hook(cleanup, groups=[])
+        expect(lambda: executor.run_test(failing_test, groups=[])).to_raise(
+            RuntimeError
+        )
+        # Cleanup should still have run
+        expect(log).to_contain("cleanup")
+
+    @test(name="wrap_each teardown runs when test fails")
+    def test_wrap_teardown_on_failure() -> None:
+        log: list[str] = []
+
+        @wrap_each
+        def wrapper() -> Generator[None, None, None]:
+            log.append("setup")
+            yield
+            log.append("teardown")
+
+        def failing_test() -> None:
+            log.append("test")
+            msg = "test failed"
+            raise RuntimeError(msg)
+
+        executor = HookExecutor()
+        executor.register_hook(wrapper, groups=[])
+        expect(lambda: executor.run_test(failing_test, groups=[])).to_raise(
+            RuntimeError
+        )
+        expect(log).to_contain("teardown")
+
+
 with describe("Depends typing"):
 
     @test(name="assert_type validates Depends return type for plain function")

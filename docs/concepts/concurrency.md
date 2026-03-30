@@ -61,6 +61,31 @@ This means the output is deterministic regardless of scheduling — the same tes
 2. When all tests from a file are complete, the buffer is flushed in discovery order
 3. If `--maxfail` or `-x` stops execution early, remaining buffered results are flushed before exiting
 
+## Hooks and scheduling
+
+Lifecycle hooks interact with the distribution mode. The key constraint:
+`@before_all`, `@after_all`, and `@wrap_all` cache their return values
+in the worker's Python process. All tests that share a cached value must
+run on the same worker.
+
+When tryke detects `_all` hooks during discovery, it automatically
+upgrades the distribution mode:
+
+| Hooks present | Requested mode | Effective mode | Why |
+|---------------|----------------|----------------|-----|
+| None or `_each` only | `test` | `test` | No shared state — full parallelism |
+| `@before_all` at file scope | `test` | `file` | Cached value must stay in one process |
+| `@before_all` in describe | `test` | `group` | Only that group's tests need the value |
+| Any | `file` or `group` | unchanged | Already grouped — no upgrade needed |
+
+`@before_each`, `@after_each`, and `@wrap_each` hooks do not constrain
+scheduling. Their values are created fresh per test and discarded
+afterward, so tests can run on any worker.
+
+### Practical impact
+
+A file with only `@before_each` hooks keeps full `--dist test` parallelism — every test can run on a different worker. Adding a single `@before_all` at module scope forces all tests in that file onto one worker. If this is a bottleneck, consider scoping the `@before_all` inside a `describe` block so only that group is constrained.
+
 ## Isolation
 
 Each worker process has its own Python interpreter and module cache. Tests in different workers cannot interfere with each other through global state, module-level side effects, or shared mutable imports.

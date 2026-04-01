@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://thejchap.github.io/tryke">
-    <img height="170" alt="tryke" src="https://github.com/user-attachments/assets/d5683277-642c-4a3c-bdfb-cbf4fdf99fe5" />
+    <img height="170" alt="tryke-small" src="https://github.com/user-attachments/assets/39a2521a-fe9a-4235-8bb8-97b9e4f68aa7" />
   </a>
 </p>
 <h1 align="center">Tryke</h1>

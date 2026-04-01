@@ -355,6 +355,29 @@ with describe("HookExecutor"):
         executor.run_test(my_test, groups=[])
         expect(received["conn"]).to_equal("conn")
 
+    @test(name="wrap_each teardown runs before after_each")
+    def test_wrap_each_before_after_each() -> None:
+        log: list[str] = []
+
+        @wrap_each
+        def wrapper() -> Generator[None, None, None]:
+            log.append("wrap_setup")
+            yield
+            log.append("wrap_teardown")
+
+        @after_each
+        def cleanup() -> None:
+            log.append("after_each")
+
+        def my_test() -> None:
+            log.append("test")
+
+        executor = HookExecutor()
+        executor.register_hook(wrapper, groups=[], line_number=1)
+        executor.register_hook(cleanup, groups=[], line_number=2)
+        executor.run_test(my_test, groups=[])
+        expect(log).to_equal(["wrap_setup", "test", "wrap_teardown", "after_each"])
+
 
 with describe("error handling"):
 

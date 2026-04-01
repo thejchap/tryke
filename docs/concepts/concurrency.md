@@ -76,7 +76,9 @@ upgrades the distribution mode:
 | None or `_each` only | `test` | `test` | No shared state — full parallelism |
 | `@before_all` at file scope | `test` | `file` | Cached value must stay in one process |
 | `@before_all` in describe | `test` | `group` | Only that group's tests need the value |
-| Any | `file` or `group` | unchanged | Already grouped — no upgrade needed |
+| `@before_all` at file scope | `group` | `file` | File-scope `_all` hooks require the whole file on one worker |
+| `_all` hooks only inside `describe` | `group` | `group` | Groups are already kept together |
+| Any | `file` | unchanged | Already grouped at file granularity — no upgrade needed |
 
 `@before_each`, `@after_each`, and `@wrap_each` hooks do not constrain
 scheduling. Their values are created fresh per test and discarded

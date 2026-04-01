@@ -87,12 +87,15 @@ pub fn partition_with_hooks(
         .map(|h| h.module_path.as_str())
         .collect();
 
-    let needs_file = hooks
+    // Modules that have file-scope _all hooks (empty groups) need file-level grouping.
+    let file_constrained_modules: std::collections::HashSet<&str> = hooks
         .iter()
-        .any(|h| h.hook_type.constrains_scheduling() && h.groups.is_empty());
+        .filter(|h| h.hook_type.constrains_scheduling() && h.groups.is_empty())
+        .map(|h| h.module_path.as_str())
+        .collect();
 
-    // When mode is Test, constrained modules get upgraded; unconstrained stay per-test.
     let mut units: Vec<WorkUnit> = if mode == DistMode::Test && !constrained_modules.is_empty() {
+        // Test mode: upgrade constrained modules to group or file level.
         let (constrained, free): (Vec<_>, Vec<_>) = tests
             .into_iter()
             .partition(|t| constrained_modules.contains(t.module_path.as_str()));
@@ -105,11 +108,20 @@ pub fn partition_with_hooks(
             })
             .collect();
 
-        if needs_file {
-            result.extend(group_by_file(constrained));
-        } else {
+        if file_constrained_modules.is_empty() {
             result.extend(group_by_describe(constrained));
+        } else {
+            result.extend(group_by_file(constrained));
         }
+        result
+    } else if mode == DistMode::Group && !file_constrained_modules.is_empty() {
+        // Group mode with file-scope _all hooks: upgrade those modules to file level.
+        let (constrained, free): (Vec<_>, Vec<_>) = tests
+            .into_iter()
+            .partition(|t| file_constrained_modules.contains(t.module_path.as_str()));
+
+        let mut result = group_by_describe(free);
+        result.extend(group_by_file(constrained));
         result
     } else {
         match mode {
@@ -303,6 +315,51 @@ mod tests {
                 "hook module should match test module"
             );
         }
+    }
+
+    #[test]
+    fn group_mode_with_file_scope_before_all_forces_file_grouping() {
+        let tests = vec![
+            item("a.py", "t1", &["math"]),
+            item("a.py", "t2", &["math"]),
+            item("a.py", "t3", &["strings"]),
+            item("b.py", "t4", &["other"]),
+        ];
+        // Module "a" has a file-scope before_all (empty groups) — even in group mode,
+        // all of a.py's tests must land on one worker.
+        let hooks = vec![hook("setup", HookType::BeforeAll, &[])];
+        let units = partition_with_hooks(tests, &hooks, DistMode::Group);
+        let a_units: Vec<_> = units
+            .iter()
+            .filter(|u| u.tests.iter().any(|t| t.module_path == "a"))
+            .collect();
+        assert_eq!(
+            a_units.len(),
+            1,
+            "a.py should be grouped into 1 unit despite --dist group"
+        );
+        assert_eq!(a_units[0].tests.len(), 3);
+        // b.py is unconstrained — stays as its own group.
+        let b_units: Vec<_> = units
+            .iter()
+            .filter(|u| u.tests.iter().any(|t| t.module_path == "b"))
+            .collect();
+        assert_eq!(b_units.len(), 1);
+    }
+
+    #[test]
+    fn group_mode_with_only_describe_scoped_hooks_stays_group() {
+        let tests = vec![
+            item("a.py", "t1", &["math"]),
+            item("a.py", "t2", &["math"]),
+            item("a.py", "t3", &["strings"]),
+        ];
+        // Hook is scoped to "math" group only — no file-scope constraint.
+        let hooks = vec![hook("setup", HookType::BeforeAll, &["math"])];
+        let units = partition_with_hooks(tests, &hooks, DistMode::Group);
+        // Group mode keeps groups together already — no upgrade needed.
+        // "math" (2 tests) and "strings" (1 test) stay separate.
+        assert_eq!(units.len(), 2);
     }
 
     #[test]

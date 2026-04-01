@@ -18,8 +18,8 @@
   <a href="https://python.org">
     <img src="https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14-blue.svg" alt="python" />
   </a>
-  <a href="https://github.com/thejchap/tryke/actions/workflows/ci.yml">
-    <img src="https://github.com/thejchap/tryke/actions/workflows/ci.yml/badge.svg" alt="CI" />
+  <a href="https://github.com/thejchap/tryke/actions/workflows/release.yml">
+    <img src="https://github.com/thejchap/tryke/actions/workflows/release.yml/badge.svg" alt="CI" />
   </a>
   <a href="https://thejchap.github.io/tryke/">
     <img src="https://img.shields.io/badge/docs-thejchap.github.io%2Ftryke-blue" alt="docs" />

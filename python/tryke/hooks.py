@@ -361,9 +361,9 @@ class HookExecutor:
                 (h for h in scope_hooks if h.category == "before_all"),
                 key=lambda h: h.line_number,
             ):
-                if (h.category, *h.groups) not in self._all_initialized:  # type: ignore[arg-type]
+                if (h.category, h.fn, *h.groups) not in self._all_initialized:  # type: ignore[arg-type]
                     self._resolver.resolve_hook(h.fn, all_scope=True)
-                    self._all_initialized.add((h.category, *h.groups))  # type: ignore[arg-type]
+                    self._all_initialized.add((h.category, h.fn, *h.groups))  # type: ignore[arg-type]
 
             # Wrap_all: resolve on first test in scope (like before_all).
             # Generator setup runs now; teardown deferred to finalize().
@@ -371,9 +371,9 @@ class HookExecutor:
                 (h for h in scope_hooks if h.category == "wrap_all"),
                 key=lambda h: h.line_number,
             ):
-                if (h.category, *h.groups) not in self._all_initialized:  # type: ignore[arg-type]
+                if (h.category, h.fn, *h.groups) not in self._all_initialized:  # type: ignore[arg-type]
                     self._resolver.resolve_hook(h.fn, all_scope=True)
-                    self._all_initialized.add((h.category, *h.groups))  # type: ignore[arg-type]
+                    self._all_initialized.add((h.category, h.fn, *h.groups))  # type: ignore[arg-type]
 
             # Before_each: setup order (definition order)
             setup_sequence.extend(

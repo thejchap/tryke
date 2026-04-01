@@ -635,6 +635,42 @@ with describe("after_all and wrap_all execution"):
         executor.finalize()
         expect(log).to_equal(["a_setup", "b_setup", "test", "b_teardown", "a_teardown"])
 
+    @test(name="finalize skips after_all for scopes that never ran tests")
+    def test_finalize_skips_uninitialized_scopes() -> None:
+        log: list[str] = []
+
+        @before_all
+        def setup_users() -> None:
+            log.append("before_all:users")
+
+        @after_all
+        def cleanup_users() -> None:
+            log.append("after_all:users")
+
+        @before_all
+        def setup_admin() -> None:
+            log.append("before_all:admin")
+
+        @after_all
+        def cleanup_admin() -> None:
+            log.append("after_all:admin")
+
+        def my_test() -> None:
+            log.append("test")
+
+        executor = HookExecutor()
+        executor.register_hook(setup_users, groups=["users"], line_number=1)
+        executor.register_hook(cleanup_users, groups=["users"], line_number=2)
+        executor.register_hook(setup_admin, groups=["admin"], line_number=3)
+        executor.register_hook(cleanup_admin, groups=["admin"], line_number=4)
+        # Only run a test in the "users" scope
+        executor.run_test(my_test, groups=["users"])
+        expect(log).to_equal(["before_all:users", "test"])
+
+        executor.finalize()
+        # after_all:admin should NOT have run — no test entered the admin scope.
+        expect(log).to_equal(["before_all:users", "test", "after_all:users"])
+
 
 with describe("Depends typing"):
 

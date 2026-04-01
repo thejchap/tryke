@@ -317,6 +317,9 @@ class HookExecutor:
         self._hooks: list[_RegisteredHook] = []
         self._resolver = DependencyResolver()
         self._all_initialized: set[tuple[str, ...]] = set()
+        # Tracks every scope visited by run_test, so finalize only fires
+        # after_all for scopes that actually had tests run in them.
+        self._visited_scopes: set[tuple[str, ...]] = set()
 
     def register_hook(
         self,
@@ -348,6 +351,9 @@ class HookExecutor:
             (),
             *[tuple(groups[: i + 1]) for i in range(len(groups))],
         ]
+
+        # Record all scopes visited by this test run.
+        self._visited_scopes.update(scopes)
 
         # Collect hooks per scope
         setup_sequence: list[_RegisteredHook] = []
@@ -431,15 +437,12 @@ class HookExecutor:
         """Run scope-level teardown: after_all hooks and wrap_all generators.
 
         The worker calls this after all tests in a module have completed.
+        Only processes scopes that were actually entered during test execution.
         """
-        # Build the scope chain from all registered hooks
-        all_scopes: set[tuple[str, ...]] = set()
-        for h in self._hooks:
-            all_scopes.add(tuple(h.groups))
         # Process scopes inner-to-outer (longest first for reverse ordering)
-        sorted_scopes = sorted(all_scopes, key=len, reverse=True)
+        sorted_scopes = sorted(self._visited_scopes, key=len, reverse=True)
 
-        # Collect after_all hooks across all scopes (inner-to-outer)
+        # Collect after_all hooks across initialized scopes (inner-to-outer)
         after_all_hooks: list[_RegisteredHook] = []
         for scope in sorted_scopes:
             scope_hooks = [h for h in self._hooks if tuple(h.groups) == scope]

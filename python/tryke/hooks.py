@@ -412,7 +412,10 @@ class HookExecutor:
             else:
                 test_fn(**test_kwargs)
         finally:
-            # Run teardown (inner-to-outer, reverse order)
+            # Teardown wrap_each generators first (wrap semantics: closest to test)
+            self._resolver.teardown_generators()
+
+            # Run after_each teardown (inner-to-outer, reverse order)
             teardown_sequence.reverse()
             for h in teardown_sequence:
                 kwargs = self._resolver.resolve(h.fn)
@@ -421,8 +424,7 @@ class HookExecutor:
                 else:
                     h.fn(**kwargs)
 
-            # Teardown wrap_each generators, then clear per-test caches
-            self._resolver.teardown_generators()
+            # Clear per-test caches
             self._resolver.clear_each_cache()
 
     def finalize(self) -> None:

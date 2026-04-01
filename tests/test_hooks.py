@@ -563,6 +563,55 @@ with describe("after_all and wrap_all execution"):
         executor.finalize()
         expect(log).to_contain("after_all")
 
+    @test(name="multiple before_all hooks in same scope all run")
+    def test_multiple_before_all_same_scope() -> None:
+        log: list[str] = []
+
+        @before_all
+        def setup_a() -> None:
+            log.append("a")
+
+        @before_all
+        def setup_b() -> None:
+            log.append("b")
+
+        def my_test() -> None:
+            log.append("test")
+
+        executor = HookExecutor()
+        executor.register_hook(setup_a, groups=[], line_number=1)
+        executor.register_hook(setup_b, groups=[], line_number=2)
+        executor.run_test(my_test, groups=[])
+        expect(log).to_equal(["a", "b", "test"])
+
+    @test(name="multiple wrap_all hooks in same scope all run")
+    def test_multiple_wrap_all_same_scope() -> None:
+        log: list[str] = []
+
+        @wrap_all
+        def wrap_a() -> Generator[None, None, None]:
+            log.append("a_setup")
+            yield
+            log.append("a_teardown")
+
+        @wrap_all
+        def wrap_b() -> Generator[None, None, None]:
+            log.append("b_setup")
+            yield
+            log.append("b_teardown")
+
+        def my_test() -> None:
+            log.append("test")
+
+        executor = HookExecutor()
+        executor.register_hook(wrap_a, groups=[], line_number=1)
+        executor.register_hook(wrap_b, groups=[], line_number=2)
+        executor.run_test(my_test, groups=[])
+        expect(log).to_equal(["a_setup", "b_setup", "test"])
+
+        executor.finalize()
+        expect(log).to_equal(["a_setup", "b_setup", "test", "b_teardown", "a_teardown"])
+
 
 with describe("Depends typing"):
 

@@ -11,13 +11,18 @@ import asyncio
 import contextlib
 import inspect
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, overload
+from typing import TYPE_CHECKING, NamedTuple, overload
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable, Generator
-    from typing import Any, TypeVar
+    from typing import Any, Protocol
 
-    T = TypeVar("T")
+    class _HookFn(Protocol):
+        """A callable with a ``__name__`` — i.e. any real function."""
+
+        __name__: str
+
+        def __call__(self, *args: Any, **kwargs: Any) -> Any: ...  # noqa: ANN401
 
 # ---------------------------------------------------------------------------
 # Depends
@@ -38,11 +43,11 @@ class _Depends:
 if TYPE_CHECKING:
 
     @overload
-    def Depends(dep: Callable[..., Generator[T, None, None]], /) -> T: ...  # noqa: UP047
+    def Depends[T](dep: Callable[..., Generator[T, None, None]], /) -> T: ...
     @overload
-    def Depends(dep: Callable[..., AsyncGenerator[T, None]], /) -> T: ...  # noqa: UP047
+    def Depends[T](dep: Callable[..., AsyncGenerator[T, None]], /) -> T: ...
     @overload
-    def Depends(dep: Callable[..., T], /) -> T: ...  # noqa: UP047
+    def Depends[T](dep: Callable[..., T], /) -> T: ...
 
 
 def Depends(dep: Callable[..., Any], /) -> Any:  # noqa: N802 - matches FastAPI convention
@@ -69,37 +74,113 @@ def Depends(dep: Callable[..., Any], /) -> Any:  # noqa: N802 - matches FastAPI 
 # Hook decorators
 # ---------------------------------------------------------------------------
 
-type _Fn = Callable[..., Any]
+
+def _stamp(fn: _HookFn, attr: str) -> None:
+    """Stamp a hook attribute on a function."""
+    setattr(fn, attr, True)
 
 
-def _make_hook_decorator(attr: str) -> Callable[..., Any]:
-    """Build a decorator that stamps *attr* on the decorated function.
+@overload
+def before_each[F: _HookFn](fn: F, /) -> F: ...
+@overload
+def before_each(fn: None = ..., /) -> Callable[[_HookFn], _HookFn]: ...
+def before_each(fn: _HookFn | None = None, /) -> _HookFn | Callable[[_HookFn], _HookFn]:
+    """Mark a function as a before-each hook."""
+    if fn is not None:
+        _stamp(fn, "__tryke_before_each__")
+        return fn
 
-    Supports both bare (``@before_each``) and call (``@before_each()``)
-    forms.
-    """
+    def inner(f: _HookFn) -> _HookFn:
+        _stamp(f, "__tryke_before_each__")
+        return f
 
-    def decorator(fn: _Fn | None = None, /) -> _Fn | Callable[[_Fn], _Fn]:
-        if fn is not None:
-            setattr(fn, attr, True)
-            return fn
-
-        # Call form: @hook()
-        def inner(f: _Fn) -> _Fn:
-            setattr(f, attr, True)
-            return f
-
-        return inner
-
-    return decorator
+    return inner
 
 
-before_each = _make_hook_decorator("__tryke_before_each__")
-before_all = _make_hook_decorator("__tryke_before_all__")
-after_each = _make_hook_decorator("__tryke_after_each__")
-after_all = _make_hook_decorator("__tryke_after_all__")
-wrap_each = _make_hook_decorator("__tryke_wrap_each__")
-wrap_all = _make_hook_decorator("__tryke_wrap_all__")
+@overload
+def before_all[F: _HookFn](fn: F, /) -> F: ...
+@overload
+def before_all(fn: None = ..., /) -> Callable[[_HookFn], _HookFn]: ...
+def before_all(fn: _HookFn | None = None, /) -> _HookFn | Callable[[_HookFn], _HookFn]:
+    """Mark a function as a before-all hook."""
+    if fn is not None:
+        _stamp(fn, "__tryke_before_all__")
+        return fn
+
+    def inner(f: _HookFn) -> _HookFn:
+        _stamp(f, "__tryke_before_all__")
+        return f
+
+    return inner
+
+
+@overload
+def after_each[F: _HookFn](fn: F, /) -> F: ...
+@overload
+def after_each(fn: None = ..., /) -> Callable[[_HookFn], _HookFn]: ...
+def after_each(fn: _HookFn | None = None, /) -> _HookFn | Callable[[_HookFn], _HookFn]:
+    """Mark a function as an after-each hook."""
+    if fn is not None:
+        _stamp(fn, "__tryke_after_each__")
+        return fn
+
+    def inner(f: _HookFn) -> _HookFn:
+        _stamp(f, "__tryke_after_each__")
+        return f
+
+    return inner
+
+
+@overload
+def after_all[F: _HookFn](fn: F, /) -> F: ...
+@overload
+def after_all(fn: None = ..., /) -> Callable[[_HookFn], _HookFn]: ...
+def after_all(fn: _HookFn | None = None, /) -> _HookFn | Callable[[_HookFn], _HookFn]:
+    """Mark a function as an after-all hook."""
+    if fn is not None:
+        _stamp(fn, "__tryke_after_all__")
+        return fn
+
+    def inner(f: _HookFn) -> _HookFn:
+        _stamp(f, "__tryke_after_all__")
+        return f
+
+    return inner
+
+
+@overload
+def wrap_each[F: _HookFn](fn: F, /) -> F: ...
+@overload
+def wrap_each(fn: None = ..., /) -> Callable[[_HookFn], _HookFn]: ...
+def wrap_each(fn: _HookFn | None = None, /) -> _HookFn | Callable[[_HookFn], _HookFn]:
+    """Mark a function as a wrap-each hook."""
+    if fn is not None:
+        _stamp(fn, "__tryke_wrap_each__")
+        return fn
+
+    def inner(f: _HookFn) -> _HookFn:
+        _stamp(f, "__tryke_wrap_each__")
+        return f
+
+    return inner
+
+
+@overload
+def wrap_all[F: _HookFn](fn: F, /) -> F: ...
+@overload
+def wrap_all(fn: None = ..., /) -> Callable[[_HookFn], _HookFn]: ...
+def wrap_all(fn: _HookFn | None = None, /) -> _HookFn | Callable[[_HookFn], _HookFn]:
+    """Mark a function as a wrap-all hook."""
+    if fn is not None:
+        _stamp(fn, "__tryke_wrap_all__")
+        return fn
+
+    def inner(f: _HookFn) -> _HookFn:
+        _stamp(f, "__tryke_wrap_all__")
+        return f
+
+    return inner
+
 
 # Dunder → hook category mapping.
 _HOOK_ATTRS = {
@@ -114,7 +195,7 @@ _HOOK_ATTRS = {
 _EACH_CATEGORIES = {"before_each", "after_each", "wrap_each"}
 
 
-def _hook_category(fn: Callable[..., Any]) -> str | None:
+def _hook_category(fn: _HookFn) -> str | None:
     """Return the hook category for a stamped function, or None."""
     for attr, category in _HOOK_ATTRS.items():
         if hasattr(fn, attr):
@@ -140,13 +221,13 @@ class DependencyResolver:
     """Resolve ``Depends()`` in function signatures, cache results by scope."""
 
     def __init__(self) -> None:
-        self._cache: dict[Callable[..., Any], Any] = {}
+        self._cache: dict[_HookFn, Any] = {}
         self._active_generators: list[
-            tuple[Callable[..., Any], Generator[Any, None, None], bool]
+            tuple[_HookFn, Generator[Any, None, None], bool]
         ] = []  # (fn, gen, is_all_scope)
         self._active_async_generators: list[
             tuple[
-                Callable[..., Any],
+                _HookFn,
                 AsyncGenerator[Any, None],
                 asyncio.AbstractEventLoop,
                 bool,
@@ -154,7 +235,7 @@ class DependencyResolver:
         ] = []  # (fn, agen, loop, is_all_scope)
         self._resolving: set[int] = set()  # ids of functions currently being resolved
 
-    def resolve(self, fn: Callable[..., Any]) -> dict[str, Any]:
+    def resolve(self, fn: _HookFn) -> dict[str, Any]:
         """Inspect *fn*'s signature and resolve all ``Depends()`` defaults.
 
         Returns a dict of ``{param_name: resolved_value}`` suitable for
@@ -168,7 +249,7 @@ class DependencyResolver:
                 kwargs[name] = self.resolve_hook(dep_fn)
         return kwargs
 
-    def resolve_hook(self, fn: Callable[..., Any], *, all_scope: bool = False) -> Any:  # noqa: ANN401
+    def resolve_hook(self, fn: _HookFn, *, all_scope: bool = False) -> Any:  # noqa: ANN401
         """Resolve a single hook function, returning its cached value.
 
         When *all_scope* is True, generator lifecycles are preserved until
@@ -214,7 +295,7 @@ class DependencyResolver:
 
     def _teardown_sync_generators(
         self,
-        gens: list[tuple[Callable[..., Any], Generator[Any, None, None], bool]],
+        gens: list[tuple[_HookFn, Generator[Any, None, None], bool]],
     ) -> None:
         while gens:
             fn, gen, _all = gens.pop()
@@ -237,7 +318,7 @@ class DependencyResolver:
         self,
         gens: list[
             tuple[
-                Callable[..., Any],
+                _HookFn,
                 AsyncGenerator[Any, None],
                 asyncio.AbstractEventLoop,
                 bool,
@@ -300,10 +381,18 @@ class DependencyResolver:
 class _RegisteredHook:
     """A hook function with its metadata."""
 
-    fn: Callable[..., Any]
+    fn: _HookFn
     category: str
     groups: list[str]
     line_number: int = 0
+
+
+class _HookKey(NamedTuple):
+    """Identity key for tracking which (category, fn, scope) combos have run."""
+
+    category: str
+    fn_id: int
+    groups: tuple[str, ...]
 
 
 class HookExecutor:
@@ -316,14 +405,14 @@ class HookExecutor:
     def __init__(self) -> None:
         self._hooks: list[_RegisteredHook] = []
         self._resolver = DependencyResolver()
-        self._all_initialized: set[tuple[str, ...]] = set()
+        self._all_initialized: set[_HookKey] = set()
         # Tracks every scope visited by run_test, so finalize only fires
         # after_all for scopes that actually had tests run in them.
         self._visited_scopes: set[tuple[str, ...]] = set()
 
     def register_hook(
         self,
-        fn: Callable[..., Any],
+        fn: _HookFn,
         *,
         groups: list[str],
         line_number: int = 0,
@@ -341,7 +430,7 @@ class HookExecutor:
 
     def run_test(
         self,
-        test_fn: Callable[..., Any],
+        test_fn: _HookFn,
         *,
         groups: list[str],
     ) -> None:
@@ -367,9 +456,10 @@ class HookExecutor:
                 (h for h in scope_hooks if h.category == "before_all"),
                 key=lambda h: h.line_number,
             ):
-                if (h.category, h.fn, *h.groups) not in self._all_initialized:  # type: ignore[arg-type]
+                key = _HookKey(h.category, id(h.fn), tuple(h.groups))
+                if key not in self._all_initialized:
                     self._resolver.resolve_hook(h.fn, all_scope=True)
-                    self._all_initialized.add((h.category, h.fn, *h.groups))  # type: ignore[arg-type]
+                    self._all_initialized.add(key)
 
             # Wrap_all: resolve on first test in scope (like before_all).
             # Generator setup runs now; teardown deferred to finalize().
@@ -377,9 +467,10 @@ class HookExecutor:
                 (h for h in scope_hooks if h.category == "wrap_all"),
                 key=lambda h: h.line_number,
             ):
-                if (h.category, h.fn, *h.groups) not in self._all_initialized:  # type: ignore[arg-type]
+                key = _HookKey(h.category, id(h.fn), tuple(h.groups))
+                if key not in self._all_initialized:
                     self._resolver.resolve_hook(h.fn, all_scope=True)
-                    self._all_initialized.add((h.category, h.fn, *h.groups))  # type: ignore[arg-type]
+                    self._all_initialized.add(key)
 
             # Before_each: setup order (definition order)
             setup_sequence.extend(

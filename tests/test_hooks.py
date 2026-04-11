@@ -1,4 +1,6 @@
-"""Tests for the hooks module: decorators, Depends(), and resolver."""
+"""Tests for the hooks module: decorators, Depends(), resolver, and e2e."""
+
+# ruff: noqa: B008, PT028 — Depends() in defaults is the intended API pattern.
 
 from __future__ import annotations
 
@@ -110,7 +112,9 @@ with describe("Depends"):
         def my_hook() -> int:
             return 42
 
-        dep = Depends(my_hook)
+        # Use _Depends directly to test the runtime sentinel (Depends has
+        # TYPE_CHECKING overloads that hide the _Depends wrapper).
+        dep = _Depends(my_hook)
         expect(isinstance(dep, _Depends)).to_be_truthy()
         expect(dep.dependency).to_be(my_hook)
 
@@ -122,8 +126,8 @@ with describe("Depends"):
         def hook_b() -> str:
             return "b"
 
-        dep_a = Depends(hook_a)
-        dep_b = Depends(hook_b)
+        dep_a = _Depends(hook_a)
+        dep_b = _Depends(hook_b)
         expect(dep_a.dependency).to_be(hook_a)
         expect(dep_b.dependency).to_be(hook_b)
 
@@ -194,7 +198,7 @@ with describe("DependencyResolver"):
     @test(name="detects dependency cycles")
     def test_cycle_detection() -> None:
         @before_each
-        def hook_a(_b: str = Depends(lambda: None)) -> str:  # Placeholder
+        def hook_a(_b: str = Depends(lambda: "")) -> str:  # Placeholder
             return "a"
 
         @before_each
@@ -454,7 +458,7 @@ with describe("generator lifecycle"):
 
         resolver = DependencyResolver()
         resolver.resolve_hook(bad_hook)
-        expect(lambda: resolver.teardown_generators()).to_raise(  # noqa: PLW0108
+        expect(resolver.teardown_generators).to_raise(
             RuntimeError, match="yielded more than once"
         )
 
@@ -693,3 +697,181 @@ with describe("Depends typing"):
         # At type-check time: Depends(resource) should be int (unwrapped from Generator)
         val = Depends(resource)
         assert_type(val, int)
+
+
+# ---------------------------------------------------------------------------
+# E2E: hooks through the full pipeline
+# ---------------------------------------------------------------------------
+
+# Module-level tracking list shared across hooks and tests.
+_log: list[str] = []
+
+
+@before_each
+def clear_log() -> None:
+    _log.clear()
+
+
+@before_all
+def db_conn() -> str:
+    return "test_db"
+
+
+@before_each
+def table(conn: str = Depends(db_conn)) -> str:
+    _log.append(f"setup:{conn}")
+    return f"{conn}/users"
+
+
+@after_each
+def cleanup() -> None:
+    _log.append("cleanup")
+
+
+with describe("hooks e2e"):
+
+    @test(name="before_each runs and provides value via Depends")
+    def test_before_each_provides_value() -> None:
+        _ = table  # Reference the hook to verify it ran
+        expect(_log).to_contain("setup:test_db")
+
+    @test(name="before_each runs independently per test")
+    def test_after_runs() -> None:
+        # _log was cleared by clear_log() in before_each for this test,
+        # so this only verifies that the per-test setup hook ran.
+        expect(_log).to_contain("setup:test_db")
+
+
+with describe("wrap hooks"):
+
+    @wrap_each
+    def with_context() -> Generator[str, None, None]:
+        _log.append("wrap_setup")
+        yield "ctx"
+        _log.append("wrap_teardown")
+
+    @test(name="wrap_each wraps test execution")
+    def test_wrap() -> None:
+        expect(_log).to_contain("wrap_setup")
+
+
+# ---------------------------------------------------------------------------
+# before_all instance reuse
+# ---------------------------------------------------------------------------
+
+# Track how many times the expensive resource is created.
+_expensive_call_count: list[int] = [0]
+
+
+@before_all
+def expensive_resource() -> dict[str, int]:
+    """Simulates an expensive setup that should only happen once."""
+    _expensive_call_count[0] += 1
+    return {"created": _expensive_call_count[0], "value": 42}
+
+
+with describe("before_all reuse"):
+
+    @test(name="first test receives the before_all instance")
+    def test_reuse_first(
+        res: dict[str, int] = Depends(expensive_resource),
+    ) -> None:
+        expect(res["value"]).to_equal(42)
+        # Created exactly once so far
+        expect(res["created"]).to_equal(1)
+        expect(_expensive_call_count[0]).to_equal(1)
+
+    @test(name="second test gets the same cached instance")
+    def test_reuse_second(
+        res: dict[str, int] = Depends(expensive_resource),
+    ) -> None:
+        # Still the same instance — before_all was NOT called again
+        expect(res["created"]).to_equal(1)
+        expect(_expensive_call_count[0]).to_equal(1)
+
+    @test(name="third test confirms no additional calls")
+    def test_reuse_third(
+        res: dict[str, int] = Depends(expensive_resource),
+    ) -> None:
+        expect(res["created"]).to_equal(1)
+        expect(_expensive_call_count[0]).to_equal(1)
+
+
+# ---------------------------------------------------------------------------
+# Composability via Depends chains
+# ---------------------------------------------------------------------------
+
+
+@before_all
+def app_config() -> dict[str, str]:
+    return {"db_url": "sqlite:///:memory:", "cache_url": "redis://localhost"}
+
+
+@before_all
+def database(cfg: dict[str, str] = Depends(app_config)) -> str:
+    return f"Database({cfg['db_url']})"
+
+
+@before_all
+def cache(cfg: dict[str, str] = Depends(app_config)) -> str:
+    return f"Cache({cfg['cache_url']})"
+
+
+@before_each
+def user_service(
+    db_svc: str = Depends(database),
+    cache_svc: str = Depends(cache),
+) -> str:
+    return f"UserService({db_svc}, {cache_svc})"
+
+
+with describe("composability"):
+
+    @test(name="test receives fully resolved dependency chain")
+    def test_composed_service(
+        svc: str = Depends(user_service),
+        cfg: dict[str, str] = Depends(app_config),
+        db_svc: str = Depends(database),
+        cache_svc: str = Depends(cache),
+    ) -> None:
+        # Leaf dependency
+        expect(cfg).to_equal(
+            {"db_url": "sqlite:///:memory:", "cache_url": "redis://localhost"}
+        )
+        # Mid-level: each resolved with config injected
+        expect(db_svc).to_equal("Database(sqlite:///:memory:)")
+        expect(cache_svc).to_equal("Cache(redis://localhost)")
+        # Top-level: composed from db + cache
+        expect(svc).to_equal(
+            "UserService(Database(sqlite:///:memory:), Cache(redis://localhost))"
+        )
+
+    @test(name="before_each produces fresh value each test, before_all is reused")
+    def test_fresh_each_reused_all(
+        svc: str = Depends(user_service),
+    ) -> None:
+        # user_service is before_each — resolved fresh.
+        # database/cache are before_all — same cached values.
+        expect(svc).to_equal(
+            "UserService(Database(sqlite:///:memory:), Cache(redis://localhost))"
+        )
+
+
+@before_all
+def base_url() -> str:
+    return "http://localhost:8000"
+
+
+with describe("composability > nested describe"):
+
+    @before_each
+    def auth_header(url: str = Depends(base_url)) -> dict[str, str]:
+        return {"Authorization": f"Bearer token-for-{url}"}
+
+    @test(name="describe-scoped hook depends on module-scoped before_all")
+    def test_nested_depends(
+        header: dict[str, str] = Depends(auth_header),
+    ) -> None:
+        expect(header).to_equal(
+            {"Authorization": "Bearer token-for-http://localhost:8000"}
+        )

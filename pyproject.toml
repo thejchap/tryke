@@ -27,7 +27,7 @@ Repository = "https://github.com/thejchap/tryke"
 "Bug Tracker" = "https://github.com/thejchap/tryke/issues"
 
 [tool.ty.src]
-exclude = ["python", "tests", "benchmarks/suites"] # TODO
+exclude = ["benchmarks/suites"] # TODO
 
 [tool.ruff]
 exclude = ["benchmarks/suites"]
@@ -54,7 +54,7 @@ module-root = "python/tryke"
 [dependency-groups]
 dev = [
   "ruff~=0.15.4",
-  "ty~=0.0.19",
+  "ty~=0.0.29",
   "zensical>=0.0.26",
   "mkdocstrings-python>=1.16.12",
   "tryke",

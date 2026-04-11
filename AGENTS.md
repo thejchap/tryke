@@ -7,6 +7,12 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 ```
 
+## running python tests
+
+```bash
+cargo run test --reporter llm
+```
+
 ## dev guidelines
 
 - all changes must be tested. if you're not testing your changes, you're not done.

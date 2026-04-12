@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple, overload
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Callable, Generator
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
     from typing import Any, Protocol
 
     class _HookFn(Protocol):
@@ -46,6 +46,8 @@ if TYPE_CHECKING:
     def Depends[T](dep: Callable[..., Generator[T, None, None]], /) -> T: ...
     @overload
     def Depends[T](dep: Callable[..., AsyncGenerator[T, None]], /) -> T: ...
+    @overload
+    def Depends[T](dep: Callable[..., Awaitable[T]], /) -> T: ...
     @overload
     def Depends[T](dep: Callable[..., T], /) -> T: ...
 

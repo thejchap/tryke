@@ -23,7 +23,7 @@ from tryke.hooks import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import AsyncGenerator, Generator
 
 with describe("hook decorators"):
 
@@ -501,6 +501,313 @@ with describe("async generator lifecycle"):
         expect(teardown_ran).to_be_truthy()
 
 
+with describe("async hooks in HookExecutor"):
+
+    @test(name="async before_each runs before test")
+    def test_async_before_each_runs() -> None:
+        log: list[str] = []
+
+        @before_each
+        async def setup() -> None:
+            log.append("async_setup")
+
+        def my_test() -> None:
+            log.append("test")
+
+        executor = HookExecutor()
+        executor.register_hook(setup, groups=[])
+        executor.run_test(my_test, groups=[])
+        expect(log).to_equal(["async_setup", "test"])
+
+    @test(name="async after_each runs after test")
+    def test_async_after_each_runs() -> None:
+        log: list[str] = []
+
+        @after_each
+        async def cleanup() -> None:
+            log.append("async_cleanup")
+
+        def my_test() -> None:
+            log.append("test")
+
+        executor = HookExecutor()
+        executor.register_hook(cleanup, groups=[])
+        executor.run_test(my_test, groups=[])
+        expect(log).to_equal(["test", "async_cleanup"])
+
+    @test(name="async before_all runs once per scope")
+    def test_async_before_all_runs_once() -> None:
+        call_count = 0
+
+        @before_all
+        async def setup() -> str:
+            nonlocal call_count
+            call_count += 1
+            return "resource"
+
+        def test_a() -> None:
+            pass
+
+        def test_b() -> None:
+            pass
+
+        executor = HookExecutor()
+        executor.register_hook(setup, groups=[])
+        executor.run_test(test_a, groups=[])
+        executor.run_test(test_b, groups=[])
+        expect(call_count).to_equal(1)
+
+    @test(name="async after_all runs on finalize")
+    def test_async_after_all_on_finalize() -> None:
+        log: list[str] = []
+
+        @after_all
+        async def cleanup() -> None:
+            log.append("async_after_all")
+
+        def my_test() -> None:
+            log.append("test")
+
+        executor = HookExecutor()
+        executor.register_hook(cleanup, groups=[])
+        executor.run_test(my_test, groups=[])
+        expect(log).to_equal(["test"])
+
+        executor.finalize()
+        expect(log).to_equal(["test", "async_after_all"])
+
+    @test(name="async wrap_each generator wraps test execution")
+    def test_async_wrap_each_wraps() -> None:
+        log: list[str] = []
+
+        @wrap_each
+        async def wrapper() -> AsyncGenerator[None, None]:
+            log.append("async_setup")
+            yield
+            log.append("async_teardown")
+
+        def my_test() -> None:
+            log.append("test")
+
+        executor = HookExecutor()
+        executor.register_hook(wrapper, groups=[])
+        executor.run_test(my_test, groups=[])
+        expect(log).to_equal(["async_setup", "test", "async_teardown"])
+
+    @test(name="async wrap_all setup on first test, teardown on finalize")
+    def test_async_wrap_all_lifecycle() -> None:
+        log: list[str] = []
+
+        @wrap_all
+        async def wrapper() -> AsyncGenerator[None, None]:
+            log.append("async_wrap_setup")
+            yield
+            log.append("async_wrap_teardown")
+
+        def test_a() -> None:
+            log.append("test_a")
+
+        def test_b() -> None:
+            log.append("test_b")
+
+        executor = HookExecutor()
+        executor.register_hook(wrapper, groups=[])
+        executor.run_test(test_a, groups=[])
+        executor.run_test(test_b, groups=[])
+        expect(log).to_equal(["async_wrap_setup", "test_a", "test_b"])
+
+        executor.finalize()
+        expect(log).to_equal(
+            ["async_wrap_setup", "test_a", "test_b", "async_wrap_teardown"]
+        )
+
+    @test(name="async test function runs correctly")
+    def test_async_test_fn_runs() -> None:
+        log: list[str] = []
+
+        async def my_test() -> None:
+            log.append("async_test")
+
+        executor = HookExecutor()
+        executor.run_test(my_test, groups=[])
+        expect(log).to_equal(["async_test"])
+
+    @test(name="async before_each provides value to async test via Depends")
+    def test_async_depends_in_async_test() -> None:
+        @before_each
+        async def db() -> str:
+            return "async_conn"
+
+        received: dict[str, str] = {}
+
+        async def my_test(conn: str = Depends(db)) -> None:
+            received["conn"] = conn
+
+        executor = HookExecutor()
+        executor.register_hook(db, groups=[])
+        executor.run_test(my_test, groups=[])
+        expect(received["conn"]).to_equal("async_conn")
+
+    @test(name="async Depends chain: async hook depending on async hook")
+    def test_async_depends_chain() -> None:
+        @before_each
+        async def db() -> str:
+            return "conn"
+
+        @before_each
+        async def table(conn: str = Depends(db)) -> str:
+            return f"{conn}/table"
+
+        received: dict[str, str] = {}
+
+        async def my_test(t: str = Depends(table)) -> None:
+            received["t"] = t
+
+        executor = HookExecutor()
+        executor.register_hook(db, groups=[])
+        executor.register_hook(table, groups=[])
+        executor.run_test(my_test, groups=[])
+        expect(received["t"]).to_equal("conn/table")
+
+    @test(name="async after_each still runs when async test fails")
+    def test_async_after_each_on_async_failure() -> None:
+        log: list[str] = []
+
+        @after_each
+        async def cleanup() -> None:
+            log.append("cleanup")
+
+        async def failing_test() -> None:
+            log.append("test")
+            msg = "boom"
+            raise RuntimeError(msg)
+
+        executor = HookExecutor()
+        executor.register_hook(cleanup, groups=[])
+        expect(lambda: executor.run_test(failing_test, groups=[])).to_raise(
+            RuntimeError
+        )
+        expect(log).to_contain("cleanup")
+
+    @test(name="async wrap_each teardown runs when async test fails")
+    def test_async_wrap_each_on_async_failure() -> None:
+        log: list[str] = []
+
+        @wrap_each
+        async def wrapper() -> AsyncGenerator[None, None]:
+            log.append("setup")
+            yield
+            log.append("teardown")
+
+        async def failing_test() -> None:
+            log.append("test")
+            msg = "boom"
+            raise RuntimeError(msg)
+
+        executor = HookExecutor()
+        executor.register_hook(wrapper, groups=[])
+        expect(lambda: executor.run_test(failing_test, groups=[])).to_raise(
+            RuntimeError
+        )
+        expect(log).to_contain("teardown")
+
+    @test(name="async wrap_each teardown runs before async after_each")
+    def test_async_wrap_before_async_after() -> None:
+        log: list[str] = []
+
+        @wrap_each
+        async def wrapper() -> AsyncGenerator[None, None]:
+            log.append("wrap_setup")
+            yield
+            log.append("wrap_teardown")
+
+        @after_each
+        async def cleanup() -> None:
+            log.append("after_each")
+
+        def my_test() -> None:
+            log.append("test")
+
+        executor = HookExecutor()
+        executor.register_hook(wrapper, groups=[], line_number=1)
+        executor.register_hook(cleanup, groups=[], line_number=2)
+        executor.run_test(my_test, groups=[])
+        expect(log).to_equal(["wrap_setup", "test", "wrap_teardown", "after_each"])
+
+    @test(name="async generator aclose is called on teardown")
+    def test_async_gen_aclose_called() -> None:
+        close_called = False
+
+        @wrap_each
+        async def tracked_hook() -> AsyncGenerator[str, None]:
+            nonlocal close_called
+            try:
+                yield "value"
+            finally:
+                close_called = True
+
+        resolver = DependencyResolver()
+        resolver.resolve_hook(tracked_hook)
+        resolver.teardown_generators()
+        expect(close_called).to_be_truthy()
+
+    @test(name="mixed sync and async hooks execute in correct order")
+    def test_mixed_sync_async_hooks() -> None:
+        log: list[str] = []
+
+        @before_each
+        def sync_setup() -> None:
+            log.append("sync_setup")
+
+        @before_each
+        async def async_setup() -> None:
+            log.append("async_setup")
+
+        @after_each
+        def sync_cleanup() -> None:
+            log.append("sync_cleanup")
+
+        @after_each
+        async def async_cleanup() -> None:
+            log.append("async_cleanup")
+
+        def my_test() -> None:
+            log.append("test")
+
+        executor = HookExecutor()
+        executor.register_hook(sync_setup, groups=[], line_number=1)
+        executor.register_hook(async_setup, groups=[], line_number=2)
+        executor.register_hook(sync_cleanup, groups=[], line_number=3)
+        executor.register_hook(async_cleanup, groups=[], line_number=4)
+        executor.run_test(my_test, groups=[])
+        # Setup: definition order. Teardown: reversed (line 4 → line 3).
+        expect(log).to_equal(
+            ["sync_setup", "async_setup", "test", "async_cleanup", "sync_cleanup"]
+        )
+
+    @test(name="async after_all runs in reverse order on finalize")
+    def test_async_after_all_reverse_order() -> None:
+        log: list[str] = []
+
+        @after_all
+        async def first_cleanup() -> None:
+            log.append("first")
+
+        @after_all
+        async def second_cleanup() -> None:
+            log.append("second")
+
+        def my_test() -> None:
+            pass
+
+        executor = HookExecutor()
+        executor.register_hook(first_cleanup, groups=[], line_number=1)
+        executor.register_hook(second_cleanup, groups=[], line_number=2)
+        executor.run_test(my_test, groups=[])
+        executor.finalize()
+        expect(log).to_equal(["second", "first"])
+
+
 with describe("after_all and wrap_all execution"):
 
     @test(name="after_all runs on finalize")
@@ -695,6 +1002,27 @@ with describe("Depends typing"):
             yield 42
 
         # At type-check time: Depends(resource) should be int (unwrapped from Generator)
+        val = Depends(resource)
+        assert_type(val, int)
+
+    @test(name="assert_type validates Depends return type for async coroutine")
+    def test_depends_type_async_coroutine() -> None:
+        @before_each
+        async def resource() -> str:
+            return "async_val"
+
+        # At type-check time: Depends(resource) should be str (unwrapped from Awaitable)
+        val = Depends(resource)
+        assert_type(val, str)
+
+    @test(name="assert_type validates Depends return type for async generator")
+    def test_depends_type_async_generator() -> None:
+        @wrap_each
+        async def resource() -> AsyncGenerator[int, None]:
+            yield 42
+
+        # At type-check time: Depends(resource) should be int (unwrapped from
+        # AsyncGenerator).
         val = Depends(resource)
         assert_type(val, int)
 

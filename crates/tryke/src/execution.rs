@@ -138,8 +138,11 @@ pub async fn report_cycle(
     }
 
     let mut hit_maxfail = false;
-    let units = partition_with_hooks(run_tests, hooks, dist);
-    let mut stream = pool.run(units);
+    let partition = partition_with_hooks(run_tests, hooks, dist);
+    for w in &partition.warnings {
+        eprintln!("warning: {w}");
+    }
+    let mut stream = pool.run(partition.units);
     while let Some(result) = stream.next().await {
         match &result.outcome {
             TestOutcome::Passed => passed += 1,
@@ -437,7 +440,7 @@ def test_failing():
             &[dir.path().to_path_buf(), python_dir],
         );
         pool.warm().await;
-        let units = partition_with_hooks(tests, &[], DistMode::Test);
+        let units = partition_with_hooks(tests, &[], DistMode::Test).units;
         let mut results: Vec<_> = pool.run(units).collect().await;
         results.sort_by(|a, b| a.test.name.cmp(&b.test.name));
 

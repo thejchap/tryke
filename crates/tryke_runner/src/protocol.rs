@@ -34,11 +34,11 @@ pub struct RunTestParams {
     pub groups: Vec<String>,
 }
 
-/// Wire format for a single hook sent to the Python worker.
+/// Wire format for a single fixture sent to the Python worker.
 #[derive(Debug, Clone, Serialize)]
 pub struct HookWire {
     pub name: String,
-    pub hook_type: String,
+    pub per: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

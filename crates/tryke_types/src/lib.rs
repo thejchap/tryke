@@ -185,34 +185,35 @@ pub struct DiscoveryWarning {
     pub message: String,
 }
 
-/// The kind of lifecycle hook declared by a decorator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// Fixture granularity: whether a fixture's value is recomputed for every
+/// test, or cached for the lifetime of its lexical scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum HookType {
-    BeforeEach,
-    BeforeAll,
-    AfterEach,
-    AfterAll,
-    WrapEach,
-    WrapAll,
+pub enum FixturePer {
+    /// Fresh value per test; teardown after each test.
+    #[default]
+    Test,
+    /// One value cached for the whole lexical scope (module or describe
+    /// block); teardown after the last test in that scope.
+    Scope,
 }
 
-impl HookType {
-    /// Returns `true` for hook types that force all tests in their scope
+impl FixturePer {
+    /// Returns `true` for fixture kinds that force all tests in their scope
     /// onto the same worker (because they cache state across tests).
     #[must_use]
     pub fn constrains_scheduling(&self) -> bool {
-        matches!(self, Self::BeforeAll | Self::AfterAll | Self::WrapAll)
+        matches!(self, Self::Scope)
     }
 }
 
-/// A lifecycle hook discovered by static analysis.
+/// A fixture discovered by static analysis.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HookItem {
     pub name: String,
     /// Dotted Python module path (e.g. ``tests.test_math``).
     pub module_path: String,
-    pub hook_type: HookType,
+    pub per: FixturePer,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
     /// Function names extracted from ``Depends()`` in parameter defaults.
@@ -228,6 +229,11 @@ pub struct ParsedFile {
     pub tests: Vec<TestItem>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<HookItem>,
+    /// Human-readable diagnostics produced during parsing. Currently used
+    /// to report unsupported ``Depends(...)`` argument forms so users see
+    /// a loud error instead of a silent no-op at resolution time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
 }
 
 #[cfg(test)]
@@ -278,22 +284,18 @@ mod tests {
     }
 
     #[test]
-    fn hook_type_serializes_to_snake_case() {
-        let json = serde_json::to_string(&HookType::BeforeEach).expect("serialize");
-        assert_eq!(json, r#""before_each""#);
+    fn fixture_per_serializes_to_snake_case() {
+        let json = serde_json::to_string(&FixturePer::Test).expect("serialize");
+        assert_eq!(json, r#""test""#);
 
-        let json = serde_json::to_string(&HookType::WrapAll).expect("serialize");
-        assert_eq!(json, r#""wrap_all""#);
+        let json = serde_json::to_string(&FixturePer::Scope).expect("serialize");
+        assert_eq!(json, r#""scope""#);
     }
 
     #[test]
-    fn hook_type_constrains_scheduling() {
-        assert!(HookType::BeforeAll.constrains_scheduling());
-        assert!(HookType::AfterAll.constrains_scheduling());
-        assert!(HookType::WrapAll.constrains_scheduling());
-        assert!(!HookType::BeforeEach.constrains_scheduling());
-        assert!(!HookType::AfterEach.constrains_scheduling());
-        assert!(!HookType::WrapEach.constrains_scheduling());
+    fn fixture_per_constrains_scheduling() {
+        assert!(FixturePer::Scope.constrains_scheduling());
+        assert!(!FixturePer::Test.constrains_scheduling());
     }
 
     #[test]
@@ -301,7 +303,7 @@ mod tests {
         let hook = HookItem {
             name: "setup_db".into(),
             module_path: "tests.test_setup".into(),
-            hook_type: HookType::BeforeAll,
+            per: FixturePer::Scope,
             groups: vec!["users".into()],
             depends_on: vec!["config".into()],
             line_number: Some(10),
@@ -329,11 +331,12 @@ mod tests {
             hooks: vec![HookItem {
                 name: "db".into(),
                 module_path: "tests.test_foo".into(),
-                hook_type: HookType::BeforeAll,
+                per: FixturePer::Scope,
                 groups: vec![],
                 depends_on: vec![],
                 line_number: Some(5),
             }],
+            errors: vec![],
         };
         let json = serde_json::to_string(&pf).expect("serialize");
         let back: ParsedFile = serde_json::from_str(&json).expect("deserialize");

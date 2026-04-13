@@ -1,108 +1,75 @@
-"""Tests for the hooks module: decorators, Depends(), resolver, and e2e."""
-
-# ruff: noqa: B008, PT028 — Depends() in defaults is the intended API pattern.
+"""Tests for the fixture module: @fixture, Depends(), resolver, and e2e."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, assert_type
 
 import tryke
-from tryke import describe, expect, test
+from tryke import Depends, describe, expect, fixture, test
 from tryke.hooks import (
     CyclicDependencyError,
     DependencyResolver,
-    Depends,
     HookExecutor,
     _Depends,
-    after_all,
-    after_each,
-    before_all,
-    before_each,
-    wrap_all,
-    wrap_each,
+    _fixture_per,
 )
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Generator
 
-with describe("hook decorators"):
 
-    @test(name="before_each stamps attribute on function")
-    def test_before_each_stamps() -> None:
-        @before_each
+with describe("@fixture decorator"):
+
+    @test(name="bare @fixture stamps per='test'")
+    def test_bare_fixture_stamps() -> None:
+        @fixture
         def setup() -> int:
             return 42
 
-        expect(hasattr(setup, "__tryke_before_each__")).to_be_truthy()
+        expect(_fixture_per(setup)).to_equal("test")
         expect(setup()).to_equal(42)
 
-    @test(name="before_all stamps attribute on function")
-    def test_before_all_stamps() -> None:
-        @before_all
-        def setup() -> str:
-            return "db"
-
-        expect(hasattr(setup, "__tryke_before_all__")).to_be_truthy()
-        expect(setup()).to_equal("db")
-
-    @test(name="after_each stamps attribute on function")
-    def test_after_each_stamps() -> None:
-        @after_each
-        def cleanup() -> None:
-            pass
-
-        expect(hasattr(cleanup, "__tryke_after_each__")).to_be_truthy()
-
-    @test(name="after_all stamps attribute on function")
-    def test_after_all_stamps() -> None:
-        @after_all
-        def cleanup() -> None:
-            pass
-
-        expect(hasattr(cleanup, "__tryke_after_all__")).to_be_truthy()
-
-    @test(name="wrap_each stamps attribute on function")
-    def test_wrap_each_stamps() -> None:
-        @wrap_each
-        def wrapper() -> Generator[int, None, None]:
-            yield 42
-
-        expect(hasattr(wrapper, "__tryke_wrap_each__")).to_be_truthy()
-
-    @test(name="wrap_all stamps attribute on function")
-    def test_wrap_all_stamps() -> None:
-        @wrap_all
-        def wrapper() -> Generator[int, None, None]:
-            yield 42
-
-        expect(hasattr(wrapper, "__tryke_wrap_all__")).to_be_truthy()
-
-    @test(name="bare decorator form works")
-    def test_bare_form() -> None:
-        @before_each
+    @test(name="@fixture() with no kwargs stamps per='test'")
+    def test_call_form_default() -> None:
+        @fixture()
         def setup() -> int:
             return 1
 
-        expect(hasattr(setup, "__tryke_before_each__")).to_be_truthy()
+        expect(_fixture_per(setup)).to_equal("test")
         expect(setup()).to_equal(1)
 
-    @test(name="call decorator form works")
-    def test_call_form() -> None:
-        @before_each()
+    @test(name="@fixture(per='scope') stamps per='scope'")
+    def test_scope_fixture_stamps() -> None:
+        @fixture(per="scope")
+        def db() -> str:
+            return "conn"
+
+        expect(_fixture_per(db)).to_equal("scope")
+        expect(db()).to_equal("conn")
+
+    @test(name="@fixture(per='test') explicit form stamps per='test'")
+    def test_explicit_test_form() -> None:
+        @fixture(per="test")
         def setup() -> int:
             return 1
 
-        expect(hasattr(setup, "__tryke_before_each__")).to_be_truthy()
-        expect(setup()).to_equal(1)
+        expect(_fixture_per(setup)).to_equal("test")
 
     @test(name="decorated function is unchanged")
     def test_function_unchanged() -> None:
         def original() -> int:
             return 99
 
-        decorated = before_each(original)
+        decorated = fixture(original)
         expect(decorated).to_be(original)
         expect(decorated()).to_equal(99)
+
+    @test(name="_fixture_per returns None for undecorated function")
+    def test_fixture_per_none_for_plain() -> None:
+        def plain() -> int:
+            return 1
+
+        expect(_fixture_per(plain)).to_be_none()
 
 
 with describe("Depends"):
@@ -112,8 +79,6 @@ with describe("Depends"):
         def my_hook() -> int:
             return 42
 
-        # Use _Depends directly to test the runtime sentinel (Depends has
-        # TYPE_CHECKING overloads that hide the _Depends wrapper).
         dep = _Depends(my_hook)
         expect(isinstance(dep, _Depends)).to_be_truthy()
         expect(dep.dependency).to_be(my_hook)
@@ -142,14 +107,9 @@ with describe("Depends"):
 
 with describe("public exports"):
 
-    @test(name="hooks are exported from tryke package")
+    @test(name="fixture and Depends are exported from tryke package")
     def test_exports() -> None:
-        expect(hasattr(tryke, "before_each")).to_be_truthy()
-        expect(hasattr(tryke, "before_all")).to_be_truthy()
-        expect(hasattr(tryke, "after_each")).to_be_truthy()
-        expect(hasattr(tryke, "after_all")).to_be_truthy()
-        expect(hasattr(tryke, "wrap_each")).to_be_truthy()
-        expect(hasattr(tryke, "wrap_all")).to_be_truthy()
+        expect(hasattr(tryke, "fixture")).to_be_truthy()
         expect(hasattr(tryke, "Depends")).to_be_truthy()
 
 
@@ -157,11 +117,11 @@ with describe("DependencyResolver"):
 
     @test(name="resolves a simple Depends chain")
     def test_resolve_simple() -> None:
-        @before_all
+        @fixture(per="scope")
         def db() -> str:
             return "conn"
 
-        @before_all
+        @fixture(per="scope")
         def table(conn: str = Depends(db)) -> str:
             return f"{conn}/table"
 
@@ -169,39 +129,38 @@ with describe("DependencyResolver"):
         result = resolver.resolve(table)
         expect(result).to_equal({"conn": "conn"})
 
-    @test(name="caches resolved values")
+    @test(name="caches resolved values per function identity")
     def test_caching() -> None:
         call_count = 0
 
-        @before_each
+        @fixture
         def counter() -> int:
             nonlocal call_count
             call_count += 1
             return call_count
 
-        @before_each
+        @fixture
         def user_a(c: int = Depends(counter)) -> str:
             return f"a:{c}"
 
-        @before_each
+        @fixture
         def user_b(c: int = Depends(counter)) -> str:
             return f"b:{c}"
 
         resolver = DependencyResolver()
         a = resolver.resolve(user_a)
         b = resolver.resolve(user_b)
-        # Both should get the same cached value
         expect(a["c"]).to_equal(1)
         expect(b["c"]).to_equal(1)
         expect(call_count).to_equal(1)
 
     @test(name="detects dependency cycles")
     def test_cycle_detection() -> None:
-        @before_each
-        def hook_a(_b: str = Depends(lambda: "")) -> str:  # Placeholder
+        @fixture
+        def hook_a(_b: str = Depends(lambda: "")) -> str:
             return "a"
 
-        @before_each
+        @fixture
         def hook_b(_a: str = Depends(hook_a)) -> str:
             return "b"
 
@@ -211,11 +170,11 @@ with describe("DependencyResolver"):
         resolver = DependencyResolver()
         expect(lambda: resolver.resolve(hook_a)).to_raise(CyclicDependencyError)
 
-    @test(name="resolves generator hooks via next()")
+    @test(name="resolves generator fixtures via next()")
     def test_generator_resolution() -> None:
         teardown_ran = False
 
-        @wrap_each
+        @fixture
         def with_resource() -> Generator[str, None, None]:
             nonlocal teardown_ran
             yield "resource"
@@ -226,35 +185,43 @@ with describe("DependencyResolver"):
         expect(value).to_equal("resource")
         expect(teardown_ran).to_be_falsy()
 
-        resolver.teardown_generators()
+        resolver.teardown_test_generators()
         expect(teardown_ran).to_be_truthy()
 
-    @test(name="clear_each_cache resets per-test state")
-    def test_clear_each_cache() -> None:
-        call_count = 0
+    @test(name="clear_test_cache resets per-test values but keeps per-scope")
+    def test_clear_test_cache_preserves_scope() -> None:
+        test_count = 0
+        scope_count = 0
 
-        @before_each
-        def counter() -> int:
-            nonlocal call_count
-            call_count += 1
-            return call_count
+        @fixture
+        def per_test() -> int:
+            nonlocal test_count
+            test_count += 1
+            return test_count
+
+        @fixture(per="scope")
+        def per_scope() -> int:
+            nonlocal scope_count
+            scope_count += 1
+            return scope_count
 
         resolver = DependencyResolver()
-        v1 = resolver.resolve_hook(counter)
-        expect(v1).to_equal(1)
+        expect(resolver.resolve_hook(per_test)).to_equal(1)
+        expect(resolver.resolve_hook(per_scope)).to_equal(1)
 
-        resolver.clear_each_cache()
-        v2 = resolver.resolve_hook(counter)
-        expect(v2).to_equal(2)
+        resolver.clear_test_cache()
+        # per-test resets; per-scope value preserved
+        expect(resolver.resolve_hook(per_test)).to_equal(2)
+        expect(resolver.resolve_hook(per_scope)).to_equal(1)
 
 
-with describe("HookExecutor"):
+with describe("HookExecutor basics"):
 
-    @test(name="runs before_each hooks before test")
-    def test_before_each_runs() -> None:
+    @test(name="runs per-test fixture before test")
+    def test_per_test_setup_runs() -> None:
         log: list[str] = []
 
-        @before_each
+        @fixture
         def setup() -> None:
             log.append("setup")
 
@@ -262,31 +229,15 @@ with describe("HookExecutor"):
             log.append("test")
 
         executor = HookExecutor()
-        executor.register_hook(setup, groups=[])
+        executor.register_fixture(setup, groups=[])
         executor.run_test(my_test, groups=[])
         expect(log).to_equal(["setup", "test"])
 
-    @test(name="runs after_each hooks after test")
-    def test_after_each_runs() -> None:
+    @test(name="generator fixture's post-yield runs after test")
+    def test_generator_teardown_runs() -> None:
         log: list[str] = []
 
-        @after_each
-        def cleanup() -> None:
-            log.append("cleanup")
-
-        def my_test() -> None:
-            log.append("test")
-
-        executor = HookExecutor()
-        executor.register_hook(cleanup, groups=[])
-        executor.run_test(my_test, groups=[])
-        expect(log).to_equal(["test", "cleanup"])
-
-    @test(name="wrap_each wraps around test")
-    def test_wrap_each_wraps() -> None:
-        log: list[str] = []
-
-        @wrap_each
+        @fixture
         def wrapper() -> Generator[None, None, None]:
             log.append("setup")
             yield
@@ -296,19 +247,19 @@ with describe("HookExecutor"):
             log.append("test")
 
         executor = HookExecutor()
-        executor.register_hook(wrapper, groups=[])
+        executor.register_fixture(wrapper, groups=[])
         executor.run_test(my_test, groups=[])
         expect(log).to_equal(["setup", "test", "teardown"])
 
-    @test(name="outer scope hooks wrap inner scope hooks")
+    @test(name="outer scope fixtures wrap inner scope fixtures")
     def test_scope_nesting() -> None:
         log: list[str] = []
 
-        @before_each
+        @fixture
         def outer_setup() -> None:
             log.append("outer")
 
-        @before_each
+        @fixture
         def inner_setup() -> None:
             log.append("inner")
 
@@ -316,78 +267,200 @@ with describe("HookExecutor"):
             log.append("test")
 
         executor = HookExecutor()
-        executor.register_hook(outer_setup, groups=[])
-        executor.register_hook(inner_setup, groups=["users"])
+        executor.register_fixture(outer_setup, groups=[])
+        executor.register_fixture(inner_setup, groups=["users"])
         executor.run_test(my_test, groups=["users"])
         expect(log).to_equal(["outer", "inner", "test"])
 
-    @test(name="after hooks run in reverse definition order")
-    def test_after_reverse_order() -> None:
+    @test(name="generator fixtures tear down in reverse definition order (LIFO)")
+    def test_teardown_lifo() -> None:
         log: list[str] = []
 
-        @after_each
-        def first_cleanup() -> None:
+        @fixture
+        def first() -> Generator[None, None, None]:
+            yield
             log.append("first")
 
-        @after_each
-        def second_cleanup() -> None:
+        @fixture
+        def second() -> Generator[None, None, None]:
+            yield
             log.append("second")
 
         def my_test() -> None:
             log.append("test")
 
         executor = HookExecutor()
-        executor.register_hook(first_cleanup, groups=[], line_number=1)
-        executor.register_hook(second_cleanup, groups=[], line_number=2)
+        executor.register_fixture(first, groups=[], line_number=1)
+        executor.register_fixture(second, groups=[], line_number=2)
         executor.run_test(my_test, groups=[])
-        # After hooks run bottom-to-top (stack unwinding)
         expect(log).to_equal(["test", "second", "first"])
 
     @test(name="test can receive values via Depends")
     def test_depends_in_test() -> None:
-        @before_each
+        @fixture
         def db() -> str:
             return "conn"
 
-        received = {}
+        received: dict[str, str] = {}
 
         def my_test(conn: str = Depends(db)) -> None:
             received["conn"] = conn
 
         executor = HookExecutor()
-        executor.register_hook(db, groups=[])
+        executor.register_fixture(db, groups=[])
         executor.run_test(my_test, groups=[])
         expect(received["conn"]).to_equal("conn")
 
-    @test(name="wrap_each teardown runs before after_each")
-    def test_wrap_each_before_after_each() -> None:
+
+with describe("per='scope' sharing semantics"):
+    # These tests pin the same-worker sharing semantics documented in
+    # docs/concepts/concurrency.md. per='scope' values are cached by
+    # function identity per HookExecutor, and two tests on the same
+    # executor share the object by reference. This is intentional — it's
+    # what makes scope-level fixtures a once-per-scope cache.
+
+    @test(name="per='scope' fixture runs exactly once across tests")
+    def test_scope_fixture_runs_once() -> None:
+        call_count = 0
+
+        @fixture(per="scope")
+        def setup() -> str:
+            nonlocal call_count
+            call_count += 1
+            return "resource"
+
+        def test_a() -> None:
+            pass
+
+        def test_b() -> None:
+            pass
+
+        executor = HookExecutor()
+        executor.register_fixture(setup, groups=[])
+        executor.run_test(test_a, groups=[])
+        executor.run_test(test_b, groups=[])
+        expect(call_count).to_equal(1)
+
+    @test(name="per='scope' value is shared by reference across tests")
+    def test_scope_shared_by_reference() -> None:
+        @fixture(per="scope")
+        def shared_config() -> dict[str, str]:
+            return {"env": "test", "mutations": ""}
+
+        def mutating_test(
+            cfg: dict[str, str] = Depends(shared_config),
+        ) -> None:
+            cfg["mutations"] += "a"
+
+        seen: list[str] = []
+
+        def observing_test(
+            cfg: dict[str, str] = Depends(shared_config),
+        ) -> None:
+            seen.append(cfg["mutations"])
+
+        executor = HookExecutor()
+        executor.register_fixture(shared_config, groups=[])
+        executor.run_test(mutating_test, groups=[])
+        executor.run_test(observing_test, groups=[])
+        # The second test sees the first test's mutation. If this
+        # assertion ever fails, either (a) we changed scoping semantics
+        # (update docs/concepts/concurrency.md), or (b) we added
+        # defensive copying (delete this test and replace with one
+        # asserting non-observability).
+        expect(seen).to_equal(["a"])
+        executor.finalize()
+
+    @test(name="per='scope' generator teardown runs on finalize, not per test")
+    def test_scope_generator_teardown_on_finalize() -> None:
         log: list[str] = []
 
-        @wrap_each
-        def wrapper() -> Generator[None, None, None]:
-            log.append("wrap_setup")
-            yield
-            log.append("wrap_teardown")
+        @fixture(per="scope")
+        def wrapper() -> Generator[str, None, None]:
+            log.append("setup")
+            yield "ctx"
+            log.append("teardown")
 
-        @after_each
-        def cleanup() -> None:
-            log.append("after_each")
+        def test_a() -> None:
+            log.append("test_a")
+
+        def test_b() -> None:
+            log.append("test_b")
+
+        executor = HookExecutor()
+        executor.register_fixture(wrapper, groups=[])
+        executor.run_test(test_a, groups=[])
+        executor.run_test(test_b, groups=[])
+        expect(log).to_equal(["setup", "test_a", "test_b"])
+
+        executor.finalize()
+        expect(log).to_equal(["setup", "test_a", "test_b", "teardown"])
+
+    @test(name="multiple per='scope' teardowns run LIFO on finalize")
+    def test_multiple_scope_teardown_lifo() -> None:
+        log: list[str] = []
+
+        @fixture(per="scope")
+        def wrap_a() -> Generator[None, None, None]:
+            log.append("a_setup")
+            yield
+            log.append("a_teardown")
+
+        @fixture(per="scope")
+        def wrap_b() -> Generator[None, None, None]:
+            log.append("b_setup")
+            yield
+            log.append("b_teardown")
 
         def my_test() -> None:
             log.append("test")
 
         executor = HookExecutor()
-        executor.register_hook(wrapper, groups=[], line_number=1)
-        executor.register_hook(cleanup, groups=[], line_number=2)
+        executor.register_fixture(wrap_a, groups=[], line_number=1)
+        executor.register_fixture(wrap_b, groups=[], line_number=2)
         executor.run_test(my_test, groups=[])
-        expect(log).to_equal(["wrap_setup", "test", "wrap_teardown", "after_each"])
+        expect(log).to_equal(["a_setup", "b_setup", "test"])
+
+        executor.finalize()
+        expect(
+            log,
+        ).to_equal(["a_setup", "b_setup", "test", "b_teardown", "a_teardown"])
+
+    @test(name="finalize only tears down per='scope' fixtures that actually ran")
+    def test_finalize_skips_unvisited_scopes() -> None:
+        log: list[str] = []
+
+        @fixture(per="scope")
+        def users_setup() -> Generator[None, None, None]:
+            log.append("users_setup")
+            yield
+            log.append("users_teardown")
+
+        @fixture(per="scope")
+        def admin_setup() -> Generator[None, None, None]:
+            log.append("admin_setup")
+            yield
+            log.append("admin_teardown")
+
+        def my_test() -> None:
+            log.append("test")
+
+        executor = HookExecutor()
+        executor.register_fixture(users_setup, groups=["users"], line_number=1)
+        executor.register_fixture(admin_setup, groups=["admin"], line_number=2)
+        # Only run a test in the "users" scope.
+        executor.run_test(my_test, groups=["users"])
+        expect(log).to_equal(["users_setup", "test"])
+
+        executor.finalize()
+        expect(log).to_equal(["users_setup", "test", "users_teardown"])
 
 
 with describe("error handling"):
 
-    @test(name="before_each failure marks test as error")
-    def test_before_each_failure() -> None:
-        @before_each
+    @test(name="per-test fixture setup failure propagates")
+    def test_setup_failure() -> None:
+        @fixture
         def bad_setup() -> None:
             msg = "setup failed"
             raise RuntimeError(msg)
@@ -398,37 +471,16 @@ with describe("error handling"):
             log.append("test")
 
         executor = HookExecutor()
-        executor.register_hook(bad_setup, groups=[])
+        executor.register_fixture(bad_setup, groups=[])
         expect(lambda: executor.run_test(my_test, groups=[])).to_raise(RuntimeError)
-        # Test should NOT have run
+        # Test should NOT have run.
         expect(log).to_have_length(0)
 
-    @test(name="after_each still runs when test fails")
-    def test_after_runs_on_failure() -> None:
+    @test(name="generator teardown still runs when test fails")
+    def test_teardown_on_failure() -> None:
         log: list[str] = []
 
-        @after_each
-        def cleanup() -> None:
-            log.append("cleanup")
-
-        def failing_test() -> None:
-            log.append("test")
-            msg = "test failed"
-            raise RuntimeError(msg)
-
-        executor = HookExecutor()
-        executor.register_hook(cleanup, groups=[])
-        expect(lambda: executor.run_test(failing_test, groups=[])).to_raise(
-            RuntimeError
-        )
-        # Cleanup should still have run
-        expect(log).to_contain("cleanup")
-
-    @test(name="wrap_each teardown runs when test fails")
-    def test_wrap_teardown_on_failure() -> None:
-        log: list[str] = []
-
-        @wrap_each
+        @fixture
         def wrapper() -> Generator[None, None, None]:
             log.append("setup")
             yield
@@ -440,7 +492,7 @@ with describe("error handling"):
             raise RuntimeError(msg)
 
         executor = HookExecutor()
-        executor.register_hook(wrapper, groups=[])
+        executor.register_fixture(wrapper, groups=[])
         expect(lambda: executor.run_test(failing_test, groups=[])).to_raise(
             RuntimeError
         )
@@ -449,16 +501,16 @@ with describe("error handling"):
 
 with describe("generator lifecycle"):
 
-    @test(name="multi-yield generator raises RuntimeError")
+    @test(name="multi-yield generator raises RuntimeError on teardown")
     def test_multi_yield_raises() -> None:
-        @wrap_each
+        @fixture
         def bad_hook() -> Generator[str, None, None]:
             yield "first"
             yield "second"
 
         resolver = DependencyResolver()
         resolver.resolve_hook(bad_hook)
-        expect(resolver.teardown_generators).to_raise(
+        expect(resolver.teardown_test_generators).to_raise(
             RuntimeError, match="yielded more than once"
         )
 
@@ -466,7 +518,7 @@ with describe("generator lifecycle"):
     def test_gen_close_called() -> None:
         close_called = False
 
-        @wrap_each
+        @fixture
         def tracked_hook() -> Generator[str, None, None]:
             nonlocal close_called
             try:
@@ -476,7 +528,7 @@ with describe("generator lifecycle"):
 
         resolver = DependencyResolver()
         resolver.resolve_hook(tracked_hook)
-        resolver.teardown_generators()
+        resolver.teardown_test_generators()
         expect(close_called).to_be_truthy()
 
 
@@ -486,8 +538,8 @@ with describe("async generator lifecycle"):
     def test_async_gen_teardown() -> None:
         teardown_ran = False
 
-        @wrap_each
-        async def async_resource():  # noqa: ANN202
+        @fixture
+        async def async_resource() -> AsyncGenerator[str, None]:
             nonlocal teardown_ran
             yield "async_val"
             teardown_ran = True
@@ -497,17 +549,17 @@ with describe("async generator lifecycle"):
         expect(value).to_equal("async_val")
         expect(teardown_ran).to_be_falsy()
 
-        resolver.teardown_generators()
+        resolver.teardown_test_generators()
         expect(teardown_ran).to_be_truthy()
 
 
-with describe("async hooks in HookExecutor"):
+with describe("async fixtures in HookExecutor"):
 
-    @test(name="async before_each runs before test")
-    def test_async_before_each_runs() -> None:
+    @test(name="async per-test fixture runs before test")
+    def test_async_setup_runs() -> None:
         log: list[str] = []
 
-        @before_each
+        @fixture
         async def setup() -> None:
             log.append("async_setup")
 
@@ -515,31 +567,15 @@ with describe("async hooks in HookExecutor"):
             log.append("test")
 
         executor = HookExecutor()
-        executor.register_hook(setup, groups=[])
+        executor.register_fixture(setup, groups=[])
         executor.run_test(my_test, groups=[])
         expect(log).to_equal(["async_setup", "test"])
 
-    @test(name="async after_each runs after test")
-    def test_async_after_each_runs() -> None:
-        log: list[str] = []
-
-        @after_each
-        async def cleanup() -> None:
-            log.append("async_cleanup")
-
-        def my_test() -> None:
-            log.append("test")
-
-        executor = HookExecutor()
-        executor.register_hook(cleanup, groups=[])
-        executor.run_test(my_test, groups=[])
-        expect(log).to_equal(["test", "async_cleanup"])
-
-    @test(name="async before_all runs once per scope")
-    def test_async_before_all_runs_once() -> None:
+    @test(name="async per='scope' fixture runs once across tests")
+    def test_async_scope_runs_once() -> None:
         call_count = 0
 
-        @before_all
+        @fixture(per="scope")
         async def setup() -> str:
             nonlocal call_count
             call_count += 1
@@ -552,35 +588,41 @@ with describe("async hooks in HookExecutor"):
             pass
 
         executor = HookExecutor()
-        executor.register_hook(setup, groups=[])
+        executor.register_fixture(setup, groups=[])
         executor.run_test(test_a, groups=[])
         executor.run_test(test_b, groups=[])
         expect(call_count).to_equal(1)
 
-    @test(name="async after_all runs on finalize")
-    def test_async_after_all_on_finalize() -> None:
+    @test(name="async per='scope' generator teardown runs on finalize")
+    def test_async_scope_generator_finalize() -> None:
         log: list[str] = []
 
-        @after_all
-        async def cleanup() -> None:
-            log.append("async_after_all")
+        @fixture(per="scope")
+        async def wrapper() -> AsyncGenerator[None, None]:
+            log.append("setup")
+            yield
+            log.append("teardown")
 
-        def my_test() -> None:
-            log.append("test")
+        def test_a() -> None:
+            log.append("test_a")
+
+        def test_b() -> None:
+            log.append("test_b")
 
         executor = HookExecutor()
-        executor.register_hook(cleanup, groups=[])
-        executor.run_test(my_test, groups=[])
-        expect(log).to_equal(["test"])
+        executor.register_fixture(wrapper, groups=[])
+        executor.run_test(test_a, groups=[])
+        executor.run_test(test_b, groups=[])
+        expect(log).to_equal(["setup", "test_a", "test_b"])
 
         executor.finalize()
-        expect(log).to_equal(["test", "async_after_all"])
+        expect(log).to_equal(["setup", "test_a", "test_b", "teardown"])
 
-    @test(name="async wrap_each generator wraps test execution")
-    def test_async_wrap_each_wraps() -> None:
+    @test(name="async per-test generator wraps test execution")
+    def test_async_generator_wraps() -> None:
         log: list[str] = []
 
-        @wrap_each
+        @fixture
         async def wrapper() -> AsyncGenerator[None, None]:
             log.append("async_setup")
             yield
@@ -590,36 +632,9 @@ with describe("async hooks in HookExecutor"):
             log.append("test")
 
         executor = HookExecutor()
-        executor.register_hook(wrapper, groups=[])
+        executor.register_fixture(wrapper, groups=[])
         executor.run_test(my_test, groups=[])
         expect(log).to_equal(["async_setup", "test", "async_teardown"])
-
-    @test(name="async wrap_all setup on first test, teardown on finalize")
-    def test_async_wrap_all_lifecycle() -> None:
-        log: list[str] = []
-
-        @wrap_all
-        async def wrapper() -> AsyncGenerator[None, None]:
-            log.append("async_wrap_setup")
-            yield
-            log.append("async_wrap_teardown")
-
-        def test_a() -> None:
-            log.append("test_a")
-
-        def test_b() -> None:
-            log.append("test_b")
-
-        executor = HookExecutor()
-        executor.register_hook(wrapper, groups=[])
-        executor.run_test(test_a, groups=[])
-        executor.run_test(test_b, groups=[])
-        expect(log).to_equal(["async_wrap_setup", "test_a", "test_b"])
-
-        executor.finalize()
-        expect(log).to_equal(
-            ["async_wrap_setup", "test_a", "test_b", "async_wrap_teardown"]
-        )
 
     @test(name="async test function runs correctly")
     def test_async_test_fn_runs() -> None:
@@ -632,9 +647,9 @@ with describe("async hooks in HookExecutor"):
         executor.run_test(my_test, groups=[])
         expect(log).to_equal(["async_test"])
 
-    @test(name="async before_each provides value to async test via Depends")
+    @test(name="async fixture provides value to async test via Depends")
     def test_async_depends_in_async_test() -> None:
-        @before_each
+        @fixture
         async def db() -> str:
             return "async_conn"
 
@@ -644,17 +659,17 @@ with describe("async hooks in HookExecutor"):
             received["conn"] = conn
 
         executor = HookExecutor()
-        executor.register_hook(db, groups=[])
+        executor.register_fixture(db, groups=[])
         executor.run_test(my_test, groups=[])
         expect(received["conn"]).to_equal("async_conn")
 
-    @test(name="async Depends chain: async hook depending on async hook")
+    @test(name="async Depends chain: async fixture depending on async fixture")
     def test_async_depends_chain() -> None:
-        @before_each
+        @fixture
         async def db() -> str:
             return "conn"
 
-        @before_each
+        @fixture
         async def table(conn: str = Depends(db)) -> str:
             return f"{conn}/table"
 
@@ -664,36 +679,16 @@ with describe("async hooks in HookExecutor"):
             received["t"] = t
 
         executor = HookExecutor()
-        executor.register_hook(db, groups=[])
-        executor.register_hook(table, groups=[])
+        executor.register_fixture(db, groups=[])
+        executor.register_fixture(table, groups=[])
         executor.run_test(my_test, groups=[])
         expect(received["t"]).to_equal("conn/table")
 
-    @test(name="async after_each still runs when async test fails")
-    def test_async_after_each_on_async_failure() -> None:
+    @test(name="async generator teardown runs when async test fails")
+    def test_async_teardown_on_failure() -> None:
         log: list[str] = []
 
-        @after_each
-        async def cleanup() -> None:
-            log.append("cleanup")
-
-        async def failing_test() -> None:
-            log.append("test")
-            msg = "boom"
-            raise RuntimeError(msg)
-
-        executor = HookExecutor()
-        executor.register_hook(cleanup, groups=[])
-        expect(lambda: executor.run_test(failing_test, groups=[])).to_raise(
-            RuntimeError
-        )
-        expect(log).to_contain("cleanup")
-
-    @test(name="async wrap_each teardown runs when async test fails")
-    def test_async_wrap_each_on_async_failure() -> None:
-        log: list[str] = []
-
-        @wrap_each
+        @fixture
         async def wrapper() -> AsyncGenerator[None, None]:
             log.append("setup")
             yield
@@ -705,40 +700,17 @@ with describe("async hooks in HookExecutor"):
             raise RuntimeError(msg)
 
         executor = HookExecutor()
-        executor.register_hook(wrapper, groups=[])
+        executor.register_fixture(wrapper, groups=[])
         expect(lambda: executor.run_test(failing_test, groups=[])).to_raise(
             RuntimeError
         )
         expect(log).to_contain("teardown")
 
-    @test(name="async wrap_each teardown runs before async after_each")
-    def test_async_wrap_before_async_after() -> None:
-        log: list[str] = []
-
-        @wrap_each
-        async def wrapper() -> AsyncGenerator[None, None]:
-            log.append("wrap_setup")
-            yield
-            log.append("wrap_teardown")
-
-        @after_each
-        async def cleanup() -> None:
-            log.append("after_each")
-
-        def my_test() -> None:
-            log.append("test")
-
-        executor = HookExecutor()
-        executor.register_hook(wrapper, groups=[], line_number=1)
-        executor.register_hook(cleanup, groups=[], line_number=2)
-        executor.run_test(my_test, groups=[])
-        expect(log).to_equal(["wrap_setup", "test", "wrap_teardown", "after_each"])
-
     @test(name="async generator aclose is called on teardown")
     def test_async_gen_aclose_called() -> None:
         close_called = False
 
-        @wrap_each
+        @fixture
         async def tracked_hook() -> AsyncGenerator[str, None]:
             nonlocal close_called
             try:
@@ -748,377 +720,107 @@ with describe("async hooks in HookExecutor"):
 
         resolver = DependencyResolver()
         resolver.resolve_hook(tracked_hook)
-        resolver.teardown_generators()
+        resolver.teardown_test_generators()
         expect(close_called).to_be_truthy()
-
-    @test(name="mixed sync and async hooks execute in correct order")
-    def test_mixed_sync_async_hooks() -> None:
-        log: list[str] = []
-
-        @before_each
-        def sync_setup() -> None:
-            log.append("sync_setup")
-
-        @before_each
-        async def async_setup() -> None:
-            log.append("async_setup")
-
-        @after_each
-        def sync_cleanup() -> None:
-            log.append("sync_cleanup")
-
-        @after_each
-        async def async_cleanup() -> None:
-            log.append("async_cleanup")
-
-        def my_test() -> None:
-            log.append("test")
-
-        executor = HookExecutor()
-        executor.register_hook(sync_setup, groups=[], line_number=1)
-        executor.register_hook(async_setup, groups=[], line_number=2)
-        executor.register_hook(sync_cleanup, groups=[], line_number=3)
-        executor.register_hook(async_cleanup, groups=[], line_number=4)
-        executor.run_test(my_test, groups=[])
-        # Setup: definition order. Teardown: reversed (line 4 → line 3).
-        expect(log).to_equal(
-            ["sync_setup", "async_setup", "test", "async_cleanup", "sync_cleanup"]
-        )
-
-    @test(name="async after_all runs in reverse order on finalize")
-    def test_async_after_all_reverse_order() -> None:
-        log: list[str] = []
-
-        @after_all
-        async def first_cleanup() -> None:
-            log.append("first")
-
-        @after_all
-        async def second_cleanup() -> None:
-            log.append("second")
-
-        def my_test() -> None:
-            pass
-
-        executor = HookExecutor()
-        executor.register_hook(first_cleanup, groups=[], line_number=1)
-        executor.register_hook(second_cleanup, groups=[], line_number=2)
-        executor.run_test(my_test, groups=[])
-        executor.finalize()
-        expect(log).to_equal(["second", "first"])
-
-
-with describe("after_all and wrap_all execution"):
-
-    @test(name="after_all runs on finalize")
-    def test_after_all_runs() -> None:
-        log: list[str] = []
-
-        @after_all
-        def cleanup() -> None:
-            log.append("after_all")
-
-        def my_test() -> None:
-            log.append("test")
-
-        executor = HookExecutor()
-        executor.register_hook(cleanup, groups=[])
-        executor.run_test(my_test, groups=[])
-        expect(log).to_equal(["test"])
-
-        executor.finalize()
-        expect(log).to_equal(["test", "after_all"])
-
-    @test(name="wrap_all setup runs on first test, teardown on finalize")
-    def test_wrap_all_lifecycle() -> None:
-        log: list[str] = []
-
-        @wrap_all
-        def wrapper() -> Generator[str, None, None]:
-            log.append("wrap_setup")
-            yield "ctx"
-            log.append("wrap_teardown")
-
-        def test_a() -> None:
-            log.append("test_a")
-
-        def test_b() -> None:
-            log.append("test_b")
-
-        executor = HookExecutor()
-        executor.register_hook(wrapper, groups=[])
-        executor.run_test(test_a, groups=[])
-        executor.run_test(test_b, groups=[])
-        expect(log).to_equal(["wrap_setup", "test_a", "test_b"])
-
-        executor.finalize()
-        expect(log).to_equal(["wrap_setup", "test_a", "test_b", "wrap_teardown"])
-
-    @test(name="after_all runs in reverse order on finalize")
-    def test_after_all_reverse_order() -> None:
-        log: list[str] = []
-
-        @after_all
-        def first_cleanup() -> None:
-            log.append("first")
-
-        @after_all
-        def second_cleanup() -> None:
-            log.append("second")
-
-        def my_test() -> None:
-            log.append("test")
-
-        executor = HookExecutor()
-        executor.register_hook(first_cleanup, groups=[], line_number=1)
-        executor.register_hook(second_cleanup, groups=[], line_number=2)
-        executor.run_test(my_test, groups=[])
-        executor.finalize()
-        # After_all should run in reverse definition order
-        expect(log).to_equal(["test", "second", "first"])
-
-    @test(name="finalize runs after_all even if test failed")
-    def test_finalize_runs_after_failure() -> None:
-        log: list[str] = []
-
-        @after_all
-        def cleanup() -> None:
-            log.append("after_all")
-
-        def failing_test() -> None:
-            msg = "boom"
-            raise RuntimeError(msg)
-
-        executor = HookExecutor()
-        executor.register_hook(cleanup, groups=[])
-        expect(lambda: executor.run_test(failing_test, groups=[])).to_raise(
-            RuntimeError
-        )
-        executor.finalize()
-        expect(log).to_contain("after_all")
-
-    @test(name="multiple before_all hooks in same scope all run")
-    def test_multiple_before_all_same_scope() -> None:
-        log: list[str] = []
-
-        @before_all
-        def setup_a() -> None:
-            log.append("a")
-
-        @before_all
-        def setup_b() -> None:
-            log.append("b")
-
-        def my_test() -> None:
-            log.append("test")
-
-        executor = HookExecutor()
-        executor.register_hook(setup_a, groups=[], line_number=1)
-        executor.register_hook(setup_b, groups=[], line_number=2)
-        executor.run_test(my_test, groups=[])
-        expect(log).to_equal(["a", "b", "test"])
-
-    @test(name="multiple wrap_all hooks in same scope all run")
-    def test_multiple_wrap_all_same_scope() -> None:
-        log: list[str] = []
-
-        @wrap_all
-        def wrap_a() -> Generator[None, None, None]:
-            log.append("a_setup")
-            yield
-            log.append("a_teardown")
-
-        @wrap_all
-        def wrap_b() -> Generator[None, None, None]:
-            log.append("b_setup")
-            yield
-            log.append("b_teardown")
-
-        def my_test() -> None:
-            log.append("test")
-
-        executor = HookExecutor()
-        executor.register_hook(wrap_a, groups=[], line_number=1)
-        executor.register_hook(wrap_b, groups=[], line_number=2)
-        executor.run_test(my_test, groups=[])
-        expect(log).to_equal(["a_setup", "b_setup", "test"])
-
-        executor.finalize()
-        expect(log).to_equal(["a_setup", "b_setup", "test", "b_teardown", "a_teardown"])
-
-    @test(name="finalize skips after_all for scopes that never ran tests")
-    def test_finalize_skips_uninitialized_scopes() -> None:
-        log: list[str] = []
-
-        @before_all
-        def setup_users() -> None:
-            log.append("before_all:users")
-
-        @after_all
-        def cleanup_users() -> None:
-            log.append("after_all:users")
-
-        @before_all
-        def setup_admin() -> None:
-            log.append("before_all:admin")
-
-        @after_all
-        def cleanup_admin() -> None:
-            log.append("after_all:admin")
-
-        def my_test() -> None:
-            log.append("test")
-
-        executor = HookExecutor()
-        executor.register_hook(setup_users, groups=["users"], line_number=1)
-        executor.register_hook(cleanup_users, groups=["users"], line_number=2)
-        executor.register_hook(setup_admin, groups=["admin"], line_number=3)
-        executor.register_hook(cleanup_admin, groups=["admin"], line_number=4)
-        # Only run a test in the "users" scope
-        executor.run_test(my_test, groups=["users"])
-        expect(log).to_equal(["before_all:users", "test"])
-
-        executor.finalize()
-        # after_all:admin should NOT have run — no test entered the admin scope.
-        expect(log).to_equal(["before_all:users", "test", "after_all:users"])
 
 
 with describe("Depends typing"):
 
     @test(name="assert_type validates Depends return type for plain function")
     def test_depends_type_plain() -> None:
-        @before_all
+        @fixture(per="scope")
         def db() -> str:
             return "conn"
 
-        # At type-check time: Depends(db) should be str
         val = Depends(db)
         assert_type(val, str)
 
     @test(name="assert_type validates Depends return type for generator")
     def test_depends_type_generator() -> None:
-        @wrap_each
+        @fixture
         def resource() -> Generator[int, None, None]:
             yield 42
 
-        # At type-check time: Depends(resource) should be int (unwrapped from Generator)
         val = Depends(resource)
         assert_type(val, int)
 
     @test(name="assert_type validates Depends return type for async coroutine")
     def test_depends_type_async_coroutine() -> None:
-        @before_each
+        @fixture
         async def resource() -> str:
             return "async_val"
 
-        # At type-check time: Depends(resource) should be str (unwrapped from Awaitable)
         val = Depends(resource)
         assert_type(val, str)
 
     @test(name="assert_type validates Depends return type for async generator")
     def test_depends_type_async_generator() -> None:
-        @wrap_each
+        @fixture
         async def resource() -> AsyncGenerator[int, None]:
             yield 42
 
-        # At type-check time: Depends(resource) should be int (unwrapped from
-        # AsyncGenerator).
         val = Depends(resource)
         assert_type(val, int)
 
 
 # ---------------------------------------------------------------------------
-# E2E: hooks through the full pipeline
+# E2E: fixtures through the full pipeline
 # ---------------------------------------------------------------------------
 
-# Module-level tracking list shared across hooks and tests.
+# Module-level tracking list shared across fixtures and tests.
 _log: list[str] = []
 
 
-@before_each
+@fixture
 def clear_log() -> None:
     _log.clear()
 
 
-@before_all
+@fixture(per="scope")
 def db_conn() -> str:
     return "test_db"
 
 
-@before_each
+@fixture
 def table(conn: str = Depends(db_conn)) -> str:
     _log.append(f"setup:{conn}")
     return f"{conn}/users"
 
 
-@after_each
-def cleanup() -> None:
-    _log.append("cleanup")
+with describe("fixtures e2e"):
 
-
-with describe("hooks e2e"):
-
-    @test(name="before_each runs and provides value via Depends")
-    def test_before_each_provides_value() -> None:
-        _ = table  # Reference the hook to verify it ran
+    @test(name="per-test fixture runs and provides value via Depends")
+    def test_per_test_provides_value() -> None:
+        _ = table  # Reference the fixture to verify it ran
         expect(_log).to_contain("setup:test_db")
 
-    @test(name="before_each runs independently per test")
-    def test_after_runs() -> None:
-        # _log was cleared by clear_log() in before_each for this test,
-        # so this only verifies that the per-test setup hook ran.
+    @test(name="per-test fixture runs independently per test")
+    def test_runs_independently() -> None:
+        # _log was cleared by clear_log in the previous test's context,
+        # so this only verifies that the per-test setup fixture ran.
         expect(_log).to_contain("setup:test_db")
 
 
-with describe("wrap hooks"):
+with describe("per='scope' instance reuse"):
+    # Track how many times the expensive resource is created.
+    _expensive_call_count: list[int] = [0]
 
-    @wrap_each
-    def with_context() -> Generator[str, None, None]:
-        _log.append("wrap_setup")
-        yield "ctx"
-        _log.append("wrap_teardown")
+    @fixture(per="scope")
+    def expensive_resource() -> dict[str, int]:
+        """Simulates an expensive setup that should only happen once."""
+        _expensive_call_count[0] += 1
+        return {"created": _expensive_call_count[0], "value": 42}
 
-    @test(name="wrap_each wraps test execution")
-    def test_wrap() -> None:
-        expect(_log).to_contain("wrap_setup")
-
-
-# ---------------------------------------------------------------------------
-# before_all instance reuse
-# ---------------------------------------------------------------------------
-
-# Track how many times the expensive resource is created.
-_expensive_call_count: list[int] = [0]
-
-
-@before_all
-def expensive_resource() -> dict[str, int]:
-    """Simulates an expensive setup that should only happen once."""
-    _expensive_call_count[0] += 1
-    return {"created": _expensive_call_count[0], "value": 42}
-
-
-with describe("before_all reuse"):
-
-    @test(name="first test receives the before_all instance")
+    @test(name="first test receives the per='scope' instance")
     def test_reuse_first(
         res: dict[str, int] = Depends(expensive_resource),
     ) -> None:
         expect(res["value"]).to_equal(42)
-        # Created exactly once so far
         expect(res["created"]).to_equal(1)
         expect(_expensive_call_count[0]).to_equal(1)
 
     @test(name="second test gets the same cached instance")
     def test_reuse_second(
-        res: dict[str, int] = Depends(expensive_resource),
-    ) -> None:
-        # Still the same instance — before_all was NOT called again
-        expect(res["created"]).to_equal(1)
-        expect(_expensive_call_count[0]).to_equal(1)
-
-    @test(name="third test confirms no additional calls")
-    def test_reuse_third(
         res: dict[str, int] = Depends(expensive_resource),
     ) -> None:
         expect(res["created"]).to_equal(1)
@@ -1130,22 +832,22 @@ with describe("before_all reuse"):
 # ---------------------------------------------------------------------------
 
 
-@before_all
+@fixture(per="scope")
 def app_config() -> dict[str, str]:
     return {"db_url": "sqlite:///:memory:", "cache_url": "redis://localhost"}
 
 
-@before_all
+@fixture(per="scope")
 def database(cfg: dict[str, str] = Depends(app_config)) -> str:
     return f"Database({cfg['db_url']})"
 
 
-@before_all
+@fixture(per="scope")
 def cache(cfg: dict[str, str] = Depends(app_config)) -> str:
     return f"Cache({cfg['cache_url']})"
 
 
-@before_each
+@fixture
 def user_service(
     db_svc: str = Depends(database),
     cache_svc: str = Depends(cache),
@@ -1162,41 +864,36 @@ with describe("composability"):
         db_svc: str = Depends(database),
         cache_svc: str = Depends(cache),
     ) -> None:
-        # Leaf dependency
         expect(cfg).to_equal(
             {"db_url": "sqlite:///:memory:", "cache_url": "redis://localhost"}
         )
-        # Mid-level: each resolved with config injected
         expect(db_svc).to_equal("Database(sqlite:///:memory:)")
         expect(cache_svc).to_equal("Cache(redis://localhost)")
-        # Top-level: composed from db + cache
         expect(svc).to_equal(
             "UserService(Database(sqlite:///:memory:), Cache(redis://localhost))"
         )
 
-    @test(name="before_each produces fresh value each test, before_all is reused")
-    def test_fresh_each_reused_all(
+    @test(name="per-test fixture is fresh, per-scope is reused")
+    def test_fresh_test_reused_scope(
         svc: str = Depends(user_service),
     ) -> None:
-        # user_service is before_each — resolved fresh.
-        # database/cache are before_all — same cached values.
         expect(svc).to_equal(
             "UserService(Database(sqlite:///:memory:), Cache(redis://localhost))"
         )
 
 
-@before_all
+@fixture(per="scope")
 def base_url() -> str:
     return "http://localhost:8000"
 
 
 with describe("composability > nested describe"):
 
-    @before_each
+    @fixture
     def auth_header(url: str = Depends(base_url)) -> dict[str, str]:
         return {"Authorization": f"Bearer token-for-{url}"}
 
-    @test(name="describe-scoped hook depends on module-scoped before_all")
+    @test(name="describe-scoped fixture depends on module-scoped per='scope'")
     def test_nested_depends(
         header: dict[str, str] = Depends(auth_header),
     ) -> None:

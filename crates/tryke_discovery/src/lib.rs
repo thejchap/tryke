@@ -17,7 +17,7 @@ use ruff_python_ast::{Expr, Stmt};
 use ruff_python_parser::parse_module;
 use ruff_source_file::LineIndex;
 use ruff_text_size::Ranged;
-use tryke_types::{ExpectedAssertion, HookItem, HookType, ParsedFile, TestItem};
+use tryke_types::{ExpectedAssertion, FixturePer, HookItem, ParsedFile, TestItem};
 
 pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
     start
@@ -225,58 +225,126 @@ fn is_bare_test_or_qualified(expr: &Expr, body: &[Stmt]) -> bool {
     }
 }
 
-const HOOK_DECORATORS: &[(&str, HookType)] = &[
-    ("before_each", HookType::BeforeEach),
-    ("before_all", HookType::BeforeAll),
-    ("after_each", HookType::AfterEach),
-    ("after_all", HookType::AfterAll),
-    ("wrap_each", HookType::WrapEach),
-    ("wrap_all", HookType::WrapAll),
-];
-
-/// Check whether a decorator is a tryke hook (`@before_each`, `@tryke.before_all`, etc.).
-/// Returns the `HookType` if it is, `None` otherwise.
-fn is_tryke_hook_decorator(expr: &Expr, body: &[Stmt]) -> Option<HookType> {
+/// Check whether a decorator is the tryke `@fixture` decorator. Returns the
+/// fixture's `per` granularity (`Test` or `Scope`) if it is, `None` otherwise.
+///
+/// Recognises all four forms:
+/// - `@fixture`
+/// - `@fixture()`
+/// - `@fixture(per="scope")`
+/// - `@tryke.fixture` / `@tryke.fixture(per="scope")`
+fn is_tryke_fixture_decorator(expr: &Expr, body: &[Stmt]) -> Option<FixturePer> {
     match expr {
-        // Bare name: @before_each
-        Expr::Name(n) if !is_locally_defined(n.id.as_str(), body) => HOOK_DECORATORS
-            .iter()
-            .find(|(name, _)| *name == n.id.as_str())
-            .map(|(_, ht)| *ht),
-        // Qualified: @tryke.before_each
-        Expr::Attribute(a) if matches!(&*a.value, Expr::Name(n) if n.id.as_str() == "tryke") => {
-            HOOK_DECORATORS
-                .iter()
-                .find(|(name, _)| *name == a.attr.id.as_str())
-                .map(|(_, ht)| *ht)
+        // Bare name: @fixture
+        Expr::Name(n) if n.id.as_str() == "fixture" && !is_locally_defined("fixture", body) => {
+            Some(FixturePer::Test)
         }
-        // Call wrapper: @before_each()
-        Expr::Call(c) => is_tryke_hook_decorator(&c.func, body),
+        // Qualified: @tryke.fixture
+        Expr::Attribute(a)
+            if a.attr.id.as_str() == "fixture"
+                && matches!(&*a.value, Expr::Name(n) if n.id.as_str() == "tryke") =>
+        {
+            Some(FixturePer::Test)
+        }
+        // Call wrapper: @fixture(...) or @tryke.fixture(...)
+        Expr::Call(c) => {
+            let base = is_tryke_fixture_decorator(&c.func, body)?;
+            // Inspect keyword arguments for `per="scope"`.
+            for kw in &c.arguments.keywords {
+                if kw.arg.as_ref().is_some_and(|k| k.id.as_str() == "per")
+                    && let Expr::StringLiteral(s) = &kw.value
+                {
+                    return match s.value.to_str() {
+                        "test" => Some(FixturePer::Test),
+                        "scope" => Some(FixturePer::Scope),
+                        // Unknown values fall through to the default; users
+                        // see a typed error at worker registration time.
+                        _ => Some(base),
+                    };
+                }
+            }
+            Some(base)
+        }
         _ => None,
     }
 }
 
 /// Extract function names from `Depends(name)` calls in parameter defaults.
-fn extract_depends_from_params(func: &ruff_python_ast::StmtFunctionDef) -> Vec<String> {
+///
+/// Malformed `Depends(...)` forms (attribute access, calls, no argument)
+/// push a human-readable diagnostic into `errors` rather than being
+/// silently dropped — at runtime they would cause cryptic `TypeError`s
+/// on missing kwargs, so we surface them at discovery time.
+fn extract_depends_from_params(
+    func: &ruff_python_ast::StmtFunctionDef,
+    file: &Path,
+    root: &Path,
+    line_index: &LineIndex,
+    errors: &mut Vec<String>,
+) -> Vec<String> {
     let mut deps = Vec::new();
     for param in func.parameters.iter_non_variadic_params() {
-        if let Some(default) = &param.default
-            && let Expr::Call(call) = default.as_ref()
-        {
-            let is_depends = match call.func.as_ref() {
-                Expr::Name(n) => n.id.as_str() == "Depends",
-                Expr::Attribute(a) => {
-                    a.attr.id.as_str() == "Depends"
-                        && matches!(&*a.value, Expr::Name(n) if n.id.as_str() == "tryke")
-                }
-                _ => false,
-            };
-            if is_depends && let Some(Expr::Name(arg)) = call.arguments.args.first() {
+        let Some(default) = &param.default else {
+            continue;
+        };
+        let Expr::Call(call) = default.as_ref() else {
+            continue;
+        };
+        let is_depends = match call.func.as_ref() {
+            Expr::Name(n) => n.id.as_str() == "Depends",
+            Expr::Attribute(a) => {
+                a.attr.id.as_str() == "Depends"
+                    && matches!(&*a.value, Expr::Name(n) if n.id.as_str() == "tryke")
+            }
+            _ => false,
+        };
+        if !is_depends {
+            continue;
+        }
+        let line = u32::try_from(line_index.line_index(call.range.start()).get()).unwrap_or(0);
+        let display_file = file.strip_prefix(root).unwrap_or(file).display();
+        let param_name = param.parameter.name.id.as_str();
+        match call.arguments.args.first() {
+            None => {
+                errors.push(format!(
+                    "{display_file}:{line}: Depends() in parameter '{param_name}' of \
+                     '{fn_name}' requires exactly one positional argument naming \
+                     the hook function, e.g. Depends(my_hook).",
+                    fn_name = func.name.id.as_str(),
+                ));
+            }
+            Some(Expr::Name(arg)) => {
                 deps.push(arg.id.as_str().to_owned());
+            }
+            Some(other) => {
+                errors.push(format!(
+                    "{display_file}:{line}: Depends({kind}) in parameter '{param_name}' of \
+                     '{fn_name}' is not supported — only bare function name references \
+                     are allowed (e.g. Depends(my_hook), not Depends(mod.hook) or \
+                     Depends(factory())).",
+                    kind = describe_expr_kind(other),
+                    fn_name = func.name.id.as_str(),
+                ));
             }
         }
     }
     deps
+}
+
+/// Short, human-readable label for an AST expression kind. Used in
+/// diagnostic messages so users can tell what shape of `Depends(...)`
+/// argument was rejected.
+fn describe_expr_kind(expr: &Expr) -> &'static str {
+    match expr {
+        Expr::Name(_) => "name",
+        Expr::Attribute(_) => "attribute",
+        Expr::Call(_) => "call",
+        Expr::Subscript(_) => "subscript",
+        Expr::Lambda(_) => "lambda",
+        Expr::StringLiteral(_) => "string",
+        Expr::NumberLiteral(_) => "number",
+        _ => "expression",
+    }
 }
 
 /// What kind of lifecycle modifier is on the `@test` decorator?
@@ -674,6 +742,7 @@ fn collect_tests_from_body(
     groups: &[String],
     tests_out: &mut Vec<TestItem>,
     hooks_out: &mut Vec<HookItem>,
+    errors_out: &mut Vec<String>,
 ) {
     for stmt in stmts {
         if let Stmt::FunctionDef(func) = stmt {
@@ -711,18 +780,20 @@ fn collect_tests_from_body(
                     ..TestItem::default()
                 });
             }
-            // Check for hook decorator
-            else if let Some(hook_type) = func
+            // Check for @fixture decorator
+            else if let Some(per) = func
                 .decorator_list
                 .iter()
-                .find_map(|d| is_tryke_hook_decorator(&d.expression, top_body))
+                .find_map(|d| is_tryke_fixture_decorator(&d.expression, top_body))
             {
+                let depends_on =
+                    extract_depends_from_params(func, file, root, line_index, errors_out);
                 hooks_out.push(HookItem {
                     name: func.name.id.as_str().to_owned(),
                     module_path: path_to_module(root, file),
-                    hook_type,
+                    per,
                     groups: groups.to_vec(),
-                    depends_on: extract_depends_from_params(func),
+                    depends_on,
                     line_number: u32::try_from(line_index.line_index(func.range.start()).get())
                         .ok(),
                 });
@@ -746,6 +817,7 @@ fn collect_tests_from_body(
                     &nested_groups,
                     tests_out,
                     hooks_out,
+                    errors_out,
                 );
             }
         }
@@ -856,6 +928,7 @@ pub(crate) fn parse_tests_from_source(root: &Path, file: &Path, source: &str) ->
     let body = &module.body;
     let mut tests = Vec::new();
     let mut hooks = Vec::new();
+    let mut errors = Vec::new();
     collect_tests_from_body(
         body,
         body,
@@ -866,9 +939,17 @@ pub(crate) fn parse_tests_from_source(root: &Path, file: &Path, source: &str) ->
         &[],
         &mut tests,
         &mut hooks,
+        &mut errors,
     );
     collect_doctests_from_body(body, root, file, &line_index, "", &mut tests);
-    ParsedFile { tests, hooks }
+    for err in &errors {
+        log::error!("tryke discovery: {err}");
+    }
+    ParsedFile {
+        tests,
+        hooks,
+        errors,
+    }
 }
 
 fn parse_tests_from_file(root: &Path, file: &Path) -> ParsedFile {
@@ -1892,48 +1973,48 @@ def test_add():
         assert_eq!(items[1].doctest_object, Some("add".to_string()));
     }
 
-    // ---- Hook discovery tests ----
+    // ---- Fixture discovery tests ----
 
     #[test]
-    fn discovers_before_each_hook_at_module_level() {
-        let source = "@before_each\ndef setup():\n    pass\n\n@test\ndef test_fn():\n    pass\n";
+    fn discovers_bare_fixture_at_module_level() {
+        let source = "@fixture\ndef setup():\n    pass\n\n@test\ndef test_fn():\n    pass\n";
         let (dir, file) = write_source(source);
         let parsed = parse_tests_from_source(dir.path(), &file, source);
         assert_eq!(parsed.hooks.len(), 1);
         assert_eq!(parsed.hooks[0].name, "setup");
-        assert_eq!(parsed.hooks[0].hook_type, tryke_types::HookType::BeforeEach);
+        assert_eq!(parsed.hooks[0].per, FixturePer::Test);
         assert!(parsed.hooks[0].groups.is_empty());
     }
 
     #[test]
-    fn discovers_all_six_hook_types() {
-        let source = "\
-@before_each\ndef h1(): pass\n\
-@before_all\ndef h2(): pass\n\
-@after_each\ndef h3(): pass\n\
-@after_all\ndef h4(): pass\n\
-@wrap_each\ndef h5(): pass\n\
-@wrap_all\ndef h6(): pass\n";
+    fn discovers_scope_fixture_via_kwarg() {
+        let source = "@fixture(per=\"scope\")\ndef db(): pass\n";
         let (dir, file) = write_source(source);
         let parsed = parse_tests_from_source(dir.path(), &file, source);
-        assert_eq!(parsed.hooks.len(), 6);
-        let types: Vec<_> = parsed.hooks.iter().map(|h| h.hook_type).collect();
-        assert_eq!(
-            types,
-            vec![
-                tryke_types::HookType::BeforeEach,
-                tryke_types::HookType::BeforeAll,
-                tryke_types::HookType::AfterEach,
-                tryke_types::HookType::AfterAll,
-                tryke_types::HookType::WrapEach,
-                tryke_types::HookType::WrapAll,
-            ]
-        );
+        assert_eq!(parsed.hooks.len(), 1);
+        assert_eq!(parsed.hooks[0].per, FixturePer::Scope);
     }
 
     #[test]
-    fn discovers_hooks_inside_describe_block() {
-        let source = "with describe(\"users\"):\n    @before_each\n    def seed(): pass\n    @test\n    def test_fn(): pass\n";
+    fn discovers_test_fixture_via_explicit_kwarg() {
+        let source = "@fixture(per=\"test\")\ndef setup(): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert_eq!(parsed.hooks[0].per, FixturePer::Test);
+    }
+
+    #[test]
+    fn discovers_call_form_fixture_without_kwargs() {
+        let source = "@fixture()\ndef setup(): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert_eq!(parsed.hooks.len(), 1);
+        assert_eq!(parsed.hooks[0].per, FixturePer::Test);
+    }
+
+    #[test]
+    fn discovers_fixture_inside_describe_block() {
+        let source = "with describe(\"users\"):\n    @fixture\n    def seed(): pass\n    @test\n    def test_fn(): pass\n";
         let (dir, file) = write_source(source);
         let parsed = parse_tests_from_source(dir.path(), &file, source);
         assert_eq!(parsed.hooks.len(), 1);
@@ -1942,58 +2023,137 @@ def test_add():
     }
 
     #[test]
-    fn discovers_qualified_tryke_hook() {
-        let source = "import tryke\n@tryke.before_all\ndef db(): pass\n";
+    fn discovers_qualified_tryke_fixture() {
+        let source = "import tryke\n@tryke.fixture(per=\"scope\")\ndef db(): pass\n";
         let (dir, file) = write_source(source);
         let parsed = parse_tests_from_source(dir.path(), &file, source);
         assert_eq!(parsed.hooks.len(), 1);
-        assert_eq!(parsed.hooks[0].hook_type, tryke_types::HookType::BeforeAll);
+        assert_eq!(parsed.hooks[0].per, FixturePer::Scope);
     }
 
     #[test]
-    fn discovers_call_form_hook() {
-        let source = "@before_each()\ndef setup(): pass\n";
-        let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
-        assert_eq!(parsed.hooks.len(), 1);
-    }
-
-    #[test]
-    fn extracts_depends_from_hook_params() {
+    fn extracts_depends_from_fixture_params() {
         let source = "\
-@before_all\ndef db(): pass\n\
-@before_each\ndef table(conn=Depends(db)): pass\n";
+@fixture(per=\"scope\")\ndef db(): pass\n\
+@fixture\ndef table(conn=Depends(db)): pass\n";
         let (dir, file) = write_source(source);
         let parsed = parse_tests_from_source(dir.path(), &file, source);
         assert_eq!(parsed.hooks.len(), 2);
-        let table_hook = parsed.hooks.iter().find(|h| h.name == "table").unwrap();
+        let table_hook = parsed
+            .hooks
+            .iter()
+            .find(|h| h.name == "table")
+            .expect("fixture 'table' must exist in parsed output");
         assert_eq!(table_hook.depends_on, vec!["db"]);
+        assert!(
+            parsed.errors.is_empty(),
+            "no errors expected: {:?}",
+            parsed.errors
+        );
     }
 
     #[test]
     fn extracts_multiple_depends() {
         let source = "\
-@before_all\ndef db(): pass\n\
-@before_all\ndef cache(): pass\n\
-@before_each\ndef svc(d=Depends(db), c=Depends(cache)): pass\n";
+@fixture(per=\"scope\")\ndef db(): pass\n\
+@fixture(per=\"scope\")\ndef cache(): pass\n\
+@fixture\ndef svc(d=Depends(db), c=Depends(cache)): pass\n";
         let (dir, file) = write_source(source);
         let parsed = parse_tests_from_source(dir.path(), &file, source);
-        let svc = parsed.hooks.iter().find(|h| h.name == "svc").unwrap();
+        let svc = parsed
+            .hooks
+            .iter()
+            .find(|h| h.name == "svc")
+            .expect("fixture 'svc' must exist in parsed output");
         assert_eq!(svc.depends_on, vec!["db", "cache"]);
+        assert!(
+            parsed.errors.is_empty(),
+            "no errors expected: {:?}",
+            parsed.errors
+        );
     }
 
     #[test]
-    fn hook_without_depends_has_empty_depends_on() {
-        let source = "@before_each\ndef setup(): pass\n";
+    fn fixture_without_depends_has_empty_depends_on() {
+        let source = "@fixture\ndef setup(): pass\n";
         let (dir, file) = write_source(source);
         let parsed = parse_tests_from_source(dir.path(), &file, source);
         assert!(parsed.hooks[0].depends_on.is_empty());
+        assert!(parsed.errors.is_empty());
     }
 
     #[test]
-    fn hooks_and_tests_coexist() {
+    fn depends_with_attribute_arg_is_a_discovery_error() {
         let source = "\
-@before_each\ndef setup(): pass\n\
+@fixture\ndef svc(x=Depends(mod.fn)): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert_eq!(parsed.hooks.len(), 1);
+        assert!(parsed.hooks[0].depends_on.is_empty());
+        assert_eq!(
+            parsed.errors.len(),
+            1,
+            "expected one error, got {:?}",
+            parsed.errors
+        );
+        let err = &parsed.errors[0];
+        assert!(err.contains("Depends(attribute)"), "error: {err}");
+        assert!(err.contains("svc"), "error should name the fixture: {err}");
+        assert!(
+            err.contains(":2:"),
+            "error should include line 2 (the def): {err}"
+        );
+    }
+
+    #[test]
+    fn depends_with_no_args_is_a_discovery_error() {
+        let source = "\
+@fixture\ndef svc(x=Depends()): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert_eq!(parsed.hooks.len(), 1);
+        assert!(parsed.hooks[0].depends_on.is_empty());
+        assert_eq!(parsed.errors.len(), 1);
+        let err = &parsed.errors[0];
+        assert!(
+            err.contains("requires exactly one positional argument"),
+            "error: {err}"
+        );
+    }
+
+    #[test]
+    fn depends_with_call_arg_is_a_discovery_error() {
+        let source = "\
+@fixture\ndef svc(x=Depends(factory())): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert_eq!(parsed.hooks.len(), 1);
+        assert!(parsed.hooks[0].depends_on.is_empty());
+        assert_eq!(parsed.errors.len(), 1);
+        assert!(parsed.errors[0].contains("Depends(call)"));
+    }
+
+    #[test]
+    fn valid_and_invalid_depends_are_reported_independently() {
+        let source = "\
+@fixture(per=\"scope\")\ndef db(): pass\n\
+@fixture\ndef svc(a=Depends(db), b=Depends(unsupported.thing)): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let svc = parsed
+            .hooks
+            .iter()
+            .find(|h| h.name == "svc")
+            .expect("svc fixture");
+        assert_eq!(svc.depends_on, vec!["db"]);
+        assert_eq!(parsed.errors.len(), 1);
+        assert!(parsed.errors[0].contains("Depends(attribute)"));
+    }
+
+    #[test]
+    fn fixtures_and_tests_coexist() {
+        let source = "\
+@fixture\ndef setup(): pass\n\
 @test\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
         let parsed = parse_tests_from_source(dir.path(), &file, source);
@@ -2002,18 +2162,18 @@ def test_add():
     }
 
     #[test]
-    fn locally_defined_before_each_is_not_a_hook() {
+    fn locally_defined_fixture_is_not_a_fixture() {
         let source = "\
-def before_each(fn):\n    return fn\n\
-@before_each\ndef setup(): pass\n";
+def fixture(fn):\n    return fn\n\
+@fixture\ndef setup(): pass\n";
         let (dir, file) = write_source(source);
         let parsed = parse_tests_from_source(dir.path(), &file, source);
         assert!(parsed.hooks.is_empty());
     }
 
     #[test]
-    fn hook_has_line_number() {
-        let source = "\n\n@before_each\ndef setup(): pass\n";
+    fn fixture_has_line_number() {
+        let source = "\n\n@fixture\ndef setup(): pass\n";
         let (dir, file) = write_source(source);
         let parsed = parse_tests_from_source(dir.path(), &file, source);
         assert_eq!(parsed.hooks[0].line_number, Some(3));

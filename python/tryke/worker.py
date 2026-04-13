@@ -24,7 +24,7 @@ from tryke.expect import (
     _TodoMarked,
     _XfailMarked,
 )
-from tryke.hooks import HookExecutor, _hook_category
+from tryke.hooks import HookExecutor, _fixture_per
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -475,8 +475,8 @@ class Worker:
             raw_ln = h.get("line_number", 0)
             line_number = raw_ln if isinstance(raw_ln, int) else 0
             fn = getattr(mod, name, None)
-            if fn is not None and _hook_category(fn) is not None:
-                executor.register_hook(fn, groups=groups, line_number=line_number)
+            if fn is not None and _fixture_per(fn) is not None:
+                executor.register_fixture(fn, groups=groups, line_number=line_number)
 
         self._executors[module_name] = executor
         return executor

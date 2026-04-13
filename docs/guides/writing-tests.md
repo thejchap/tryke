@@ -140,50 +140,45 @@ with describe("math"):
 
 The group name appears as a prefix in test output.
 
-## Hooks
+## Fixtures
 
-Hooks run setup and teardown logic around tests. There are six decorators in three pairs:
+Fixtures run setup and teardown logic around tests. There is a single decorator, `@fixture`, with two granularities:
 
-| Decorator | Runs | Scope |
-|-----------|------|-------|
-| `@before_each` / `@after_each` | Before/after every test in scope | Per-test |
-| `@before_all` / `@after_all` | Once for all tests in scope | Per-scope |
-| `@wrap_each` / `@wrap_all` | Generator — yield splits setup/teardown | Per-test / per-scope |
+| Form | Runs | Scope |
+|------|------|-------|
+| `@fixture` (default: `per="test"`) | Before/after every test in scope | Per-test |
+| `@fixture(per="scope")` | Once for all tests in scope | Per-(lexical-)scope |
 
-Scope is determined by where the hook is defined: at module top-level it applies to all tests in the file. Inside a `with describe():` block it applies only to tests in that group.
+Scope is determined by *where* the fixture is defined: at module top-level it applies to all tests in the file. Inside a `with describe():` block it applies only to tests in that group.
 
-### Basic setup and teardown
+Setup and teardown live in the same function. Use `yield` to split them:
 
 ```python
-from tryke import test, expect, before_each, after_each
+from tryke import fixture, test, expect
 
-@before_each
-def setup():
-    # Runs before every test in this file
-    pass
+@fixture
+def db():
+    conn = connect("test.db")
+    yield conn             # value available to tests via Depends()
+    conn.close()           # teardown runs after each test
 
-@after_each
-def cleanup():
-    # Runs after every test in this file
-    pass
-
-@test
-def my_test():
-    expect(1 + 1).to_equal(2)
+@fixture
+def fresh_user():
+    return {"name": "alice"}   # plain return: no teardown
 ```
 
 ### Sharing state with `Depends()`
 
-Hooks that produce values share them with tests via `Depends()` in function signatures:
+Fixtures that produce values share them with tests via `Depends()` in function signatures:
 
 ```python
-from tryke import test, expect, before_all, before_each, Depends
+from tryke import fixture, test, expect, Depends
 
-@before_all
+@fixture(per="scope")
 def db() -> Connection:
     return create_connection("test.db")
 
-@before_each
+@fixture
 def fresh_table(conn: Connection = Depends(db)) -> Table:
     conn.execute("DELETE FROM users")
     return conn.table("users")
@@ -196,12 +191,12 @@ def finds_user(table: Table = Depends(fresh_table)):
 
 `Depends()` is typed — type checkers see `Depends(db)` as returning `Connection`. At runtime, the framework resolves the dependency chain and passes the values as keyword arguments.
 
-### `before_all` — run once, reuse across tests
+### `per="scope"` — run once, reuse across tests
 
-`@before_all` hooks run once for their scope. The return value is cached and shared across all tests in that scope via `Depends()`:
+`@fixture(per="scope")` fixtures run once for their lexical scope. The return value is cached and shared across all tests in that scope:
 
 ```python
-@before_all
+@fixture(per="scope")
 def db() -> Connection:
     # Called once for the entire file
     return create_connection("test.db")
@@ -217,18 +212,20 @@ def test_two(conn: Connection = Depends(db)):
     ...
 ```
 
-### Wrap hooks — setup and teardown in one function
+> **Shared by reference.** The value returned from a `per="scope"` fixture is cached once per scope and handed to every test by reference. If a test mutates it, the mutation is visible to subsequent tests on the same worker. Treat `per="scope"` values as read-only unless they represent resources where mutation is part of the contract (connections, temp directories). See [concurrency: same-worker sharing of `per="scope"` values](../concepts/concurrency.md#same-worker-sharing-of-perscope-values) for details.
 
-`@wrap_each` and `@wrap_all` use a generator: code before `yield` is setup, code after is teardown.
+### Setup + teardown in one function
+
+Use `yield` to express teardown. Code before `yield` is setup; code after is teardown. Works for both `per="test"` and `per="scope"`:
 
 ```python
-from tryke import test, expect, wrap_each, Depends
+from tryke import fixture, test, expect, Depends
 
-@wrap_each
+@fixture
 def with_transaction(conn: Connection = Depends(db)):
     tx = conn.begin()
     yield tx
-    tx.rollback()
+    tx.rollback()         # runs after the test
 
 @test
 def modifies_data(tx: Transaction = Depends(with_transaction)):
@@ -239,17 +236,17 @@ def modifies_data(tx: Transaction = Depends(with_transaction)):
 
 ### Scoping with describe blocks
 
-Hooks defined inside a `describe` block only apply to tests in that block:
+Fixtures defined inside a `describe` block only apply to tests in that block:
 
 ```python
-from tryke import test, expect, describe, before_all, before_each, Depends
+from tryke import fixture, test, expect, describe, Depends
 
-@before_all
+@fixture(per="scope")
 def api() -> TestClient:
     return TestClient(app)
 
 with describe("GET /users"):
-    @before_each
+    @fixture
     def seed_users(client: TestClient = Depends(api)):
         client.post("/users", json={"name": "alice"})
 
@@ -266,26 +263,26 @@ with describe("POST /users"):
         expect(resp.status_code).to_equal(201)
 ```
 
-`api()` runs once for the file (module-level `@before_all`). `seed_users()` runs before each test in "GET /users" only.
+`api()` runs once for the file (module-level `per="scope"`). `seed_users()` runs before each test in "GET /users" only.
 
-### Composing hooks via Depends chains
+### Composing fixtures via Depends chains
 
-Hooks can depend on other hooks, forming a dependency graph:
+Fixtures can depend on other fixtures, forming a dependency graph:
 
 ```python
-@before_all
+@fixture(per="scope")
 def config() -> AppConfig:
     return AppConfig.from_env("test")
 
-@before_all
+@fixture(per="scope")
 def db(cfg: AppConfig = Depends(config)) -> Database:
     return Database(cfg.db_url)
 
-@before_all
+@fixture(per="scope")
 def cache(cfg: AppConfig = Depends(config)) -> RedisCache:
     return RedisCache(cfg.redis_url)
 
-@before_each
+@fixture
 def service(
     db: Database = Depends(db),
     cache: RedisCache = Depends(cache),
@@ -293,31 +290,27 @@ def service(
     return UserService(db, cache)
 ```
 
-The framework resolves the graph automatically: `config` first (leaf), then `db` and `cache`, then `service`. `@before_all` values are cached for the scope lifetime; `@before_each` values are fresh per test.
+The framework resolves the graph automatically: `config` first (leaf), then `db` and `cache`, then `service`. `per="scope"` values are cached for the scope lifetime; `per="test"` values are fresh per test.
 
 ### Execution order
 
 For a test inside `describe("users")`:
 
 ```text
-1. @before_all   (module scope, once for file)
-2. @before_each  (module scope, per test)
-3. @wrap_each    (module scope, setup half)
-4. @before_each  (describe scope, per test)
-5. @wrap_each    (describe scope, setup half)
-6. TEST RUNS
-7. @wrap_each    (describe scope, teardown half)
-8. @after_each   (describe scope, reverse order)
-9. @wrap_each    (module scope, teardown half)
-10. @after_each  (module scope, reverse order)
-11. @after_all   (module scope, once after all tests)
+1. per="scope" fixtures (module scope, once for file)
+2. per="test"  fixtures (module scope, definition order)
+3. per="scope" fixtures (describe scope, once for group)
+4. per="test"  fixtures (describe scope, definition order)
+5. TEST RUNS
+6. per="test"  fixtures teardown (reverse of setup, LIFO)
+7. per="scope" fixtures teardown runs only on module/group finalize
 ```
 
-Outer scope hooks wrap inner scope hooks. Within a scope, `@before_each` and `@wrap_each` run in definition order; `@after_each` runs in reverse (stack unwinding). Teardown always runs, even if the test fails.
+Outer scope fixtures wrap inner scope fixtures. Within a scope, fixtures set up in definition order and tear down in reverse — exactly like `contextlib.ExitStack`. Teardown always runs, even if the test fails.
 
 ### Concurrency impact
 
-See [concurrency](../concepts/concurrency.md#hooks-and-scheduling) for how hooks interact with `--dist` modes. In short: `@before_each` hooks preserve full parallelism, while `@before_all` hooks force tests in the same scope onto a single worker.
+See [concurrency](../concepts/concurrency.md#fixtures-and-scheduling) for how fixtures interact with `--dist` modes. In short: `per="test"` fixtures preserve full parallelism, while `per="scope"` fixtures force tests in the same scope onto a single worker.
 
 ## Skipping tests
 

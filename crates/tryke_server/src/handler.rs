@@ -170,8 +170,11 @@ async fn execute_run(
 
     let test_start = Instant::now();
     // Server uses test-level distribution by default.
-    let units = partition_with_hooks(tests, &hooks, DistMode::Test);
-    let mut stream = pool.run(units);
+    let partition = partition_with_hooks(tests, &hooks, DistMode::Test);
+    for w in &partition.warnings {
+        log::warn!("{w}");
+    }
+    let mut stream = pool.run(partition.units);
     let mut passed = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;

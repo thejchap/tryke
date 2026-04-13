@@ -36,6 +36,14 @@ exclude = ["benchmarks/suites"]
 select = ["ALL"]
 ignore = ["D", "COM812"]
 
+# Tryke's public API puts `Depends(...)` in parameter defaults on purpose
+# (FastAPI-style dependency injection). B008 (function call in default)
+# and PT028 (pytest: default argument on test function parameter) both
+# flag that pattern. Exempt files that exercise the @fixture surface.
+[tool.ruff.lint.per-file-ignores]
+"tests/test_hooks.py" = ["B008", "PT028"]
+"python/tryke/hooks.py" = ["B008"]
+
 [tool.tryke]
 exclude = ["benchmarks/suites", "demo"]
 

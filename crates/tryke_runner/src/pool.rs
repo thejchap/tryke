@@ -203,7 +203,7 @@ async fn register_hooks_for_unit(
                 .filter(|h| h.module_path == test.module_path)
                 .map(|h| crate::protocol::HookWire {
                     name: h.name.clone(),
-                    hook_type: serde_json::to_value(h.hook_type)
+                    per: serde_json::to_value(h.per)
                         .ok()
                         .and_then(|v| v.as_str().map(String::from))
                         .unwrap_or_default(),

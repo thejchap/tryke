@@ -481,6 +481,7 @@ class Expectation[T]:
         MatchResult(ok)
         >>> expect(None).not_.to_be_truthy()
         MatchResult(ok)
+
         ```
     """
 
@@ -499,6 +500,7 @@ class Expectation[T]:
             MatchResult(ok)
             >>> expect(None).not_.to_be_truthy()
             MatchResult(ok)
+
             ```
         """
         return Expectation(self._value, negated=not self._negated)
@@ -538,6 +540,7 @@ class Expectation[T]:
             MatchResult(ok)
             >>> expect([1, 2]).to_equal([1, 2])
             MatchResult(ok)
+
             ```
         """
         return self._assert(
@@ -559,6 +562,7 @@ class Expectation[T]:
             >>> sentinel = object()
             >>> expect(sentinel).to_be(sentinel)
             MatchResult(ok)
+
             ```
         """
         return self._assert(
@@ -578,6 +582,7 @@ class Expectation[T]:
             MatchResult(ok)
             >>> expect([1]).to_be_truthy()
             MatchResult(ok)
+
             ```
         """
         return self._assert(
@@ -597,6 +602,7 @@ class Expectation[T]:
             MatchResult(ok)
             >>> expect("").to_be_falsy()
             MatchResult(ok)
+
             ```
         """
         return self._assert(
@@ -616,6 +622,7 @@ class Expectation[T]:
             MatchResult(ok)
             >>> expect(42).not_.to_be_none()
             MatchResult(ok)
+
             ```
         """
         return self._assert(
@@ -636,6 +643,7 @@ class Expectation[T]:
             >>> from tryke import expect
             >>> expect(5).to_be_greater_than(3)
             MatchResult(ok)
+
             ```
         """
         return self._assert(
@@ -656,6 +664,7 @@ class Expectation[T]:
             >>> from tryke import expect
             >>> expect(3).to_be_less_than(5)
             MatchResult(ok)
+
             ```
         """
         return self._assert(
@@ -678,6 +687,7 @@ class Expectation[T]:
             >>> from tryke import expect
             >>> expect(5).to_be_greater_than_or_equal(5)
             MatchResult(ok)
+
             ```
         """
         return self._assert(
@@ -700,6 +710,7 @@ class Expectation[T]:
             >>> from tryke import expect
             >>> expect(4).to_be_less_than_or_equal(5)
             MatchResult(ok)
+
             ```
         """
         return self._assert(
@@ -726,6 +737,7 @@ class Expectation[T]:
             MatchResult(ok)
             >>> expect("hello world").to_contain("world")
             MatchResult(ok)
+
             ```
         """
         return self._assert(
@@ -748,6 +760,7 @@ class Expectation[T]:
             MatchResult(ok)
             >>> expect("hello").to_have_length(5)
             MatchResult(ok)
+
             ```
         """
         actual = len(self._value)
@@ -771,6 +784,7 @@ class Expectation[T]:
             MatchResult(ok)
             >>> expect("foo123").to_match(r"\\d+")
             MatchResult(ok)
+
             ```
         """
         return self._assert(
@@ -803,6 +817,7 @@ class Expectation[T]:
             MatchResult(ok)
             >>> expect(lambda: None).not_.to_raise()
             MatchResult(ok)
+
             ```
         """
         if not callable(self._value):
@@ -867,6 +882,7 @@ def expect[T](
         MatchResult(ok)
         >>> expect("hello").to_contain("ell")
         MatchResult(ok)
+
         ```
     """
     return Expectation(expr)

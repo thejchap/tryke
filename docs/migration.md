@@ -178,9 +178,9 @@ def comprehensive_check():
     expect(response.headers).to_contain("json")    # soft — runs regardless
 ```
 
-### Fixtures → hooks + Depends
+### Fixtures → `@fixture` + `Depends()`
 
-pytest uses `@pytest.fixture` with implicit parameter-name matching. Tryke uses explicit hook decorators with `Depends()`:
+pytest uses `@pytest.fixture` with implicit parameter-name matching. Tryke uses a single `@fixture` decorator with explicit `Depends()` wiring:
 
 **pytest:**
 
@@ -206,13 +206,13 @@ def test_query(table):
 **tryke:**
 
 ```python
-from tryke import test, expect, before_all, before_each, wrap_each, Depends
+from tryke import test, expect, fixture, Depends
 
-@before_all
+@fixture(per="scope")
 def db() -> Connection:
     return create_connection()
 
-@wrap_each
+@fixture
 def managed_conn(conn: Connection = Depends(db)):
     yield conn
     conn.execute("DELETE FROM users")
@@ -225,10 +225,10 @@ def query(conn: Connection = Depends(managed_conn)):
 
 Key differences:
 
-- Scope is lexical (where the hook is defined), not declared via `scope=`
+- Scope is lexical (where the fixture is defined), not declared via `scope=`
 - Dependencies are explicit via `Depends()`, not matched by parameter name
 - `Depends()` is fully typed — type checkers see the correct return type
-- No `conftest.py` — hooks live in the same file as the tests they serve
+- No `conftest.py` — fixtures live in the same file as the tests they serve
 
 ### No parametrize (yet)
 

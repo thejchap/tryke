@@ -30,6 +30,31 @@ pub struct RunTestParams {
     pub function: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub xfail: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
+}
+
+/// Wire format for a single fixture sent to the Python worker.
+#[derive(Debug, Clone, Serialize)]
+pub struct HookWire {
+    pub name: String,
+    pub per: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+    pub line_number: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RegisterHooksParams {
+    pub module: String,
+    pub hooks: Vec<HookWire>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FinalizeHooksParams {
+    pub module: String,
 }
 
 #[derive(Debug, Serialize)]

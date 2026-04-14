@@ -6,7 +6,7 @@ use log::{debug, trace};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::Stream;
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tryke_types::{TestOutcome, TestResult};
+use tryke_types::{HookItem, TestOutcome, TestResult};
 
 use crate::schedule::WorkUnit;
 use crate::worker::WorkerProcess;
@@ -26,7 +26,14 @@ pub struct WorkerPool {
 impl WorkerPool {
     #[must_use]
     pub fn new(size: usize, python_bin: &str, root: &Path) -> Self {
-        Self::with_python_path(size, python_bin, root, &[root.to_path_buf()])
+        let mut python_path = vec![root.to_path_buf()];
+        // pyproject.toml declares python-source = "python" — add it to
+        // PYTHONPATH so the tryke package is importable even without a venv.
+        let src_dir = root.join("python");
+        if src_dir.is_dir() {
+            python_path.push(src_dir);
+        }
+        Self::with_python_path(size, python_bin, root, &python_path)
     }
 
     #[must_use]
@@ -177,6 +184,61 @@ async fn run_single_test(
     }
 }
 
+/// Send `register_hooks` to the worker for each unique module in the work unit.
+async fn register_hooks_for_unit(
+    worker: &mut Option<WorkerProcess>,
+    python_bin: &str,
+    path_refs: &[&Path],
+    root: &Path,
+    hooks: &[HookItem],
+    tests: &[tryke_types::TestItem],
+) {
+    // Determine unique modules from the tests.
+    let mut seen = std::collections::HashSet::new();
+    for test in tests {
+        if seen.insert(test.module_path.clone()) {
+            // Send only hooks belonging to this module.
+            let module_hooks: Vec<crate::protocol::HookWire> = hooks
+                .iter()
+                .filter(|h| h.module_path == test.module_path)
+                .map(|h| crate::protocol::HookWire {
+                    name: h.name.clone(),
+                    per: serde_json::to_value(h.per)
+                        .ok()
+                        .and_then(|v| v.as_str().map(String::from))
+                        .unwrap_or_default(),
+                    groups: h.groups.clone(),
+                    depends_on: h.depends_on.clone(),
+                    line_number: h.line_number,
+                })
+                .collect();
+
+            if module_hooks.is_empty() {
+                continue;
+            }
+
+            // Ensure worker is spawned.
+            if worker.is_none() {
+                if let Ok(w) = WorkerProcess::spawn(python_bin, path_refs, root) {
+                    *worker = Some(w);
+                } else {
+                    continue;
+                }
+            }
+
+            if let Some(w) = worker.as_mut() {
+                let params = crate::protocol::RegisterHooksParams {
+                    module: test.module_path.clone(),
+                    hooks: module_hooks,
+                };
+                if let Err(e) = w.register_hooks(params).await {
+                    debug!("worker_task: register_hooks failed: {e}");
+                }
+            }
+        }
+    }
+}
+
 async fn worker_task(
     python_bin: String,
     python_path: Vec<std::path::PathBuf>,
@@ -202,6 +264,25 @@ async fn worker_task(
                 let _ = ack_tx.send(());
             }
             WorkerMsg::Unit(unit, result_tx) => {
+                // Send hook metadata for each unique module in this unit.
+                if !unit.hooks.is_empty() {
+                    register_hooks_for_unit(
+                        &mut worker,
+                        &python_bin,
+                        &path_refs,
+                        &root,
+                        &unit.hooks,
+                        &unit.tests,
+                    )
+                    .await;
+                }
+                // Track modules in this unit for finalization.
+                let mut finalize_modules = std::collections::HashSet::new();
+                for test in &unit.tests {
+                    if !unit.hooks.is_empty() {
+                        finalize_modules.insert(test.module_path.clone());
+                    }
+                }
                 for test in unit.tests {
                     trace!("worker_task: running test {}", test.name);
                     run_single_test(
@@ -213,6 +294,14 @@ async fn worker_task(
                         &result_tx,
                     )
                     .await;
+                }
+                // Finalize hooks for each module in this unit.
+                for module in finalize_modules {
+                    if let Some(w) = worker.as_mut()
+                        && let Err(e) = w.finalize_hooks(module).await
+                    {
+                        debug!("worker_task: finalize_hooks failed: {e}");
+                    }
                 }
             }
             WorkerMsg::Reload(modules, ack_tx) => {

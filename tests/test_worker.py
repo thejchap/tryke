@@ -50,7 +50,7 @@ def _run_test_fn(
 ) -> dict:
     """Execute *fn* via the worker run_test path and return the result."""
     mod = types.ModuleType("_tw")
-    mod.test_fn = fn
+    mod.__dict__["test_fn"] = fn
     params: dict[str, object] = {
         "module": "_tw",
         "function": "test_fn",
@@ -200,7 +200,7 @@ with describe("run_test outcomes"):
         def fn() -> None:
             pass
 
-        fn.__tryke_skip__ = "not ready"  # type: ignore[attr-defined]
+        fn.__dict__["__tryke_skip__"] = "not ready"
         result = _run_test_fn(fn)
         expect(result["outcome"]).to_equal("skipped")
         expect(result["reason"]).to_equal("not ready")
@@ -210,7 +210,7 @@ with describe("run_test outcomes"):
         def fn() -> None:
             pass
 
-        fn.__tryke_todo__ = "implement later"  # type: ignore[attr-defined]
+        fn.__dict__["__tryke_todo__"] = "implement later"
         result = _run_test_fn(fn)
         expect(result["outcome"]).to_equal("todo")
         expect(result["description"]).to_equal("implement later")
@@ -239,7 +239,7 @@ with describe("run_test outcomes"):
             msg = "fail"
             raise ValueError(msg)
 
-        fn.__tryke_xfail__ = "marker reason"  # type: ignore[attr-defined]
+        fn.__dict__["__tryke_xfail__"] = "marker reason"
         result = _run_test_fn(fn)
         expect(result["outcome"]).to_equal("xfailed")
         expect(result["reason"]).to_equal("marker reason")
@@ -426,7 +426,7 @@ with describe("run_doctest"):
 
         mod_name = "_tw_dt_leak"
         mod = types.ModuleType(mod_name)
-        mod.bad = bad
+        mod.__dict__["bad"] = bad
 
         req: dict[str, object] = {
             "jsonrpc": "2.0",

@@ -3,19 +3,22 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
-import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING
 
-from tryke import describe, expect, test
-from tryke.expect import ExpectationError, MatchResult, SoftContext
-
 if TYPE_CHECKING:
     from types import ModuleType
 
-_expect_mod = sys.modules["tryke.expect"]
-
+from tryke import describe, expect, test
+from tryke.expect import (
+    Expectation,
+    ExpectationError,
+    MatchResult,
+    SoftContext,
+    _set_soft_context,
+    _SkipMarked,
+)
 
 with describe("expectations"):
 
@@ -99,30 +102,30 @@ with describe("expectations"):
         # isolate from the worker's soft context so the expected failure
         # doesn't pollute the test outcome.
         ctx = SoftContext()
-        _expect_mod._soft_context = ctx  # noqa: SLF001
+        _set_soft_context(ctx)
         try:
             expect(True).to_be_falsy().fatal()  # noqa: FBT003
         except ExpectationError as exc:
-            _expect_mod._soft_context = None  # noqa: SLF001
+            _set_soft_context(None)
             expect(exc.expected).to_equal("falsy")
             expect(exc.received).to_equal("True")
         else:
-            _expect_mod._soft_context = None  # noqa: SLF001
+            _set_soft_context(None)
             msg = "ExpectationError was not raised"
             raise AssertionError(msg)
 
     @test(name="negated expectation error")
     def test_negated_expectation_error() -> None:
         ctx = SoftContext()
-        _expect_mod._soft_context = ctx  # noqa: SLF001
+        _set_soft_context(ctx)
         try:
             expect(1).not_.to_equal(1).fatal()
         except ExpectationError as exc:
-            _expect_mod._soft_context = None  # noqa: SLF001
+            _set_soft_context(None)
             expect(exc.expected).to_equal("not 1")
             expect(exc.received).to_equal("1")
         else:
-            _expect_mod._soft_context = None  # noqa: SLF001
+            _set_soft_context(None)
             msg = "ExpectationError was not raised"
             raise AssertionError(msg)
 
@@ -132,13 +135,13 @@ with describe("soft assertions"):
     @test(name="soft assertions collect all failures")
     def test_soft_assertions_collect_all_failures() -> None:
         ctx = SoftContext()
-        _expect_mod._soft_context = ctx  # noqa: SLF001
+        _set_soft_context(ctx)
         try:
             expect(1).to_equal(2)
             expect(3).to_equal(3)
             expect(4).to_equal(5)
         finally:
-            _expect_mod._soft_context = None  # noqa: SLF001
+            _set_soft_context(None)
         expect(len(ctx.failures)).to_equal(2)
         expect(ctx.failures[0][0].expected).to_equal("2")
         expect(ctx.failures[1][0].expected).to_equal("5")
@@ -146,55 +149,58 @@ with describe("soft assertions"):
     @test(name="fatal() on passing assertion is a noop")
     def test_fatal_on_passing_assertion_is_noop() -> None:
         ctx = SoftContext()
-        _expect_mod._soft_context = ctx  # noqa: SLF001
+        _set_soft_context(ctx)
         try:
             expect(1).to_equal(1).fatal()
         finally:
-            _expect_mod._soft_context = None  # noqa: SLF001
+            _set_soft_context(None)
         expect(len(ctx.failures)).to_equal(0)
 
     @test(name="fatal() on failing assertion raises")
     def test_fatal_on_failing_assertion_raises() -> None:
         ctx = SoftContext()
-        _expect_mod._soft_context = ctx  # noqa: SLF001
+        _set_soft_context(ctx)
         try:
             expect(1).to_equal(2).fatal()
         except ExpectationError as exc:
-            _expect_mod._soft_context = None  # noqa: SLF001
+            _set_soft_context(None)
             expect(exc.expected).to_equal("2")
         else:
-            _expect_mod._soft_context = None  # noqa: SLF001
+            _set_soft_context(None)
             msg = "ExpectationError was not raised by .fatal()"
             raise AssertionError(msg)
 
     @test(name="soft failures followed by fatal()")
     def test_soft_failures_then_fatal() -> None:
         ctx = SoftContext()
-        _expect_mod._soft_context = ctx  # noqa: SLF001
+        _set_soft_context(ctx)
         try:
             expect(1).to_equal(99)
             expect(2).to_equal(98)
             expect(3).to_equal(97).fatal()
         except ExpectationError as exc:
-            _expect_mod._soft_context = None  # noqa: SLF001
+            _set_soft_context(None)
             expect(len(ctx.failures)).to_equal(3)
             expect(exc.expected).to_equal("97")
         else:
-            _expect_mod._soft_context = None  # noqa: SLF001
+            _set_soft_context(None)
             msg = "ExpectationError was not raised by .fatal()"
             raise AssertionError(msg)
 
     @test(name="soft context captures caller frame")
     def test_soft_context_captures_caller_frame() -> None:
         ctx = SoftContext()
-        _expect_mod._soft_context = ctx  # noqa: SLF001
+        _set_soft_context(ctx)
         try:
             expect(1).to_equal(2)
         finally:
-            _expect_mod._soft_context = None  # noqa: SLF001
+            _set_soft_context(None)
         expect(len(ctx.failures)).to_equal(1)
         frame = ctx.failures[0][1]
         expect(frame).not_.to_be_none()
+        if frame is None:
+            msg = "frame should not be None"
+            raise AssertionError(msg)
         expect(frame.filename).to_contain("test_expect.py")
 
 
@@ -223,14 +229,14 @@ with describe("to_raise"):
     @test(name="to_raise fails when no exception raised")
     def test_to_raise_fails_when_no_exception() -> None:
         ctx = SoftContext()
-        _expect_mod._soft_context = ctx  # noqa: SLF001
+        _set_soft_context(ctx)
         try:
             expect(lambda: None).to_raise(ValueError).fatal()
         except ExpectationError as exc:
-            _expect_mod._soft_context = None  # noqa: SLF001
+            _set_soft_context(None)
             expect(exc.received).to_equal("no exception")
         else:
-            _expect_mod._soft_context = None  # noqa: SLF001
+            _set_soft_context(None)
             msg = "ExpectationError was not raised"
             raise AssertionError(msg)
 
@@ -241,14 +247,14 @@ with describe("to_raise"):
             raise TypeError(msg)
 
         ctx = SoftContext()
-        _expect_mod._soft_context = ctx  # noqa: SLF001
+        _set_soft_context(ctx)
         try:
             expect(raises).to_raise(ValueError).fatal()
         except ExpectationError as exc:
-            _expect_mod._soft_context = None  # noqa: SLF001
+            _set_soft_context(None)
             expect(exc.received).to_contain("TypeError")
         else:
-            _expect_mod._soft_context = None  # noqa: SLF001
+            _set_soft_context(None)
             msg = "ExpectationError was not raised"
             raise AssertionError(msg)
 
@@ -263,26 +269,23 @@ with describe("to_raise"):
             raise RuntimeError(msg)
 
         ctx = SoftContext()
-        _expect_mod._soft_context = ctx  # noqa: SLF001
+        _set_soft_context(ctx)
         try:
             expect(raises).not_.to_raise().fatal()
         except ExpectationError as exc:
-            _expect_mod._soft_context = None  # noqa: SLF001
+            _set_soft_context(None)
             expect(exc.received).to_contain("RuntimeError")
         else:
-            _expect_mod._soft_context = None  # noqa: SLF001
+            _set_soft_context(None)
             msg = "ExpectationError was not raised"
             raise AssertionError(msg)
 
     @test(name="to_raise raises TypeError for non-callable")
     def test_to_raise_raises_type_error_for_non_callable() -> None:
-        try:
-            expect(42).to_raise(ValueError)
-        except TypeError as exc:
-            expect(str(exc)).to_contain("callable")
-        else:
-            msg = "TypeError was not raised"
-            raise AssertionError(msg)
+        # Access to_raise via getattr to bypass the static protocol bound —
+        # this tests the runtime TypeError guard for non-callable values.
+        to_raise = getattr(Expectation(42), "to_raise")  # noqa: B009
+        expect(lambda: to_raise(ValueError)).to_raise(TypeError, match="callable")
 
 
 with describe("markers"):
@@ -369,6 +372,9 @@ with describe("markers"):
             pass
 
         expect(hasattr(skipped, "__tryke_skip__")).to_be_truthy()
+        if not isinstance(skipped, _SkipMarked):
+            msg = "skip_if should stamp __tryke_skip__"
+            raise TypeError(msg)
         expect(skipped.__tryke_skip__).to_equal("always skip")
 
     @test(name="skip_if(false) does not stamp")

@@ -1,28 +1,28 @@
 """tryke's public Python API.
 
-The three main exports are:
+The main exports are:
 
 - [`test`][tryke.expect.test] — decorator for marking test functions
 - [`expect`][tryke.expect.expect] — assertion entry point
 - [`describe`][tryke.describe] — context manager for grouping tests
+- [`fixture`][tryke.hooks.fixture] — decorator for setup/teardown fixtures
+- [`Depends`][tryke.hooks.Depends] — wire fixture values into signatures
 """
 
 from collections.abc import Generator
 from contextlib import contextmanager
 
 from .expect import expect, test
+from .hooks import Depends, fixture
 
 
 @contextmanager
-def describe(
-    name: str,  # noqa: ARG001 - only used by static analysis/test discovery
-) -> Generator[None, None, None]:
+def describe(name: str) -> Generator[None, None, None]:
     """Group tests visually in output.
 
     The describe name is used as a prefix in test names during reporting.
-
-    Args:
-        name: The group name shown in test output.
+    The name is inspected by tryke's static discovery, so it must be a
+    string literal when used as ``with describe("..."):``.
 
     Example:
         ```python
@@ -38,7 +38,16 @@ def describe(
                 expect(3 - 1).to_equal(2)
         ```
     """
+    # `name` is referenced here purely to satisfy the "used" requirement
+    # without a lint suppression; static discovery is what actually reads it.
+    _ = name
     yield
 
 
-__all__ = ["describe", "expect", "test"]
+__all__ = [
+    "Depends",
+    "describe",
+    "expect",
+    "fixture",
+    "test",
+]

@@ -44,3 +44,35 @@
 ::: tryke.describe
     options:
       show_root_heading: false
+
+---
+
+## Hooks
+
+Six lifecycle decorators for test setup and teardown. Scope is
+determined by position: module top-level applies to all tests in the
+file; inside a `describe()` block applies to that group only.
+
+| Decorator | Runs | Scope |
+|-----------|------|-------|
+| `before_each` / `after_each` | Before/after every test | Per-test |
+| `before_all` / `after_all` | Once for all tests | Per-scope |
+| `wrap_each` / `wrap_all` | Generator yield splits setup/teardown | Per-test / per-scope |
+
+::: tryke.hooks.before_each
+
+::: tryke.hooks.before_all
+
+::: tryke.hooks.after_each
+
+::: tryke.hooks.after_all
+
+::: tryke.hooks.wrap_each
+
+::: tryke.hooks.wrap_all
+
+---
+
+## `Depends`
+
+::: tryke.hooks.Depends

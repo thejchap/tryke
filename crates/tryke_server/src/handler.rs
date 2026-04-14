@@ -8,7 +8,7 @@ use tokio::{
     sync::{Mutex, broadcast},
 };
 use tokio_stream::StreamExt;
-use tryke_runner::{DistMode, WorkerPool, partition};
+use tryke_runner::{DistMode, WorkerPool, partition_with_hooks};
 use tryke_types::filter::TestFilter;
 use tryke_types::{RunSummary, TestOutcome};
 
@@ -134,7 +134,10 @@ async fn execute_run(
     pool: &WorkerPool,
 ) -> RunSummary {
     let discovery_start = Instant::now();
-    let all_tests = disc.lock().await.tests();
+    let guard = disc.lock().await;
+    let all_tests = guard.tests();
+    let hooks = guard.hooks();
+    drop(guard);
     let mut tests = match &rp.tests {
         Some(ids) => all_tests
             .into_iter()
@@ -167,8 +170,11 @@ async fn execute_run(
 
     let test_start = Instant::now();
     // Server uses test-level distribution by default.
-    let units = partition(tests, DistMode::Test);
-    let mut stream = pool.run(units);
+    let partition = partition_with_hooks(tests, &hooks, DistMode::Test);
+    for w in &partition.warnings {
+        log::warn!("{w}");
+    }
+    let mut stream = pool.run(partition.units);
     let mut passed = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;

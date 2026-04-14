@@ -17,7 +17,7 @@ use ruff_python_ast::{Expr, Stmt};
 use ruff_python_parser::parse_module;
 use ruff_source_file::LineIndex;
 use ruff_text_size::Ranged;
-use tryke_types::{ExpectedAssertion, TestItem};
+use tryke_types::{ExpectedAssertion, FixturePer, HookItem, ParsedFile, TestItem};
 
 pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
     start
@@ -222,6 +222,128 @@ fn is_bare_test_or_qualified(expr: &Expr, body: &[Stmt]) -> bool {
                 && matches!(&*a.value, Expr::Name(n) if n.id.as_str() == "tryke")
         }
         _ => false,
+    }
+}
+
+/// Check whether a decorator is the tryke `@fixture` decorator. Returns the
+/// fixture's `per` granularity (`Test` or `Scope`) if it is, `None` otherwise.
+///
+/// Recognises all four forms:
+/// - `@fixture`
+/// - `@fixture()`
+/// - `@fixture(per="scope")`
+/// - `@tryke.fixture` / `@tryke.fixture(per="scope")`
+fn is_tryke_fixture_decorator(expr: &Expr, body: &[Stmt]) -> Option<FixturePer> {
+    match expr {
+        // Bare name: @fixture
+        Expr::Name(n) if n.id.as_str() == "fixture" && !is_locally_defined("fixture", body) => {
+            Some(FixturePer::Test)
+        }
+        // Qualified: @tryke.fixture
+        Expr::Attribute(a)
+            if a.attr.id.as_str() == "fixture"
+                && matches!(&*a.value, Expr::Name(n) if n.id.as_str() == "tryke") =>
+        {
+            Some(FixturePer::Test)
+        }
+        // Call wrapper: @fixture(...) or @tryke.fixture(...)
+        Expr::Call(c) => {
+            let base = is_tryke_fixture_decorator(&c.func, body)?;
+            // Inspect keyword arguments for `per="scope"`.
+            for kw in &c.arguments.keywords {
+                if kw.arg.as_ref().is_some_and(|k| k.id.as_str() == "per")
+                    && let Expr::StringLiteral(s) = &kw.value
+                {
+                    return match s.value.to_str() {
+                        "test" => Some(FixturePer::Test),
+                        "scope" => Some(FixturePer::Scope),
+                        // Unknown values fall through to the default; users
+                        // see a typed error at worker registration time.
+                        _ => Some(base),
+                    };
+                }
+            }
+            Some(base)
+        }
+        _ => None,
+    }
+}
+
+/// Extract function names from `Depends(name)` calls in parameter defaults.
+///
+/// Malformed `Depends(...)` forms (attribute access, calls, no argument)
+/// push a human-readable diagnostic into `errors` rather than being
+/// silently dropped — at runtime they would cause cryptic `TypeError`s
+/// on missing kwargs, so we surface them at discovery time.
+fn extract_depends_from_params(
+    func: &ruff_python_ast::StmtFunctionDef,
+    file: &Path,
+    root: &Path,
+    line_index: &LineIndex,
+    errors: &mut Vec<String>,
+) -> Vec<String> {
+    let mut deps = Vec::new();
+    for param in func.parameters.iter_non_variadic_params() {
+        let Some(default) = &param.default else {
+            continue;
+        };
+        let Expr::Call(call) = default.as_ref() else {
+            continue;
+        };
+        let is_depends = match call.func.as_ref() {
+            Expr::Name(n) => n.id.as_str() == "Depends",
+            Expr::Attribute(a) => {
+                a.attr.id.as_str() == "Depends"
+                    && matches!(&*a.value, Expr::Name(n) if n.id.as_str() == "tryke")
+            }
+            _ => false,
+        };
+        if !is_depends {
+            continue;
+        }
+        let line = u32::try_from(line_index.line_index(call.range.start()).get()).unwrap_or(0);
+        let display_file = file.strip_prefix(root).unwrap_or(file).display();
+        let param_name = param.parameter.name.id.as_str();
+        match call.arguments.args.first() {
+            None => {
+                errors.push(format!(
+                    "{display_file}:{line}: Depends() in parameter '{param_name}' of \
+                     '{fn_name}' requires exactly one positional argument naming \
+                     the hook function, e.g. Depends(my_hook).",
+                    fn_name = func.name.id.as_str(),
+                ));
+            }
+            Some(Expr::Name(arg)) => {
+                deps.push(arg.id.as_str().to_owned());
+            }
+            Some(other) => {
+                errors.push(format!(
+                    "{display_file}:{line}: Depends({kind}) in parameter '{param_name}' of \
+                     '{fn_name}' is not supported — only bare function name references \
+                     are allowed (e.g. Depends(my_hook), not Depends(mod.hook) or \
+                     Depends(factory())).",
+                    kind = describe_expr_kind(other),
+                    fn_name = func.name.id.as_str(),
+                ));
+            }
+        }
+    }
+    deps
+}
+
+/// Short, human-readable label for an AST expression kind. Used in
+/// diagnostic messages so users can tell what shape of `Depends(...)`
+/// argument was rejected.
+fn describe_expr_kind(expr: &Expr) -> &'static str {
+    match expr {
+        Expr::Name(_) => "name",
+        Expr::Attribute(_) => "attribute",
+        Expr::Call(_) => "call",
+        Expr::Subscript(_) => "subscript",
+        Expr::Lambda(_) => "lambda",
+        Expr::StringLiteral(_) => "string",
+        Expr::NumberLiteral(_) => "number",
+        _ => "expression",
     }
 }
 
@@ -618,39 +740,64 @@ fn collect_tests_from_body(
     source: &str,
     line_index: &LineIndex,
     groups: &[String],
-    out: &mut Vec<TestItem>,
+    tests_out: &mut Vec<TestItem>,
+    hooks_out: &mut Vec<HookItem>,
+    errors_out: &mut Vec<String>,
 ) {
     for stmt in stmts {
-        if let Stmt::FunctionDef(func) = stmt
-            && let Some(dec) = func
+        if let Stmt::FunctionDef(func) = stmt {
+            // Check for test decorator
+            if let Some(dec) = func
                 .decorator_list
                 .iter()
                 .find(|d| is_tryke_test_decorator(&d.expression, top_body))
-        {
-            let display_name =
-                extract_decorator_name(&dec.expression).or_else(|| extract_docstring(&func.body));
-            let modifier = extract_test_modifier(&dec.expression);
-            let tags = extract_decorator_tags(&dec.expression);
-            let (skip, todo, xfail) = match modifier {
-                TestModifier::Skip(r) => (Some(r), None, None),
-                TestModifier::Todo(d) => (None, Some(d), None),
-                TestModifier::Xfail(r) => (None, None, Some(r)),
-                TestModifier::SkipIf | TestModifier::None => (None, None, None),
-            };
-            out.push(TestItem {
-                name: func.name.id.as_str().to_owned(),
-                module_path: path_to_module(root, file),
-                file_path: Some(file.strip_prefix(root).unwrap_or(file).to_path_buf()),
-                line_number: u32::try_from(line_index.line_index(func.range.start()).get()).ok(),
-                display_name,
-                expected_assertions: extract_expected_assertions(&func.body, source, line_index),
-                skip,
-                todo,
-                xfail,
-                tags,
-                groups: groups.to_vec(),
-                ..TestItem::default()
-            });
+            {
+                let display_name = extract_decorator_name(&dec.expression)
+                    .or_else(|| extract_docstring(&func.body));
+                let modifier = extract_test_modifier(&dec.expression);
+                let tags = extract_decorator_tags(&dec.expression);
+                let (skip, todo, xfail) = match modifier {
+                    TestModifier::Skip(r) => (Some(r), None, None),
+                    TestModifier::Todo(d) => (None, Some(d), None),
+                    TestModifier::Xfail(r) => (None, None, Some(r)),
+                    TestModifier::SkipIf | TestModifier::None => (None, None, None),
+                };
+                tests_out.push(TestItem {
+                    name: func.name.id.as_str().to_owned(),
+                    module_path: path_to_module(root, file),
+                    file_path: Some(file.strip_prefix(root).unwrap_or(file).to_path_buf()),
+                    line_number: u32::try_from(line_index.line_index(func.range.start()).get())
+                        .ok(),
+                    display_name,
+                    expected_assertions: extract_expected_assertions(
+                        &func.body, source, line_index,
+                    ),
+                    skip,
+                    todo,
+                    xfail,
+                    tags,
+                    groups: groups.to_vec(),
+                    ..TestItem::default()
+                });
+            }
+            // Check for @fixture decorator
+            else if let Some(per) = func
+                .decorator_list
+                .iter()
+                .find_map(|d| is_tryke_fixture_decorator(&d.expression, top_body))
+            {
+                let depends_on =
+                    extract_depends_from_params(func, file, root, line_index, errors_out);
+                hooks_out.push(HookItem {
+                    name: func.name.id.as_str().to_owned(),
+                    module_path: path_to_module(root, file),
+                    per,
+                    groups: groups.to_vec(),
+                    depends_on,
+                    line_number: u32::try_from(line_index.line_index(func.range.start()).get())
+                        .ok(),
+                });
+            }
         } else if let Stmt::With(with_stmt) = stmt {
             // Check if this is a `with describe("name")` block
             let describe_name = with_stmt
@@ -668,7 +815,9 @@ fn collect_tests_from_body(
                     source,
                     line_index,
                     &nested_groups,
-                    out,
+                    tests_out,
+                    hooks_out,
+                    errors_out,
                 );
             }
         }
@@ -765,27 +914,47 @@ fn collect_doctests_from_body(
     }
 }
 
-pub(crate) fn parse_tests_from_source(root: &Path, file: &Path, source: &str) -> Vec<TestItem> {
+pub(crate) fn parse_tests_from_source(root: &Path, file: &Path, source: &str) -> ParsedFile {
     trace!(
         "parsing {}",
         file.strip_prefix(root).unwrap_or(file).display()
     );
     let Ok(parsed) = parse_module(source) else {
         trace!("parse error in {}", file.display());
-        return vec![];
+        return ParsedFile::default();
     };
     let line_index = LineIndex::from_source_text(source);
     let module = parsed.syntax();
     let body = &module.body;
     let mut tests = Vec::new();
-    collect_tests_from_body(body, body, root, file, source, &line_index, &[], &mut tests);
+    let mut hooks = Vec::new();
+    let mut errors = Vec::new();
+    collect_tests_from_body(
+        body,
+        body,
+        root,
+        file,
+        source,
+        &line_index,
+        &[],
+        &mut tests,
+        &mut hooks,
+        &mut errors,
+    );
     collect_doctests_from_body(body, root, file, &line_index, "", &mut tests);
-    tests
+    for err in &errors {
+        log::error!("tryke discovery: {err}");
+    }
+    ParsedFile {
+        tests,
+        hooks,
+        errors,
+    }
 }
 
-fn parse_tests_from_file(root: &Path, file: &Path) -> Vec<TestItem> {
+fn parse_tests_from_file(root: &Path, file: &Path) -> ParsedFile {
     let Ok(source) = fs::read_to_string(file) else {
-        return vec![];
+        return ParsedFile::default();
     };
     parse_tests_from_source(root, file, &source)
 }
@@ -801,10 +970,11 @@ pub fn discover_from_with_excludes(start: &Path, excludes: &[String]) -> Vec<Tes
     let root = find_project_root(start).unwrap_or_else(|| start.to_path_buf());
     let mut files = collect_python_files(&root, excludes);
     files.sort();
-    let mut tests: Vec<TestItem> = files
+    let parsed: Vec<ParsedFile> = files
         .par_iter()
-        .flat_map_iter(|f| parse_tests_from_file(&root, f))
+        .map(|f| parse_tests_from_file(&root, f))
         .collect();
+    let mut tests: Vec<TestItem> = parsed.into_iter().flat_map(|p| p.tests).collect();
     tests.sort_by(|a, b| {
         a.file_path
             .cmp(&b.file_path)
@@ -924,7 +1094,7 @@ def not_a_test():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 2);
         let names: Vec<_> = items.iter().map(|i| i.name.as_str()).collect();
         assert!(names.contains(&"test_one"));
@@ -938,7 +1108,7 @@ def test_skipped():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 0);
     }
 
@@ -952,7 +1122,7 @@ def test_fn():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].line_number, Some(3));
     }
@@ -961,7 +1131,7 @@ def test_fn():
     fn returns_empty_for_parse_error() {
         let source = "this is not valid python @@@";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 0);
     }
 
@@ -969,7 +1139,7 @@ def test_fn():
     fn returns_empty_for_unreadable_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let nonexistent = dir.path().join("nonexistent.py");
-        let items = parse_tests_from_file(dir.path(), &nonexistent);
+        let items = parse_tests_from_file(dir.path(), &nonexistent).tests;
         assert_eq!(items.len(), 0);
     }
 
@@ -982,7 +1152,7 @@ def my_func():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 0);
     }
 
@@ -994,7 +1164,7 @@ def my_func():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 0);
     }
 
@@ -1006,7 +1176,7 @@ def my_func():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "my_func");
     }
@@ -1021,7 +1191,7 @@ def my_func():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "my_func");
     }
@@ -1033,7 +1203,7 @@ def test_fn():
     expect(add(1, 1)).to_equal(2)
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 1);
         let assertions = &items[0].expected_assertions;
         assert_eq!(assertions.len(), 1);
@@ -1050,7 +1220,7 @@ def test_fn():
     expect(x).not_.to_be_none()
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items[0].expected_assertions.len(), 1);
         let a = &items[0].expected_assertions[0];
         assert_eq!(a.subject, "x");
@@ -1067,7 +1237,7 @@ def test_fn():
     expect(b).to_equal(2)
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items[0].expected_assertions.len(), 2);
     }
 
@@ -1079,7 +1249,7 @@ def test_fn():
     assert result == 2
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items[0].expected_assertions.len(), 0);
     }
 
@@ -1091,7 +1261,7 @@ def test_fn():
     expect(x).to_equal(1)
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items[0].expected_assertions.len(), 1);
         assert_eq!(items[0].expected_assertions[0].line, 4);
     }
@@ -1103,7 +1273,7 @@ def test_fn():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "test_fn");
     }
@@ -1115,7 +1285,7 @@ def test_fn():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].display_name.as_deref(), Some("addition works"));
     }
@@ -1127,7 +1297,7 @@ def test_fn():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].display_name.as_deref(), Some("my label"));
     }
@@ -1139,7 +1309,7 @@ def test_fn():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items[0].display_name.as_deref(), Some("kwarg"));
     }
 
@@ -1151,7 +1321,7 @@ def test_fn():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items[0].display_name.as_deref(), Some("docstring name"));
     }
 
@@ -1163,7 +1333,7 @@ def test_fn():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items[0].display_name.as_deref(), Some("explicit"));
     }
 
@@ -1174,7 +1344,7 @@ def test_fn():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items[0].display_name, None);
     }
 
@@ -1185,7 +1355,7 @@ def test_fn():
     expect(x, name=\"my label\").to_equal(1)
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         let a = &items[0].expected_assertions[0];
         assert_eq!(a.label.as_deref(), Some("my label"));
         assert_eq!(a.subject, "x");
@@ -1198,7 +1368,7 @@ def test_fn():
     expect(x, \"my label\").to_equal(1)
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         let a = &items[0].expected_assertions[0];
         assert_eq!(a.label.as_deref(), Some("my label"));
         assert_eq!(a.subject, "x");
@@ -1211,7 +1381,7 @@ def test_fn():
     expect(x, \"pos\", name=\"kw\").to_equal(1)
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items[0].expected_assertions[0].label.as_deref(), Some("kw"));
     }
 
@@ -1222,7 +1392,7 @@ def test_fn():
     expect(x).to_equal(1)
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items[0].expected_assertions[0].label, None);
     }
 
@@ -1248,7 +1418,7 @@ def my_func():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].display_name.as_deref(), Some("foo"));
     }
@@ -1385,7 +1555,7 @@ def test_fn():
     expect(x).to_equal(1).fatal()
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items[0].expected_assertions.len(), 1);
         let a = &items[0].expected_assertions[0];
         assert_eq!(a.subject, "x");
@@ -1401,7 +1571,7 @@ def test_fn():
     expect(x).not_.to_be_none().fatal()
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items[0].expected_assertions.len(), 1);
         let a = &items[0].expected_assertions[0];
         assert_eq!(a.subject, "x");
@@ -1415,7 +1585,7 @@ def test_fn():
     fn recognizes_test_skip_bare() {
         let source = "@test.skip\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].skip.as_deref(), Some(""));
     }
@@ -1424,7 +1594,7 @@ def test_fn():
     fn recognizes_test_skip_with_reason() {
         let source = "@test.skip(\"broken\")\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].skip.as_deref(), Some("broken"));
     }
@@ -1433,7 +1603,7 @@ def test_fn():
     fn recognizes_test_skip_reason_kwarg() {
         let source = "@test.skip(reason=\"broken\")\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items[0].skip.as_deref(), Some("broken"));
     }
 
@@ -1441,7 +1611,7 @@ def test_fn():
     fn recognizes_test_todo_bare() {
         let source = "@test.todo\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].todo.as_deref(), Some(""));
     }
@@ -1450,7 +1620,7 @@ def test_fn():
     fn recognizes_test_todo_with_description() {
         let source = "@test.todo(\"need caching\")\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items[0].todo.as_deref(), Some("need caching"));
     }
 
@@ -1458,7 +1628,7 @@ def test_fn():
     fn recognizes_test_xfail_bare() {
         let source = "@test.xfail\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].xfail.as_deref(), Some(""));
     }
@@ -1467,7 +1637,7 @@ def test_fn():
     fn recognizes_test_xfail_with_reason() {
         let source = "@test.xfail(\"upstream bug\")\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items[0].xfail.as_deref(), Some("upstream bug"));
     }
 
@@ -1475,7 +1645,7 @@ def test_fn():
     fn recognizes_qualified_test_skip() {
         let source = "import tryke\n@tryke.test.skip(\"broken\")\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].skip.as_deref(), Some("broken"));
     }
@@ -1484,7 +1654,7 @@ def test_fn():
     fn recognizes_test_skip_if() {
         let source = "@test.skip_if(True, reason=\"always\")\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 1);
         // skip_if cannot be resolved statically
         assert!(items[0].skip.is_none());
@@ -1494,7 +1664,7 @@ def test_fn():
     fn extracts_tags_from_test_decorator() {
         let source = "@test(tags=[\"slow\", \"network\"])\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].tags, vec!["slow", "network"]);
     }
@@ -1503,7 +1673,7 @@ def test_fn():
     fn extracts_tags_from_skip_decorator() {
         let source = "@test.skip(\"broken\", tags=[\"admin\"])\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].tags, vec!["admin"]);
         assert_eq!(items[0].skip.as_deref(), Some("broken"));
@@ -1513,7 +1683,7 @@ def test_fn():
     fn no_tags_by_default() {
         let source = "@test\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert!(items[0].tags.is_empty());
     }
 
@@ -1521,7 +1691,7 @@ def test_fn():
     fn plain_test_has_no_modifiers() {
         let source = "@test\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert!(items[0].skip.is_none());
         assert!(items[0].todo.is_none());
         assert!(items[0].xfail.is_none());
@@ -1538,7 +1708,7 @@ with describe(\"Math\"):
         expect(1 + 1).to_equal(2)
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "test_add");
         assert_eq!(items[0].groups, vec!["Math"]);
@@ -1558,7 +1728,7 @@ with describe(\"Math\"):
             pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].name, "test_add");
         assert_eq!(items[0].groups, vec!["Math", "addition"]);
@@ -1570,7 +1740,7 @@ with describe(\"Math\"):
     fn top_level_tests_have_empty_groups() {
         let source = "@test\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert!(items[0].groups.is_empty());
     }
 
@@ -1587,7 +1757,7 @@ def test_standalone():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].groups, vec!["Group"]);
         assert!(items[1].groups.is_empty());
@@ -1602,7 +1772,7 @@ with tryke.describe(\"Suite\"):
         pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].groups, vec!["Suite"]);
     }
@@ -1616,7 +1786,7 @@ with describe(\"Group\"):
         expect(1).to_equal(2)
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].groups, vec!["Group"]);
         assert_eq!(items[0].skip.as_deref(), Some("broken"));
@@ -1706,7 +1876,7 @@ def add(a, b):
     return a + b
 "#;
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "add");
         assert_eq!(items[0].doctest_object, Some("add".to_string()));
@@ -1738,7 +1908,7 @@ class Calc:
         self.value += n
 "#;
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].doctest_object, Some("Calc".to_string()));
         assert_eq!(items[1].doctest_object, Some("Calc.add".to_string()));
@@ -1757,7 +1927,7 @@ def helper():
     pass
 "#;
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "__module__");
         assert_eq!(items[0].doctest_object, Some(String::new()));
@@ -1771,7 +1941,7 @@ def foo():
     pass
 "#;
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert!(items.is_empty());
     }
 
@@ -1793,7 +1963,7 @@ def test_add():
     expect(add(1, 2)).to_equal(3)
 "#;
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 2);
         // Decorated test comes first (collect_tests_from_body runs first)
         assert_eq!(items[0].name, "test_add");
@@ -1801,5 +1971,211 @@ def test_add():
         // Doctest comes second
         assert_eq!(items[1].name, "add");
         assert_eq!(items[1].doctest_object, Some("add".to_string()));
+    }
+
+    // ---- Fixture discovery tests ----
+
+    #[test]
+    fn discovers_bare_fixture_at_module_level() {
+        let source = "@fixture\ndef setup():\n    pass\n\n@test\ndef test_fn():\n    pass\n";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert_eq!(parsed.hooks.len(), 1);
+        assert_eq!(parsed.hooks[0].name, "setup");
+        assert_eq!(parsed.hooks[0].per, FixturePer::Test);
+        assert!(parsed.hooks[0].groups.is_empty());
+    }
+
+    #[test]
+    fn discovers_scope_fixture_via_kwarg() {
+        let source = "@fixture(per=\"scope\")\ndef db(): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert_eq!(parsed.hooks.len(), 1);
+        assert_eq!(parsed.hooks[0].per, FixturePer::Scope);
+    }
+
+    #[test]
+    fn discovers_test_fixture_via_explicit_kwarg() {
+        let source = "@fixture(per=\"test\")\ndef setup(): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert_eq!(parsed.hooks[0].per, FixturePer::Test);
+    }
+
+    #[test]
+    fn discovers_call_form_fixture_without_kwargs() {
+        let source = "@fixture()\ndef setup(): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert_eq!(parsed.hooks.len(), 1);
+        assert_eq!(parsed.hooks[0].per, FixturePer::Test);
+    }
+
+    #[test]
+    fn discovers_fixture_inside_describe_block() {
+        let source = "with describe(\"users\"):\n    @fixture\n    def seed(): pass\n    @test\n    def test_fn(): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert_eq!(parsed.hooks.len(), 1);
+        assert_eq!(parsed.hooks[0].name, "seed");
+        assert_eq!(parsed.hooks[0].groups, vec!["users"]);
+    }
+
+    #[test]
+    fn discovers_qualified_tryke_fixture() {
+        let source = "import tryke\n@tryke.fixture(per=\"scope\")\ndef db(): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert_eq!(parsed.hooks.len(), 1);
+        assert_eq!(parsed.hooks[0].per, FixturePer::Scope);
+    }
+
+    #[test]
+    fn extracts_depends_from_fixture_params() {
+        let source = "\
+@fixture(per=\"scope\")\ndef db(): pass\n\
+@fixture\ndef table(conn=Depends(db)): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert_eq!(parsed.hooks.len(), 2);
+        let table_hook = parsed
+            .hooks
+            .iter()
+            .find(|h| h.name == "table")
+            .expect("fixture 'table' must exist in parsed output");
+        assert_eq!(table_hook.depends_on, vec!["db"]);
+        assert!(
+            parsed.errors.is_empty(),
+            "no errors expected: {:?}",
+            parsed.errors
+        );
+    }
+
+    #[test]
+    fn extracts_multiple_depends() {
+        let source = "\
+@fixture(per=\"scope\")\ndef db(): pass\n\
+@fixture(per=\"scope\")\ndef cache(): pass\n\
+@fixture\ndef svc(d=Depends(db), c=Depends(cache)): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let svc = parsed
+            .hooks
+            .iter()
+            .find(|h| h.name == "svc")
+            .expect("fixture 'svc' must exist in parsed output");
+        assert_eq!(svc.depends_on, vec!["db", "cache"]);
+        assert!(
+            parsed.errors.is_empty(),
+            "no errors expected: {:?}",
+            parsed.errors
+        );
+    }
+
+    #[test]
+    fn fixture_without_depends_has_empty_depends_on() {
+        let source = "@fixture\ndef setup(): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert!(parsed.hooks[0].depends_on.is_empty());
+        assert!(parsed.errors.is_empty());
+    }
+
+    #[test]
+    fn depends_with_attribute_arg_is_a_discovery_error() {
+        let source = "\
+@fixture\ndef svc(x=Depends(mod.fn)): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert_eq!(parsed.hooks.len(), 1);
+        assert!(parsed.hooks[0].depends_on.is_empty());
+        assert_eq!(
+            parsed.errors.len(),
+            1,
+            "expected one error, got {:?}",
+            parsed.errors
+        );
+        let err = &parsed.errors[0];
+        assert!(err.contains("Depends(attribute)"), "error: {err}");
+        assert!(err.contains("svc"), "error should name the fixture: {err}");
+        assert!(
+            err.contains(":2:"),
+            "error should include line 2 (the def): {err}"
+        );
+    }
+
+    #[test]
+    fn depends_with_no_args_is_a_discovery_error() {
+        let source = "\
+@fixture\ndef svc(x=Depends()): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert_eq!(parsed.hooks.len(), 1);
+        assert!(parsed.hooks[0].depends_on.is_empty());
+        assert_eq!(parsed.errors.len(), 1);
+        let err = &parsed.errors[0];
+        assert!(
+            err.contains("requires exactly one positional argument"),
+            "error: {err}"
+        );
+    }
+
+    #[test]
+    fn depends_with_call_arg_is_a_discovery_error() {
+        let source = "\
+@fixture\ndef svc(x=Depends(factory())): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert_eq!(parsed.hooks.len(), 1);
+        assert!(parsed.hooks[0].depends_on.is_empty());
+        assert_eq!(parsed.errors.len(), 1);
+        assert!(parsed.errors[0].contains("Depends(call)"));
+    }
+
+    #[test]
+    fn valid_and_invalid_depends_are_reported_independently() {
+        let source = "\
+@fixture(per=\"scope\")\ndef db(): pass\n\
+@fixture\ndef svc(a=Depends(db), b=Depends(unsupported.thing)): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let svc = parsed
+            .hooks
+            .iter()
+            .find(|h| h.name == "svc")
+            .expect("svc fixture");
+        assert_eq!(svc.depends_on, vec!["db"]);
+        assert_eq!(parsed.errors.len(), 1);
+        assert!(parsed.errors[0].contains("Depends(attribute)"));
+    }
+
+    #[test]
+    fn fixtures_and_tests_coexist() {
+        let source = "\
+@fixture\ndef setup(): pass\n\
+@test\ndef test_fn(): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert_eq!(parsed.tests.len(), 1);
+        assert_eq!(parsed.hooks.len(), 1);
+    }
+
+    #[test]
+    fn locally_defined_fixture_is_not_a_fixture() {
+        let source = "\
+def fixture(fn):\n    return fn\n\
+@fixture\ndef setup(): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert!(parsed.hooks.is_empty());
+    }
+
+    #[test]
+    fn fixture_has_line_number() {
+        let source = "\n\n@fixture\ndef setup(): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert_eq!(parsed.hooks[0].line_number, Some(3));
     }
 }

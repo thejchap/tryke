@@ -61,8 +61,63 @@ This means the output is deterministic regardless of scheduling — the same tes
 2. When all tests from a file are complete, the buffer is flushed in discovery order
 3. If `--maxfail` or `-x` stops execution early, remaining buffered results are flushed before exiting
 
+## Fixtures and scheduling
+
+Fixtures interact with the distribution mode. The key constraint:
+`@fixture(per="scope")` caches its return value in the worker's Python
+process. All tests that share a cached value must run on the same worker.
+
+When tryke detects `per="scope"` fixtures during discovery, it
+automatically upgrades the distribution mode:
+
+| Fixtures present | Requested mode | Effective mode | Why |
+|------------------|----------------|----------------|-----|
+| None or `per="test"` only | `test` | `test` | No shared state — full parallelism |
+| `per="scope"` at file scope | `test` | `file` | Cached value must stay in one process |
+| `per="scope"` in describe | `test` | `group` | Only that group's tests need the value |
+| `per="scope"` at file scope | `group` | `file` | File-scope `per="scope"` requires the whole file on one worker |
+| `per="scope"` only inside `describe` | `group` | `group` | Groups are already kept together |
+| Any | `file` | unchanged | Already grouped at file granularity — no upgrade needed |
+
+`per="test"` fixtures do not constrain scheduling. Their values are
+created fresh per test and discarded afterward, so tests can run on any
+worker.
+
+### Practical impact
+
+A file with only `per="test"` fixtures keeps full `--dist test` parallelism — every test can run on a different worker. Adding a single `per="scope"` fixture at module scope forces all tests in that file onto one worker. If this is a bottleneck, consider scoping the fixture inside a `describe` block so only that group is constrained.
+
 ## Isolation
 
 Each worker process has its own Python interpreter and module cache. Tests in different workers cannot interfere with each other through global state, module-level side effects, or shared mutable imports.
 
 If your tests modify global state that other tests depend on, consider whether those dependencies should be made explicit or restructured.
+
+### Same-worker sharing of `per="scope"` values
+
+Cross-worker isolation does not extend to tests *within the same worker*. When `@fixture(per="scope")` caches a value, every test in that scope running on that worker receives **the same object by reference**. Mutating it is observable by subsequent tests in the scope, exactly as if it were a module-level global.
+
+```python
+@fixture(per="scope")
+def config() -> dict[str, str]:
+    return {"env": "test"}
+
+@test
+def first(cfg: dict[str, str] = Depends(config)) -> None:
+    cfg["env"] = "mutated"  # Leaks to later tests in this scope.
+
+@test
+def second(cfg: dict[str, str] = Depends(config)) -> None:
+    # Sees {"env": "mutated"} if first() ran on the same worker.
+    ...
+```
+
+This is intentional — it's the whole point of scope-level fixtures (set up an expensive resource once, share it). But it means `per="scope"` values should either be treated as read-only or represent resources whose mutation is part of their contract (database connections, temp directories).
+
+Recommended patterns:
+
+- Return immutable values: frozen dataclasses, tuples, `types.MappingProxyType` for dicts.
+- If you need per-test mutability, switch to the default `per="test"` so each test gets a fresh value, at the cost of losing the caching benefit.
+- For resources like database connections, use `yield` with explicit teardown so the resource's lifecycle is tied to the scope.
+
+`per="test"` fixture values are created fresh per test and are not affected by this.

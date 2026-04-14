@@ -15,7 +15,16 @@ import unittest
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict
 
-from tryke.expect import ExpectationError, SoftContext, SoftFailure
+from tryke.expect import (
+    ExpectationError,
+    SoftContext,
+    SoftFailure,
+    _set_soft_context,
+    _SkipMarked,
+    _TodoMarked,
+    _XfailMarked,
+)
+from tryke.hooks import HookExecutor, _fixture_per
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -209,7 +218,8 @@ def _make_assertion_wire(
         "received": received,
     }
     if frame is not None:
-        wire["line"] = frame.lineno
+        if frame.lineno is not None:
+            wire["line"] = frame.lineno
         wire["file"] = frame.filename
     return wire
 
@@ -275,9 +285,10 @@ class Worker:
         self._input = input_stream
         self._output = output_stream
         self._modules: dict[str, ModuleType] = {}
-        # Use sys.modules — `tryke.expect` the attribute is shadowed
-        # by the `expect` function re-exported in tryke/__init__.py.
-        self._expect_mod = sys.modules["tryke.expect"]
+        # Hook metadata registered per module by the runner (from JSON-RPC).
+        self._hook_metadata: dict[str, list[object]] = {}
+        # Hook executors cached per module.
+        self._executors: dict[str, HookExecutor] = {}
 
     def run(self) -> None:
         for raw in self._input:
@@ -365,12 +376,26 @@ class Worker:
     ) -> _DispatchResult:
         if method == "ping":
             return "pong"
+        if method == "register_hooks":
+            return self._register_hooks(
+                self._require_str(params, "module", method),
+                params.get("hooks", []),
+            )
+        if method == "finalize_hooks":
+            return self._finalize_hooks(
+                self._require_str(params, "module", method),
+            )
         if method == "run_test":
             xfail_raw = params.get("xfail")
+            raw_groups = params.get("groups", [])
+            groups = (
+                [str(g) for g in raw_groups] if isinstance(raw_groups, list) else []
+            )
             return self._run_test(
                 self._require_str(params, "module", method),
                 self._require_str(params, "function", method),
                 xfail=(str(xfail_raw) if xfail_raw is not None else None),
+                groups=groups,
             )
         if method == "run_doctest":
             return self._run_doctest(
@@ -382,7 +407,7 @@ class Worker:
             if not isinstance(raw, list):
                 msg = "method 'reload' parameter 'modules' must be a list"
                 raise _InvalidParamsError(msg)
-            return self._reload(raw)
+            return self._reload([str(m) for m in raw])
         msg = f"unknown method: {method}"
         raise ValueError(msg)
 
@@ -408,16 +433,64 @@ class Worker:
             return mod
         return self._modules[module_name]
 
+    def _register_hooks(
+        self,
+        module_name: str,
+        hooks: object,
+    ) -> None:
+        """Store hook metadata for a module, sent by the runner before tests."""
+        if not isinstance(hooks, list):
+            return
+        self._hook_metadata[module_name] = list(hooks)
+        # Invalidate any cached executor for this module.
+        self._executors.pop(module_name, None)
+
+    def _finalize_hooks(self, module_name: str) -> None:
+        """Run scope-level teardown (after_all, wrap_all) for a module."""
+        executor = self._executors.get(module_name)
+        if executor is not None:
+            executor.finalize()
+
+    def _get_executor(self, module_name: str) -> HookExecutor | None:
+        """Build (or return cached) HookExecutor for a module."""
+        if module_name in self._executors:
+            return self._executors[module_name]
+
+        hook_meta = self._hook_metadata.get(module_name)
+        if not hook_meta:
+            return None
+
+        mod = self._get_module(module_name)
+        executor = HookExecutor()
+        for entry in hook_meta:
+            if not isinstance(entry, dict):
+                continue
+            # JSON-RPC delivers dict[str, object]; rebuild with typed comprehension.
+            h: dict[str, object] = {str(k): v for k, v in entry.items()}
+            name = str(h.get("name", ""))
+            raw_groups = h.get("groups", [])
+            groups = (
+                [str(g) for g in raw_groups] if isinstance(raw_groups, list) else []
+            )
+            raw_ln = h.get("line_number", 0)
+            line_number = raw_ln if isinstance(raw_ln, int) else 0
+            fn = getattr(mod, name, None)
+            if fn is not None and _fixture_per(fn) is not None:
+                executor.register_fixture(fn, groups=groups, line_number=line_number)
+
+        self._executors[module_name] = executor
+        return executor
+
     @contextlib.contextmanager
     def _soft_assertion_context(
         self,
     ) -> Generator[SoftContext, None, None]:
         ctx = SoftContext()
-        self._expect_mod._soft_context = ctx  # noqa: SLF001
+        _set_soft_context(ctx)
         try:
             yield ctx
         finally:
-            self._expect_mod._soft_context = None  # noqa: SLF001
+            _set_soft_context(None)
 
     def _run_test(  # noqa: C901, PLR0911, PLR0912
         self,
@@ -425,6 +498,7 @@ class Worker:
         function_name: str,
         *,
         xfail: str | None = None,
+        groups: list[str] | None = None,
     ) -> _TestResult:
         try:
             mod = self._get_module(module_name)
@@ -440,15 +514,17 @@ class Worker:
             )
 
         # Runtime skip/todo (handles skip_if resolved at import time)
-        if hasattr(fn, "__tryke_skip__"):
+        if isinstance(fn, _SkipMarked):
             return _skipped(0, fn.__tryke_skip__, "", "")
 
-        if hasattr(fn, "__tryke_todo__"):
+        if isinstance(fn, _TodoMarked):
             return _todo(0, fn.__tryke_todo__, "", "")
 
-        is_xfail = xfail is not None or hasattr(fn, "__tryke_xfail__")
+        is_xfail = xfail is not None or isinstance(fn, _XfailMarked)
         xfail_reason = (
-            xfail if xfail is not None else getattr(fn, "__tryke_xfail__", None)
+            xfail
+            if xfail is not None
+            else (fn.__tryke_xfail__ if isinstance(fn, _XfailMarked) else None)
         )
 
         stdout_buf = io.StringIO()
@@ -461,7 +537,10 @@ class Worker:
                     contextlib.redirect_stdout(stdout_buf),
                     contextlib.redirect_stderr(stderr_buf),
                 ):
-                    if inspect.iscoroutinefunction(fn):
+                    executor = self._get_executor(module_name)
+                    if executor is not None:
+                        executor.run_test(fn, groups=groups or [])
+                    elif inspect.iscoroutinefunction(fn):
                         asyncio.run(fn())
                     else:
                         fn()
@@ -638,6 +717,8 @@ class Worker:
             if name in sys.modules:
                 reloaded = importlib.reload(sys.modules[name])
                 self._modules[name] = reloaded
+            # Clear cached executor so hooks are re-discovered on next run.
+            self._executors.pop(name, None)
 
 
 def main() -> None:

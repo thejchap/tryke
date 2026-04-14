@@ -123,6 +123,7 @@ fn main() -> Result<()> {
                     &mut *rep,
                     root_path,
                     tests,
+                    &discovered.hooks,
                     resolved_maxfail,
                     *workers,
                     (*dist).into(),

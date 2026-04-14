@@ -3,8 +3,10 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use tokio_stream::StreamExt;
 use tryke_reporter::Reporter;
-use tryke_runner::{DistMode, WorkerPool, check_python_version, partition, resolve_python};
-use tryke_types::{ChangedSelectionSummary, RunSummary, TestOutcome};
+use tryke_runner::{
+    DistMode, WorkerPool, check_python_version, partition_with_hooks, resolve_python,
+};
+use tryke_types::{ChangedSelectionSummary, HookItem, RunSummary, TestOutcome};
 
 pub fn worker_pool_size() -> usize {
     std::thread::available_parallelism().map_or(4, std::num::NonZero::get)
@@ -15,6 +17,7 @@ pub async fn run_tests(
     reporter: &mut dyn Reporter,
     root: &std::path::Path,
     tests: Vec<tryke_types::TestItem>,
+    hooks: &[HookItem],
     maxfail: Option<usize>,
     workers: Option<usize>,
     dist: DistMode,
@@ -29,6 +32,7 @@ pub async fn run_tests(
     report_cycle(
         reporter,
         tests,
+        hooks,
         &pool,
         maxfail,
         dist,
@@ -56,9 +60,11 @@ fn flush_buffer(
     }
 }
 
+#[expect(clippy::too_many_arguments)]
 pub async fn report_cycle(
     reporter: &mut dyn Reporter,
     tests: Vec<tryke_types::TestItem>,
+    hooks: &[HookItem],
     pool: &WorkerPool,
     maxfail: Option<usize>,
     dist: DistMode,
@@ -132,8 +138,11 @@ pub async fn report_cycle(
     }
 
     let mut hit_maxfail = false;
-    let units = partition(run_tests, dist);
-    let mut stream = pool.run(units);
+    let partition = partition_with_hooks(run_tests, hooks, dist);
+    for w in &partition.warnings {
+        eprintln!("warning: {w}");
+    }
+    let mut stream = pool.run(partition.units);
     while let Some(result) = stream.next().await {
         match &result.outcome {
             TestOutcome::Passed => passed += 1,
@@ -234,6 +243,7 @@ mod tests {
         report_cycle(
             reporter,
             discoverer.rediscover(),
+            &[],
             pool,
             None,
             DistMode::Test,
@@ -254,6 +264,7 @@ mod tests {
             &mut reporter,
             &root,
             tests,
+            &[],
             None,
             None,
             DistMode::Test,
@@ -273,6 +284,7 @@ mod tests {
             &mut reporter,
             &root,
             tests,
+            &[],
             None,
             None,
             DistMode::Test,
@@ -292,6 +304,7 @@ mod tests {
             &mut reporter,
             &root,
             tests,
+            &[],
             None,
             None,
             DistMode::Test,
@@ -311,6 +324,7 @@ mod tests {
             &mut reporter,
             &root,
             tests,
+            &[],
             None,
             None,
             DistMode::Test,
@@ -374,6 +388,7 @@ mod tests {
                 &mut reporter,
                 dir.path(),
                 tests,
+                &[],
                 None,
                 None,
                 DistMode::Test,
@@ -425,7 +440,7 @@ def test_failing():
             &[dir.path().to_path_buf(), python_dir],
         );
         pool.warm().await;
-        let units = partition(tests, DistMode::Test);
+        let units = partition_with_hooks(tests, &[], DistMode::Test).units;
         let mut results: Vec<_> = pool.run(units).collect().await;
         results.sort_by(|a, b| a.test.name.cmp(&b.test.name));
 
@@ -475,6 +490,7 @@ def test_failing():
         let result = report_cycle(
             &mut reporter,
             tests,
+            &[],
             &pool,
             None,
             DistMode::Test,
@@ -512,6 +528,7 @@ def test_failing():
         let result = report_cycle(
             &mut reporter,
             tests,
+            &[],
             &pool,
             None,
             DistMode::Test,

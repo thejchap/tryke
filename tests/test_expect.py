@@ -180,7 +180,10 @@ with describe("soft assertions"):
             expect(3).to_equal(97).fatal()
         except ExpectationError as exc:
             _set_soft_context(None)
-            expect(len(ctx.failures)).to_equal(3)
+            # .fatal() removes its own entry from ctx.failures before raising
+            # so the test runner doesn't double-report it. The two prior soft
+            # failures stay.
+            expect(len(ctx.failures)).to_equal(2)
             expect(exc.expected).to_equal("97")
         else:
             _set_soft_context(None)

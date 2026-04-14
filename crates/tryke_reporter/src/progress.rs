@@ -101,6 +101,10 @@ impl<R: Reporter> Reporter for ProgressReporter<R> {
     fn on_discovery_error(&mut self, error: &DiscoveryError) {
         self.inner.on_discovery_error(error);
     }
+
+    fn set_subcommand_label(&mut self, label: &'static str) {
+        self.inner.set_subcommand_label(label);
+    }
 }
 
 #[cfg(test)]

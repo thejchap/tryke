@@ -63,15 +63,22 @@ impl PathSpec {
             Self::File(spec_path) => test
                 .file_path
                 .as_ref()
-                .is_some_and(|fp| path_suffix_match(fp, spec_path)),
+                .is_some_and(|fp| path_spec_matches(fp, spec_path)),
             Self::FileLine(spec_path, line) => {
                 test.file_path
                     .as_ref()
-                    .is_some_and(|fp| path_suffix_match(fp, spec_path))
+                    .is_some_and(|fp| path_spec_matches(fp, spec_path))
                     && test.line_number == Some(*line)
             }
         }
     }
+}
+
+/// A path spec matches a test file if the spec is a trailing suffix of the
+/// test path (so `math.py` matches `tests/math.py`) or an ancestor directory
+/// of the test path (so `tests` matches `tests/math.py`).
+fn path_spec_matches(haystack: &Path, needle: &Path) -> bool {
+    path_suffix_match(haystack, needle) || path_prefix_match(haystack, needle)
 }
 
 /// Returns true if `haystack` ends with the components of `needle`.
@@ -79,6 +86,17 @@ fn path_suffix_match(haystack: &Path, needle: &Path) -> bool {
     let h: Vec<_> = haystack.components().rev().collect();
     let n: Vec<_> = needle.components().rev().collect();
     if n.len() > h.len() {
+        return false;
+    }
+    n.iter().zip(h.iter()).all(|(a, b)| a == b)
+}
+
+/// Returns true if `haystack` starts with the components of `needle`, so
+/// a directory spec matches every test file underneath it.
+fn path_prefix_match(haystack: &Path, needle: &Path) -> bool {
+    let h: Vec<_> = haystack.components().collect();
+    let n: Vec<_> = needle.components().collect();
+    if n.is_empty() || n.len() > h.len() {
         return false;
     }
     n.iter().zip(h.iter()).all(|(a, b)| a == b)
@@ -530,6 +548,27 @@ mod tests {
     fn pathspec_file_no_match() {
         let spec = PathSpec::File(PathBuf::from("utils.py"));
         let test = make_test("test_add", "tests/math.py", 10);
+        assert!(!spec.matches(&test));
+    }
+
+    #[test]
+    fn pathspec_directory_matches_contained_tests() {
+        let spec = PathSpec::File(PathBuf::from("tests"));
+        let test = make_test("test_add", "tests/math.py", 10);
+        assert!(spec.matches(&test));
+    }
+
+    #[test]
+    fn pathspec_nested_directory_matches_contained_tests() {
+        let spec = PathSpec::File(PathBuf::from("tests/unit"));
+        let test = make_test("test_add", "tests/unit/math.py", 10);
+        assert!(spec.matches(&test));
+    }
+
+    #[test]
+    fn pathspec_directory_does_not_match_sibling() {
+        let spec = PathSpec::File(PathBuf::from("tests"));
+        let test = make_test("test_add", "src/math.py", 10);
         assert!(!spec.matches(&test));
     }
 

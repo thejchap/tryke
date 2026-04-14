@@ -23,7 +23,7 @@ def addition():
     expect(1 + 1).to_equal(2)
 ```
 
-The `@test` decorator replaces the `test_` prefix convention (though tryke also discovers `test_`-prefixed functions). Assertions use `expect()` instead of bare `assert`.
+The `@test` decorator replaces the `test_` prefix convention. Assertions use `expect()` instead of bare `assert`.
 
 ### Assertions
 

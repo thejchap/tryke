@@ -84,7 +84,15 @@ impl<W: io::Write> Reporter for JUnitReporter<W> {
                     .as_deref()
                     .unwrap_or(&result.test.name),
             );
-            let classname = xml_escape(&result.test.module_path);
+            let classname = if result.test.groups.is_empty() {
+                xml_escape(&result.test.module_path)
+            } else {
+                xml_escape(&format!(
+                    "{}.{}",
+                    result.test.module_path,
+                    result.test.groups.join(".")
+                ))
+            };
             let time = result.duration.as_secs_f64();
 
             match &result.outcome {

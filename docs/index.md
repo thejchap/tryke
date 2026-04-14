@@ -33,7 +33,7 @@ def add(a: int, b: int) -> int:
 with describe("add"):
 
     @test("1 + 1")
-    def test_basic():
+    def basic():
         expect(1 + 1).to_equal(2)
 ```
 

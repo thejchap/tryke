@@ -18,6 +18,7 @@ nav = [
     "guides/doctests.md",
     "guides/watch-mode.md",
     "guides/changed-mode.md",
+    "guides/graph.md",
     "guides/reporters.md",
     "guides/configuration.md",
     "guides/editor-integration.md",

@@ -10,6 +10,9 @@ pub trait Reporter {
     /// Implementations should surface this to the user so they understand why
     /// those files are always included in `--changed` runs.
     fn on_discovery_warning(&mut self, _warning: &DiscoveryWarning) {}
+    /// Lets the CLI tell the reporter which subcommand invoked it, so run
+    /// headers can read "tryke watch" instead of the generic "tryke test".
+    fn set_subcommand_label(&mut self, _label: &'static str) {}
 }
 
 #[cfg(test)]

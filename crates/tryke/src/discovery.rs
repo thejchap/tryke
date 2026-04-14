@@ -80,11 +80,11 @@ pub fn discover_tests(
                 }
             }
             Some(_) => {
-                warn!("--changed: no changed files found via git, running all tests");
+                debug!("--changed: no changed files found via git, selecting nothing");
                 DiscoverySelection {
-                    tests: discoverer.tests(),
+                    tests: Vec::new(),
                     hooks,
-                    changed_files: None,
+                    changed_files: Some(0),
                     changed_prefix_len: None,
                     warnings,
                 }

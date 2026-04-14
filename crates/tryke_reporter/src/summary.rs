@@ -22,6 +22,7 @@ fn format_duration(d: Duration) -> String {
 //
 //  PASS
 
+#[expect(clippy::too_many_lines)]
 pub fn write_summary<W: io::Write>(writer: &mut W, summary: &RunSummary) {
     let total = summary.passed
         + summary.failed
@@ -75,11 +76,22 @@ pub fn write_summary<W: io::Write>(writer: &mut W, summary: &RunSummary) {
 
     // "Test Files" = 10 chars, right-aligned with other labels
     if summary.file_count > 0 {
+        let files_label = if has_failures {
+            format!("{} ran", summary.file_count)
+                .red()
+                .bold()
+                .to_string()
+        } else {
+            format!("{} passed", summary.file_count)
+                .green()
+                .bold()
+                .to_string()
+        };
         let _ = writeln!(
             writer,
             " {}  {} {}",
             "Test Files".dimmed(),
-            format!("{} passed", summary.file_count).green().bold(),
+            files_label,
             format!("({})", summary.file_count).dimmed()
         );
     }

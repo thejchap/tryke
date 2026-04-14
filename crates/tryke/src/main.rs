@@ -146,6 +146,7 @@ fn main() -> Result<()> {
         } => {
             let resolved_maxfail = if *fail_fast { Some(1) } else { *maxfail };
             let mut rep = build_reporter(reporter, verbosity);
+            rep.set_subcommand_label("tryke watch");
             let cwd = env::current_dir()?;
             let root_path = root.as_deref().unwrap_or(&cwd);
             let excludes = resolved_excludes(root_path, exclude, include);

@@ -12,15 +12,6 @@ def addition():
     expect(1 + 1).to_equal(2)
 ```
 
-tryke also discovers functions with the `test_` prefix, so existing pytest-style tests work without changes:
-
-```python
-from tryke import expect
-
-def test_addition():
-    expect(1 + 1).to_equal(2)
-```
-
 ## Custom test names
 
 Pass `name=` to give a test a human-readable label:
@@ -39,6 +30,17 @@ for x, expected in [(1, 2), (2, 3), (3, 4)]:
     def _(x=x, expected=expected):
         expect(x + 1).to_equal(expected)
 ```
+
+If you don't pass `name=`, tryke uses the first line of the function's docstring as the display name, falling back to the function name if there is no docstring:
+
+```python
+@test
+def addition():
+    """1 + 1 should equal 2."""
+    expect(1 + 1).to_equal(2)
+```
+
+Both `@test(name="...")` and a docstring produce the same output in reporters.
 
 ## Tags
 
@@ -202,13 +204,13 @@ def db() -> Connection:
     return create_connection("test.db")
 
 @test
-def test_one(conn: Connection = Depends(db)):
+def first_query(conn: Connection = Depends(db)):
     # Gets the cached connection
     ...
 
 @test
-def test_two(conn: Connection = Depends(db)):
-    # Same connection instance as test_one
+def second_query(conn: Connection = Depends(db)):
+    # Same connection instance as first_query
     ...
 ```
 

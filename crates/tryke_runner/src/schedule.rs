@@ -93,10 +93,16 @@ pub fn partition_with_hooks(
     hooks: &[HookItem],
     mode: DistMode,
 ) -> PartitionResult {
+    // Only consider hooks for modules that actually have tests in this run —
+    // otherwise we warn about fixtures in files that were filtered out.
+    let in_run_modules: std::collections::HashSet<&str> =
+        tests.iter().map(|t| t.module_path.as_str()).collect();
+
     let constrained_modules: std::collections::HashSet<&str> = hooks
         .iter()
         .filter(|h| h.per.constrains_scheduling())
         .map(|h| h.module_path.as_str())
+        .filter(|m| in_run_modules.contains(m))
         .collect();
 
     // Modules that have file-scope per-scope fixtures (empty groups) need
@@ -105,6 +111,7 @@ pub fn partition_with_hooks(
         .iter()
         .filter(|h| h.per.constrains_scheduling() && h.groups.is_empty())
         .map(|h| h.module_path.as_str())
+        .filter(|m| in_run_modules.contains(m))
         .collect();
 
     let mut warnings: Vec<String> = Vec::new();

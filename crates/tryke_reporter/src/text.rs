@@ -27,6 +27,7 @@ pub struct TextReporter<W: io::Write = io::Stdout> {
     current_file: Option<PathBuf>,
     current_groups: Vec<String>,
     verbosity: Verbosity,
+    subcommand_label: &'static str,
 }
 
 impl TextReporter {
@@ -37,6 +38,7 @@ impl TextReporter {
             current_file: None,
             current_groups: Vec::new(),
             verbosity: Verbosity::Normal,
+            subcommand_label: "tryke test",
         }
     }
 
@@ -47,6 +49,7 @@ impl TextReporter {
             current_file: None,
             current_groups: Vec::new(),
             verbosity,
+            subcommand_label: "tryke test",
         }
     }
 }
@@ -64,6 +67,7 @@ impl<W: io::Write> TextReporter<W> {
             current_file: None,
             current_groups: Vec::new(),
             verbosity: Verbosity::Normal,
+            subcommand_label: "tryke test",
         }
     }
 
@@ -73,6 +77,7 @@ impl<W: io::Write> TextReporter<W> {
             current_file: None,
             current_groups: Vec::new(),
             verbosity,
+            subcommand_label: "tryke test",
         }
     }
 
@@ -126,7 +131,7 @@ impl<W: io::Write> Reporter for TextReporter<W> {
         let _ = writeln!(
             self.writer,
             "{} {}",
-            "tryke test".bold(),
+            self.subcommand_label.bold(),
             format!("v{}", env!("CARGO_PKG_VERSION")).dimmed()
         );
         let _ = writeln!(self.writer);
@@ -288,23 +293,33 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                     write_captured(&mut self.writer, "stderr", &result.stderr);
                 }
             }
-            TestOutcome::Skipped { .. } => {
+            TestOutcome::Skipped { reason } => {
                 if !matches!(self.verbosity, Verbosity::Quiet) {
+                    let suffix = reason
+                        .as_deref()
+                        .map(|r| format!(" ({r})"))
+                        .unwrap_or_default();
                     let _ = writeln!(
                         self.writer,
-                        "{group_indent}{} {}",
+                        "{group_indent}{} {}{}",
                         "»".yellow().dimmed(),
-                        display.dimmed()
+                        display.dimmed(),
+                        suffix.dimmed()
                     );
                 }
             }
-            TestOutcome::XFailed { .. } => {
+            TestOutcome::XFailed { reason } => {
                 if !matches!(self.verbosity, Verbosity::Quiet) {
+                    let suffix = reason
+                        .as_deref()
+                        .map(|r| format!(" ({r})"))
+                        .unwrap_or_default();
                     let _ = writeln!(
                         self.writer,
-                        "{group_indent}{} {}",
+                        "{group_indent}{} {}{}",
                         "~".dimmed(),
-                        display.dimmed()
+                        display.dimmed(),
+                        suffix.dimmed()
                     );
                 }
             }
@@ -317,13 +332,18 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                     "XPASS (unexpected pass)".red()
                 );
             }
-            TestOutcome::Todo { .. } => {
+            TestOutcome::Todo { description } => {
                 if !matches!(self.verbosity, Verbosity::Quiet) {
+                    let suffix = description
+                        .as_deref()
+                        .map(|r| format!(" ({r})"))
+                        .unwrap_or_default();
                     let _ = writeln!(
                         self.writer,
-                        "{group_indent}{} {}",
+                        "{group_indent}{} {}{}",
                         "T".cyan(),
-                        display.dimmed()
+                        display.dimmed(),
+                        suffix.dimmed()
                     );
                 }
             }
@@ -334,7 +354,7 @@ impl<W: io::Write> Reporter for TextReporter<W> {
         let _ = writeln!(
             self.writer,
             "{} {}",
-            "tryke test".bold(),
+            self.subcommand_label.bold(),
             format!("v{}", env!("CARGO_PKG_VERSION")).dimmed()
         );
         let _ = writeln!(self.writer);
@@ -384,6 +404,10 @@ impl<W: io::Write> Reporter for TextReporter<W> {
             error.file_path.display().to_string().yellow(),
             error.message
         );
+    }
+
+    fn set_subcommand_label(&mut self, label: &'static str) {
+        self.subcommand_label = label;
     }
 
     fn on_discovery_warning(&mut self, warning: &DiscoveryWarning) {

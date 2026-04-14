@@ -424,6 +424,14 @@ class MatchResult:
             ```
         """
         if self._error is not None:
+            # Soft-assertion mode recorded this failure already; drop the
+            # matching entry so the test runner doesn't report it twice.
+            ctx = _soft_ctx.value
+            if ctx is not None:
+                for i in range(len(ctx.failures) - 1, -1, -1):
+                    if ctx.failures[i].error is self._error:
+                        del ctx.failures[i]
+                        break
             raise self._error
 
 
@@ -467,11 +475,13 @@ class Expectation[T]:
     Use `.not_` to negate any assertion.
 
     Example:
+        ```pycon
         >>> from tryke import expect
         >>> expect(1 + 1).to_equal(2)
         MatchResult(ok)
         >>> expect(None).not_.to_be_truthy()
         MatchResult(ok)
+        ```
     """
 
     def __init__(self, value: T, *, negated: bool = False) -> None:
@@ -483,11 +493,13 @@ class Expectation[T]:
         """Negate the next assertion.
 
         Example:
+            ```pycon
             >>> from tryke import expect
             >>> expect(1).not_.to_equal(2)
             MatchResult(ok)
             >>> expect(None).not_.to_be_truthy()
             MatchResult(ok)
+            ```
         """
         return Expectation(self._value, negated=not self._negated)
 
@@ -520,11 +532,13 @@ class Expectation[T]:
             other: The value to compare against.
 
         Example:
+            ```pycon
             >>> from tryke import expect
             >>> expect(1 + 1).to_equal(2)
             MatchResult(ok)
             >>> expect([1, 2]).to_equal([1, 2])
             MatchResult(ok)
+            ```
         """
         return self._assert(
             self._value == other,
@@ -540,10 +554,12 @@ class Expectation[T]:
             other: The object to compare identity against.
 
         Example:
+            ```pycon
             >>> from tryke import expect
             >>> sentinel = object()
             >>> expect(sentinel).to_be(sentinel)
             MatchResult(ok)
+            ```
         """
         return self._assert(
             self._value is other,
@@ -556,11 +572,13 @@ class Expectation[T]:
         """Assert the value is truthy (`bool(value) is True`).
 
         Example:
+            ```pycon
             >>> from tryke import expect
             >>> expect(1).to_be_truthy()
             MatchResult(ok)
             >>> expect([1]).to_be_truthy()
             MatchResult(ok)
+            ```
         """
         return self._assert(
             bool(self._value),
@@ -573,11 +591,13 @@ class Expectation[T]:
         """Assert the value is falsy (`bool(value) is False`).
 
         Example:
+            ```pycon
             >>> from tryke import expect
             >>> expect(0).to_be_falsy()
             MatchResult(ok)
             >>> expect("").to_be_falsy()
             MatchResult(ok)
+            ```
         """
         return self._assert(
             not bool(self._value),
@@ -590,11 +610,13 @@ class Expectation[T]:
         """Assert the value is `None`.
 
         Example:
+            ```pycon
             >>> from tryke import expect
             >>> expect(None).to_be_none()
             MatchResult(ok)
             >>> expect(42).not_.to_be_none()
             MatchResult(ok)
+            ```
         """
         return self._assert(
             self._value is None,
@@ -610,9 +632,11 @@ class Expectation[T]:
             n: The value to compare against.
 
         Example:
+            ```pycon
             >>> from tryke import expect
             >>> expect(5).to_be_greater_than(3)
             MatchResult(ok)
+            ```
         """
         return self._assert(
             self._value > n,
@@ -628,9 +652,11 @@ class Expectation[T]:
             n: The value to compare against.
 
         Example:
+            ```pycon
             >>> from tryke import expect
             >>> expect(3).to_be_less_than(5)
             MatchResult(ok)
+            ```
         """
         return self._assert(
             self._value < n,
@@ -648,9 +674,11 @@ class Expectation[T]:
             n: The value to compare against.
 
         Example:
+            ```pycon
             >>> from tryke import expect
             >>> expect(5).to_be_greater_than_or_equal(5)
             MatchResult(ok)
+            ```
         """
         return self._assert(
             self._value >= n,
@@ -668,9 +696,11 @@ class Expectation[T]:
             n: The value to compare against.
 
         Example:
+            ```pycon
             >>> from tryke import expect
             >>> expect(4).to_be_less_than_or_equal(5)
             MatchResult(ok)
+            ```
         """
         return self._assert(
             self._value <= n,
@@ -690,11 +720,13 @@ class Expectation[T]:
             item: The item to search for.
 
         Example:
+            ```pycon
             >>> from tryke import expect
             >>> expect([1, 2, 3]).to_contain(2)
             MatchResult(ok)
             >>> expect("hello world").to_contain("world")
             MatchResult(ok)
+            ```
         """
         return self._assert(
             item in self._value,
@@ -710,11 +742,13 @@ class Expectation[T]:
             n: The expected length.
 
         Example:
+            ```pycon
             >>> from tryke import expect
             >>> expect([1, 2, 3]).to_have_length(3)
             MatchResult(ok)
             >>> expect("hello").to_have_length(5)
             MatchResult(ok)
+            ```
         """
         actual = len(self._value)
         return self._assert(
@@ -731,11 +765,13 @@ class Expectation[T]:
             pattern: A regular expression pattern.
 
         Example:
+            ```pycon
             >>> from tryke import expect
             >>> expect("hello world").to_match(r"hello")
             MatchResult(ok)
             >>> expect("foo123").to_match(r"\\d+")
             MatchResult(ok)
+            ```
         """
         return self._assert(
             bool(re.search(pattern, str(self._value))),
@@ -759,6 +795,7 @@ class Expectation[T]:
             match: Regex pattern to match against the exception message.
 
         Example:
+            ```pycon
             >>> from tryke import expect
             >>> expect(lambda: int("abc")).to_raise(ValueError)
             MatchResult(ok)
@@ -766,6 +803,7 @@ class Expectation[T]:
             MatchResult(ok)
             >>> expect(lambda: None).not_.to_raise()
             MatchResult(ok)
+            ```
         """
         if not callable(self._value):
             msg = "to_raise() requires a callable; wrap the expression in a lambda"
@@ -823,10 +861,12 @@ def expect[T](
         An `Expectation` with chainable assertion methods.
 
     Example:
+        ```pycon
         >>> from tryke import expect
         >>> expect(1 + 1).to_equal(2)
         MatchResult(ok)
         >>> expect("hello").to_contain("ell")
         MatchResult(ok)
+        ```
     """
     return Expectation(expr)

@@ -4,7 +4,7 @@ tryke automatically discovers and runs Python doctests alongside your regular te
 
 ## How discovery works
 
-tryke's static parser scans docstrings for the `>>>` prompt marker. Any docstring containing interactive examples is collected as a test. This works at every level:
+tryke's static parser scans docstrings for the `>>>` prompt marker. Any docstring containing interactive examples is collected as a single test — even if the docstring has several `>>>` lines, they run together and report as one `doctest: name` entry. This works at every level:
 
 ### Module-level
 

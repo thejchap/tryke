@@ -6,7 +6,7 @@ resolver = "3"
 pedantic = "deny"
 
 [workspace.package]
-version = "0.0.13"
+version = "0.0.14"
 edition = "2024"
 rust-version = "1.93"
 homepage = "https://github.com/thejchap/tryke"

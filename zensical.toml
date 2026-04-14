@@ -39,10 +39,10 @@ enabled = true
 
 [project.theme.icon]
 repo = "fontawesome/brands/github"
-logo = "lucide/list-check"
-favicon = "lucide/list-check"
 
 [project.theme]
+logo = "assets/logo.png"
+favicon = "assets/logo.png"
 features = [
   "navigation.instant",
   "navigation.sections",

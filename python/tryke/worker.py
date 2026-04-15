@@ -1,3 +1,51 @@
+"""Long-lived worker process driven by the Rust runner over JSON-RPC.
+
+The runner spawns `python -m tryke.worker`, wires the worker's stdin and
+stdout up to its own pipes, and sends newline-delimited JSON-RPC 2.0
+requests. The worker keeps module imports and fixture state cached across
+many `run_test` calls to avoid re-paying Python startup cost on every test.
+
+## Request shapes
+
+Every request is one line of JSON shaped like:
+
+    {"jsonrpc": "2.0", "id": N, "method": "<method>", "params": {...}}
+
+Supported methods:
+
+- `ping` → `"pong"` (used by `WorkerPool::warm` to force process spawn)
+- `register_hooks {module, hooks: [HookWire...]}` → `null`
+- `finalize_hooks {module}` → `null`
+- `run_test    {module, function, xfail?, groups?}` → tagged outcome dict
+- `run_doctest {module, object_path}` → tagged outcome dict
+- `reload {modules: [...]}` → `null`  (watch/server mode only)
+
+The wire format mirrors `crates/tryke_runner/src/protocol.rs`. The
+TypedDicts below (`_AssertionWire`, `_PassedResult`, …) are the result
+shapes the runner decodes. The hook-related request shapes are handled
+at the dispatch boundary in `_register_hooks` / `_reload` — the Rust
+side statically discovered the fixture metadata with Ruff, so the
+worker just trusts the incoming list and does not re-parse source.
+
+## Hook lifecycle
+
+1. Runner discovers `@fixture` functions and `Depends(...)` references
+   statically, builds a `HookWire` list per module, and sends
+   `register_hooks` before any test in that module.
+2. Worker stores the raw list in `self._hook_metadata[module]` without
+   importing the module. Collection stays cheap.
+3. On the first `run_test` for a module, `_get_module` imports it and
+   `_get_executor` walks the stored metadata, `getattr`-ing each name
+   off the imported module to resolve real callables, then builds a
+   `HookExecutor` that owns fixture instances, dependency order, and
+   teardown callbacks. Result is cached in `self._executors[module]`.
+4. After every test in a module has run, the runner sends
+   `finalize_hooks` and the executor runs `per="scope"` teardown.
+5. In watch/server mode, file changes trigger a `reload` which drops
+   `self._modules[name]` / `self._executors[name]` and calls
+   `importlib.reload(...)` so the next `run_test` gets a fresh import.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -7,6 +55,7 @@ import importlib
 import inspect
 import io
 import json
+import logging
 import os
 import sys
 import time
@@ -32,6 +81,12 @@ if TYPE_CHECKING:
     from typing import TextIO
 
 _TRYKE_PKG = str(Path(__file__).resolve().parent)
+
+# Worker-side logger. Debug/trace output is useful when auditing module
+# reloads under watch/server mode; enable with `TRYKE_WORKER_LOG=DEBUG`
+# (or `TRACE`). Messages go to stderr so they don't corrupt the JSON-RPC
+# channel on stdout. Off by default.
+_log = logging.getLogger("tryke.worker")
 
 
 # -- Wire-format TypedDicts (mirror crates/tryke_runner/src/protocol.rs) ------
@@ -438,12 +493,25 @@ class Worker:
         module_name: str,
         hooks: object,
     ) -> None:
-        """Store hook metadata for a module, sent by the runner before tests."""
+        """Store statically-discovered hook metadata for a module.
+
+        The runner calls this once per module before any `run_test` for
+        that module, passing a list of ``HookWire`` dicts (see
+        ``crates/tryke_runner/src/protocol.rs``). We deliberately do not
+        import ``module_name`` here: importing is deferred to
+        :meth:`_get_module` so that collection stays cheap and failed
+        imports surface as test failures instead of crashing the worker.
+
+        Any previously-cached :class:`HookExecutor` for this module is
+        dropped so the next test rebuilds fixtures from the fresh
+        metadata — this matters after `reload` or re-registration.
+        """
         if not isinstance(hooks, list):
             return
         self._hook_metadata[module_name] = list(hooks)
         # Invalidate any cached executor for this module.
         self._executors.pop(module_name, None)
+        _log.debug("register_hooks: module=%s hook_count=%d", module_name, len(hooks))
 
     def _finalize_hooks(self, module_name: str) -> None:
         """Run scope-level teardown (after_all, wrap_all) for a module."""
@@ -713,15 +781,77 @@ class Worker:
         return _passed(ms, out, err)
 
     def _reload(self, module_names: list[str]) -> None:
+        """Drop cached imports and executors for the given modules.
+
+        Called by the runner in watch/server mode when the file watcher
+        reports a change that affects these modules. We use
+        :func:`importlib.reload` rather than popping ``sys.modules`` so
+        classes/functions imported *elsewhere* under the old module
+        identity stay referencable — ``reload`` mutates the existing
+        module object in place instead of building a new one.
+
+        The cached :class:`HookExecutor` is always dropped, even if the
+        module was never imported in this worker, because a fresh
+        ``register_hooks`` from the runner may have arrived before the
+        next ``run_test``.
+        """
+        _log.debug("reload: requested modules=%s", module_names)
+        reloaded_count = 0
         for name in module_names:
             if name in sys.modules:
-                reloaded = importlib.reload(sys.modules[name])
+                try:
+                    reloaded = importlib.reload(sys.modules[name])
+                except Exception:
+                    _log.exception("reload: importlib.reload failed for %s", name)
+                    raise
                 self._modules[name] = reloaded
+                reloaded_count += 1
+                _log.debug("reload: reloaded %s", name)
+            else:
+                _log.debug(
+                    "reload: %s not in sys.modules — skipping reload, "
+                    "executor will be rebuilt on next run_test",
+                    name,
+                )
             # Clear cached executor so hooks are re-discovered on next run.
             self._executors.pop(name, None)
+        _log.debug(
+            "reload: done — %d/%d module(s) actually reloaded",
+            reloaded_count,
+            len(module_names),
+        )
+
+
+def _configure_logging_from_env() -> None:
+    """Opt-in worker logging via ``TRYKE_WORKER_LOG``.
+
+    Off by default so normal test runs don't emit anything on stderr.
+    Set ``TRYKE_WORKER_LOG=DEBUG`` (or ``INFO`` / ``TRACE``) before
+    invoking ``tryke test``/``tryke watch``/``tryke server`` to trace
+    module registration and reload behavior. Output goes to stderr so
+    it never contaminates the JSON-RPC stream on stdout.
+    """
+    level_name = os.environ.get("TRYKE_WORKER_LOG", "").strip().upper()
+    if not level_name:
+        return
+    # Map TRACE to DEBUG since stdlib logging has no TRACE level.
+    if level_name == "TRACE":
+        level_name = "DEBUG"
+    level = logging.getLevelName(level_name)
+    if not isinstance(level, int):
+        return
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(
+        logging.Formatter("tryke.worker[%(process)d] %(levelname)s %(message)s")
+    )
+    _log.addHandler(handler)
+    _log.setLevel(level)
+    _log.propagate = False
 
 
 def main() -> None:
+    _configure_logging_from_env()
+    _log.debug("worker main: starting (pid=%d)", os.getpid())
     Worker(sys.stdin, sys.stdout).run()
 
 

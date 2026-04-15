@@ -75,7 +75,14 @@ impl Server {
                     let tests = disc.tests_for_changed(&paths);
                     (modules, tests)
                 };
-                if !modules.is_empty() {
+                if modules.is_empty() {
+                    debug!("server: no modules affected by change — skipping pool.reload");
+                } else {
+                    debug!(
+                        "server: reloading {} module(s) in worker pool: {}",
+                        modules.len(),
+                        modules.join(", ")
+                    );
                     pool_for_watcher.reload(modules).await;
                 }
                 debug!("file change: {} affected tests", tests.len());

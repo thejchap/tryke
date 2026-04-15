@@ -164,5 +164,9 @@ pub enum Commands {
         /// Base branch for --changed (e.g. "main"). Uses merge-base diff.
         #[arg(long)]
         base_branch: Option<String>,
+        /// Print the fixture (`@fixture` + `Depends()`) dependency graph
+        /// instead of the import graph.
+        #[arg(long, conflicts_with_all = ["connected_only", "changed", "base_branch"])]
+        fixtures: bool,
     },
 }

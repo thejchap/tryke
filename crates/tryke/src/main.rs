@@ -6,7 +6,7 @@ use log::debug;
 use tryke::cli::{Cli, Commands, ReporterFormat};
 use tryke::discovery::{discover_tests, discover_tests_changed_first, resolved_excludes};
 use tryke::execution::run_tests;
-use tryke::graph::run_graph;
+use tryke::graph::{run_fixture_graph, run_graph};
 use tryke::watch::run_watch;
 use tryke_reporter::{
     DotReporter, JSONReporter, JUnitReporter, LlmReporter, ProgressReporter, Reporter,
@@ -180,6 +180,7 @@ fn main() -> Result<()> {
             connected_only,
             changed,
             base_branch,
+            fixtures,
         } => {
             if base_branch.is_some() && !changed {
                 return Err(anyhow::anyhow!("--base-branch requires --changed"));
@@ -187,13 +188,17 @@ fn main() -> Result<()> {
             let cwd = env::current_dir()?;
             let root_path = root.as_deref().unwrap_or(&cwd);
             let excludes = resolved_excludes(root_path, exclude, include);
-            run_graph(
-                Some(root_path),
-                &excludes,
-                *connected_only,
-                *changed,
-                base_branch.as_deref(),
-            )
+            if *fixtures {
+                run_fixture_graph(Some(root_path), &excludes)
+            } else {
+                run_graph(
+                    Some(root_path),
+                    &excludes,
+                    *connected_only,
+                    *changed,
+                    base_branch.as_deref(),
+                )
+            }
         }
     }
 }

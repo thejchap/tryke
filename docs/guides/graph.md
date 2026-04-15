@@ -1,6 +1,6 @@
-# Import graph
+# Graph
 
-`tryke graph` prints the Python import dependency graph that tryke builds during discovery. This is the same graph that powers [changed mode](changed-mode.md) — exposing it directly is useful for debugging collection problems, exploring how files are connected, and sanity-checking what `--changed` will actually run.
+`tryke graph` prints dependency graphs that tryke builds during discovery — the import graph by default, and the fixture graph with `--fixtures`. These are the same graphs that power [changed mode](changed-mode.md) and fixture resolution, so exposing them directly is useful for debugging collection problems, exploring how files or fixtures are connected, and sanity-checking what `--changed` will actually run.
 
 ## Basic usage
 
@@ -63,6 +63,26 @@ Compare against a branch instead of the working tree. Uses `git merge-base` to f
 ```bash
 tryke graph --changed --base-branch main
 ```
+
+### `--fixtures`
+
+Print the fixture (`@fixture` + `Depends()`) dependency graph instead of the import graph. Each entry shows a fixture's qualified name, its `per=test` / `per=scope` kind, the fixtures it depends on, and the fixtures (or tests) that depend on it:
+
+```bash
+tryke graph --fixtures
+```
+
+```text
+tests.test_db::db  [per=scope]
+  depends on:  (none)
+  used by:     tests.test_db::session
+
+tests.test_db::session  [per=test]
+  depends on:  tests.test_db::db
+  used by:     (none)
+```
+
+References to hooks tryke cannot resolve (typos, missing imports, dynamically-constructed names) are printed with a `?` suffix so you can spot them without running the suite. `--fixtures` is mutually exclusive with `--changed` / `--connected-only`.
 
 ### `--root`, `--exclude`, `--include`
 

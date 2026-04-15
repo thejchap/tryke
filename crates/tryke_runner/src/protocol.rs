@@ -1,3 +1,30 @@
+//! JSON-RPC wire format spoken between the Rust runner and the long-lived
+//! Python worker process at `python/tryke/worker.py`.
+//!
+//! Each struct in this module is one half of a message that flows over the
+//! worker's stdin/stdout. A typical test cycle looks like:
+//!
+//! 1. `register_hooks`   — Rust side sends a [`RegisterHooksParams`] with a
+//!    list of [`HookWire`] entries for one module. The worker stores the raw
+//!    metadata on `Worker._hook_metadata` without importing the module yet;
+//!    the import is deferred until the first test in that module actually
+//!    runs, so collection stays cheap.
+//! 2. `run_test`         — Rust sends one [`RunTestParams`] per test. On
+//!    first touch of a module the worker imports it, then lazily builds a
+//!    `HookExecutor` by looking up each hook name as an attribute of the
+//!    imported module and reading its `per=test`/`per=scope` kind. Fixtures
+//!    are resolved and injected before the test function runs.
+//! 3. `finalize_hooks`   — after the last test in a module, Rust sends
+//!    [`FinalizeHooksParams`] so `per="scope"` teardown runs.
+//! 4. `reload` (watch/server mode only) — [`ReloadParams`] tells the worker
+//!    to drop any cached import of the listed dotted module names and
+//!    invalidate their cached executors. Next test triggers a fresh import.
+//!
+//! Because hooks are discovered statically by Ruff (not by importing), the
+//! runner knows every `@fixture` name and every `Depends(...)` reference
+//! before any Python code runs, and ships that as the wire payload. The
+//! worker never needs to re-walk the AST itself.
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize)]
@@ -35,6 +62,28 @@ pub struct RunTestParams {
 }
 
 /// Wire format for a single fixture sent to the Python worker.
+///
+/// Populated on the Rust side from a statically-discovered
+/// [`tryke_types::HookItem`]. The Python worker ([`Worker._register_hooks`]
+/// in `python/tryke/worker.py`) stores these verbatim and later resolves
+/// each `name` to a real function by `getattr`-ing the imported module,
+/// so the Python side never re-parses source.
+///
+/// Field notes:
+///
+/// - `name` — bare function name as written in source; the worker looks
+///   this up as an attribute on the imported module.
+/// - `per` — serialized [`tryke_types::FixturePer`] (`"test"` or `"scope"`);
+///   controls fixture lifetime and, for `"scope"`, scheduling affinity.
+/// - `groups` — `describe(...)` path the fixture was defined under, used
+///   to scope fixture visibility to tests inside the same group chain.
+/// - `depends_on` — function names extracted from `Depends(name)` in the
+///   hook's parameter defaults. The worker uses this to build its DI
+///   graph; unknown names become a runtime error when the fixture is
+///   first requested.
+/// - `line_number` — source line for diagnostics.
+///
+/// [`Worker._register_hooks`]: # "see python/tryke/worker.py"
 #[derive(Debug, Clone, Serialize)]
 pub struct HookWire {
     pub name: String,

@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::Result;
+use log::debug;
 use tryke_discovery::Discoverer;
 use tryke_reporter::Reporter;
 use tryke_runner::{DistMode, WorkerPool, check_python_version, resolve_python};
@@ -66,8 +67,24 @@ pub async fn run_watch(
     let _debouncer = tryke_server::watcher::spawn_watcher(root, excludes, tx)?;
 
     for paths in &rx {
+        debug!(
+            "watch: file change batch — {} path(s) changed: {}",
+            paths.len(),
+            paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         let modules = discoverer.affected_modules(&paths);
-        if !modules.is_empty() {
+        if modules.is_empty() {
+            debug!("watch: no modules affected by change — skipping pool.reload");
+        } else {
+            debug!(
+                "watch: reloading {} module(s) in worker pool: {}",
+                modules.len(),
+                modules.join(", ")
+            );
             pool.reload(modules).await;
         }
         discoverer.rediscover_changed(&paths);

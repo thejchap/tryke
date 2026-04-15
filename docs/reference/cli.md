@@ -64,6 +64,9 @@ Options:
   -q, --quiet...
           Decrease logging verbosity
 
+      --fixtures
+          Print the fixture (`@fixture` + `Depends()`) dependency graph instead of the import graph
+
   -h, --help
           Print help
 ```

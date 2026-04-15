@@ -12,7 +12,7 @@ The main exports are:
 from collections.abc import Generator
 from contextlib import contextmanager
 
-from .expect import expect, test
+from .expect import CaseArgs, CasesMarked, CaseTable, expect, test
 from .hooks import Depends, fixture
 
 
@@ -45,6 +45,9 @@ def describe(name: str) -> Generator[None, None, None]:
 
 
 __all__ = [
+    "CaseArgs",
+    "CaseTable",
+    "CasesMarked",
     "Depends",
     "describe",
     "expect",

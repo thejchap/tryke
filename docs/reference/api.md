@@ -7,6 +7,7 @@
       show_root_heading: false
       members:
         - __call__
+        - cases
         - skip_if
 
 ::: tryke.expect._SkipMarker

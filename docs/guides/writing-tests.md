@@ -314,6 +314,22 @@ Outer scope fixtures wrap inner scope fixtures. Within a scope, fixtures set up 
 
 See [concurrency](../concepts/concurrency.md#fixtures-and-scheduling) for how fixtures interact with `--dist` modes. In short: `per="test"` fixtures preserve full parallelism, while `per="scope"` fixtures force tests in the same scope onto a single worker.
 
+## Parametrized tests
+
+Use `@test.cases` to run the same test against multiple inputs. Each case collects as a distinct test (`fn[label]`) with its own row in reporters:
+
+```python
+@test.cases(
+    zero={"n": 0, "expected": 0},
+    one={"n": 1, "expected": 1},
+    ten={"n": 10, "expected": 100},
+)
+def square(n: int, expected: int):
+    expect(n * n).to_equal(expected)
+```
+
+Cases compose with `describe()`, `@fixture`/`Depends()`, and modifiers. See [the cases concept page](../concepts/cases.md) for the two forms, composition rules, and the static-analysis constraint on decorator arguments.
+
 ## Skipping tests
 
 Skip a test unconditionally:

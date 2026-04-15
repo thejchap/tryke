@@ -22,6 +22,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
     from typing import Any, Protocol
 
+    from tryke.expect import CaseArgs
+
     class _FixtureFn(Protocol):
         """A named callable — i.e. any real Python function.
 
@@ -399,8 +401,19 @@ class HookExecutor:
         test_fn: _FixtureFn,
         *,
         groups: list[str],
+        case_args: tuple[object, ...] = (),
+        case_kwargs: CaseArgs | None = None,
     ) -> None:
-        """Execute fixtures in correct order around *test_fn*."""
+        """Execute fixtures in correct order around *test_fn*.
+
+        When *case_args* / *case_kwargs* are provided (from
+        ``@test.cases``), ``case_args`` is splatted positionally and
+        ``case_kwargs`` entries are merged into the kwargs passed to
+        *test_fn* alongside the fixture-injected values. A collision
+        between a case kwarg and a fixture parameter raises
+        ``TypeError`` — case parameters may not shadow ``Depends()``
+        parameters.
+        """
         # Build the scope chain: [], ["a"], ["a", "b"], ...
         scopes: list[tuple[str, ...]] = [
             (),
@@ -433,10 +446,20 @@ class HookExecutor:
 
         try:
             test_kwargs = self._resolver.resolve(test_fn)
+            if case_kwargs:
+                conflicts = set(test_kwargs).intersection(case_kwargs)
+                if conflicts:
+                    names = ", ".join(sorted(conflicts))
+                    msg = (
+                        f"@test.cases argument(s) {{{names}}} collide with "
+                        f"fixture-injected parameter(s) of {test_fn.__name__}"
+                    )
+                    raise TypeError(msg)
+                test_kwargs = {**test_kwargs, **case_kwargs}
             if inspect.iscoroutinefunction(test_fn):
-                asyncio.run(test_fn(**test_kwargs))
+                asyncio.run(test_fn(*case_args, **test_kwargs))
             else:
-                test_fn(**test_kwargs)
+                test_fn(*case_args, **test_kwargs)
         finally:
             # Teardown per-test generator fixtures in reverse setup order.
             self._resolver.teardown_test_generators()

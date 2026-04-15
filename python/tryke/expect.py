@@ -5,10 +5,16 @@ from __future__ import annotations
 import re
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple, Protocol, overload, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    NamedTuple,
+    Protocol,
+    overload,
+    runtime_checkable,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Callable, Coroutine, Mapping
     from typing import Any, ClassVar, Self
 
     class _SupportsGT(Protocol):
@@ -35,10 +41,21 @@ if TYPE_CHECKING:
         def __call__(self) -> object: ...
 
 
-type _Fn = Callable[[], None]
-type _AsyncFn = Callable[[], Coroutine[Any, Any, None]]
+type _Fn = Callable[..., None]
+type _AsyncFn = Callable[..., Coroutine[Any, Any, None]]
 type _AnyTestFn = _Fn | _AsyncFn
 type _Decorator = Callable[[_AnyTestFn], _AnyTestFn]
+
+#: The kwargs a single ``@test.cases`` case passes to its test function.
+#: Values are typed as ``object`` because each test is free to declare its
+#: own parameter types — the worker passes values through unchanged and the
+#: test function's own signature is the source of truth for argument shapes.
+type CaseArgs = Mapping[str, object]
+
+#: Full parametrize table: a tuple of one :class:`CaseEntry` per case. A
+#: tuple (rather than a mapping) preserves insertion order and the concrete
+#: element type, and lets the worker do strict identity-level lookups.
+type CaseTable = tuple["CaseEntry", ...]
 
 
 @runtime_checkable
@@ -68,9 +85,213 @@ class _XfailMarked(Protocol):
     __tryke_xfail__: str
 
 
+@runtime_checkable
+class CasesMarked(Protocol):
+    """A function stamped with ``__tryke_cases__``.
+
+    The attribute is a tuple of :class:`CaseEntry` rows describing each
+    case: its label, positional args, and keyword args. The worker looks
+    up the row whose ``label`` matches the dispatched case and splats
+    both ``args`` and ``kwargs`` into the function call.
+    """
+
+    def __call__(self, *args: object, **kwargs: object) -> None: ...
+
+    __tryke_cases__: CaseTable
+
+
 def _stamp(fn: object, attr: str, value: str) -> None:
     """Stamp a marker attribute on a function object."""
     setattr(fn, attr, value)
+
+
+_CASES_ATTR = "__tryke_cases__"
+_CASES_TUPLE_LEN = 2
+
+
+class CaseEntry(NamedTuple):
+    """One row in a ``@test.cases(...)`` table.
+
+    Attributes:
+        label: Human-readable name shown in reports; survives ``-k``
+            filtering and may contain arbitrary characters (spaces, math
+            operators, etc.).
+        args: Positional arguments the decorated function receives for
+            this case. Typically empty — the typed form prefers kwargs —
+            but supported so positional-only signatures compose cleanly.
+        kwargs: Keyword arguments the decorated function receives for
+            this case. Merged with any fixture-injected kwargs by the
+            hook executor; collisions raise ``TypeError``.
+    """
+
+    label: str
+    args: tuple[object, ...]
+    kwargs: CaseArgs
+
+
+class _CaseSpec[**P]:
+    """Type-carrying case descriptor produced by :meth:`_TestBuilder.case`.
+
+    The ``P`` ParamSpec is bound at construction time from the
+    positional and keyword arguments the caller passes after the label.
+    When a batch of specs is handed to :meth:`_TestBuilder.cases`, the
+    type checker is expected to unify ``P`` across every element and
+    match it against the decorated function's signature.
+
+    The object is intentionally opaque at runtime — it holds one
+    :class:`CaseEntry` and nothing else. Users should never construct
+    it directly; go through ``test.case(label, ...)``.
+
+    Note:
+        PEP 612 support for ParamSpec-carrying classes is uneven across
+        type checkers. mypy and pyright bind ``P`` correctly here; ty
+        (as of 0.0.21) infers the class as gradual ``_CaseSpec[...]``
+        and does not enforce per-kwarg typing. Once ty gains full PEP
+        612 support this design will start rejecting mistyped cases
+        statically with no code change.
+    """
+
+    __slots__ = ("_entry",)
+
+    def __init__(
+        self,
+        label: str,
+        /,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> None:
+        self._entry = CaseEntry(
+            label=label,
+            args=tuple(args),
+            kwargs=dict(kwargs),
+        )
+
+    @property
+    def entry(self) -> CaseEntry:
+        return self._entry
+
+
+def _stamp_cases(fn: object, table: CaseTable) -> None:
+    """Stamp the ``__tryke_cases__`` attribute on a function object."""
+    setattr(fn, _CASES_ATTR, table)
+
+
+def _validate_case_entry(index: int, item: object) -> CaseEntry:
+    """Coerce one positional ``@test.cases([...])`` list element."""
+    if not (isinstance(item, tuple) and len(item) == _CASES_TUPLE_LEN):
+        msg = f"test.cases() list element {index} must be a (label, args) tuple"
+        raise TypeError(msg)
+    label, raw_args = item
+    if not isinstance(label, str):
+        msg = f"test.cases() list element {index} label must be a string"
+        raise TypeError(msg)
+    if not isinstance(raw_args, dict):
+        msg = f"test.cases() list element {index} args must be a dict"
+        raise TypeError(msg)
+    kwargs: dict[str, object] = {}
+    for key, value in raw_args.items():
+        if not isinstance(key, str):
+            msg = (
+                f"test.cases() list element {index} args keys must be strings "
+                f"(got {type(key).__name__})"
+            )
+            raise TypeError(msg)
+        kwargs[key] = value
+    return CaseEntry(label=label, args=(), kwargs=kwargs)
+
+
+def _cases_list_to_table(raw: object) -> CaseTable:
+    """Validate and convert a positional ``@test.cases([...])`` list.
+
+    Raises:
+        TypeError: If any element is not a ``(label: str, args: dict)`` tuple.
+    """
+    if not isinstance(raw, list):
+        msg = "test.cases() positional argument must be a list of (label, args) tuples"
+        raise TypeError(msg)
+    return tuple(_validate_case_entry(i, item) for i, item in enumerate(raw))
+
+
+def _cases_from_kwargs(kwargs: dict[str, CaseArgs]) -> CaseTable:
+    """Convert legacy ``@test.cases(label=args_dict, ...)`` kwargs."""
+    return tuple(
+        CaseEntry(label=label, args=(), kwargs=dict(args))
+        for label, args in kwargs.items()
+    )
+
+
+def _validate_cases_table(table: CaseTable) -> None:
+    """Check cross-row invariants: unique labels and consistent key sets.
+
+    Called after every form (typed, legacy kwargs, legacy list) so each
+    form enforces the same shape guarantees at runtime regardless of
+    what the type checker did or did not catch.
+    """
+    if not table:
+        return
+    seen: set[str] = set()
+    for entry in table:
+        if entry.label in seen:
+            msg = f"test.cases(): duplicate case label {entry.label!r}"
+            raise TypeError(msg)
+        seen.add(entry.label)
+
+    reference = table[0]
+    ref_key_count = len(reference.args)
+    ref_kw_keys = frozenset(reference.kwargs)
+    for entry in table[1:]:
+        if len(entry.args) != ref_key_count:
+            msg = (
+                f"test.cases(): case {entry.label!r} has "
+                f"{len(entry.args)} positional arg(s), but case "
+                f"{reference.label!r} has {ref_key_count}"
+            )
+            raise TypeError(msg)
+        kw_keys = frozenset(entry.kwargs)
+        if kw_keys != ref_kw_keys:
+            missing = sorted(ref_kw_keys - kw_keys)
+            extra = sorted(kw_keys - ref_kw_keys)
+            parts: list[str] = []
+            if missing:
+                parts.append(f"missing {missing!r}")
+            if extra:
+                parts.append(f"extra {extra!r}")
+            joined = ", ".join(parts)
+            msg = (
+                f"test.cases(): case {entry.label!r} key set differs "
+                f"from case {reference.label!r} ({joined})"
+            )
+            raise TypeError(msg)
+
+
+def _build_cases_table(
+    positional: tuple[object, ...],
+    kwargs: dict[str, CaseArgs],
+) -> CaseTable:
+    """Resolve ``@test.cases(...)`` arguments into a :data:`CaseTable`.
+
+    Three input shapes are supported:
+
+    - Typed: ``cases(test.case(...), test.case(...))`` — every positional
+      arg is a :class:`_CaseSpec`.
+    - Legacy kwargs: ``cases(label=args_dict, ...)``.
+    - Legacy list: ``cases([(label, args_dict), ...])``.
+    """
+    if positional and kwargs:
+        msg = "test.cases() accepts either positional or kwargs form, not both"
+        raise TypeError(msg)
+    if positional and all(isinstance(p, _CaseSpec) for p in positional):
+        # Narrow tuple[object, ...] to tuple of specs without a cast.
+        return tuple(item.entry for item in positional if isinstance(item, _CaseSpec))
+    if kwargs:
+        return _cases_from_kwargs(kwargs)
+    if positional:
+        if len(positional) != 1:
+            msg = "test.cases() positional form takes exactly one list argument"
+            raise TypeError(msg)
+        return _cases_list_to_table(positional[0])
+    msg = "test.cases() requires at least one case (kwargs, list, or test.case specs)"
+    raise TypeError(msg)
 
 
 class _Marker:
@@ -337,6 +558,117 @@ class _TestBuilder:
             return fn
 
         def decorator(f: Callable[[], None]) -> Callable[[], None]:
+            return f
+
+        return decorator
+
+    def case[**P](
+        self,
+        label: str,
+        /,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> _CaseSpec[P]:
+        """Build one typed case for a :meth:`cases` decorator.
+
+        The ``label`` is an arbitrary string — spaces, math operators,
+        and punctuation are all fine, so ``"my test"`` and ``"2 + 3"``
+        both work and survive ``-k`` filtering end-to-end.
+
+        The ``*args``/``**kwargs`` are typed via PEP 612 ``_P.args`` /
+        ``_P.kwargs`` so that mypy and pyright can match them against
+        the decorated function's signature inside :meth:`cases`. ty
+        does not yet enforce this pattern; see the module docstring for
+        :class:`_CaseSpec` for details.
+
+        Example:
+            ```python
+            @test.cases(
+                test.case("zero", n=0, expected=0),
+                test.case("one",  n=1, expected=1),
+                test.case("ten",  n=10, expected=100),
+            )
+            def square(n: int, expected: int) -> None:
+                expect(n * n).to_equal(expected)
+            ```
+        """
+        return _CaseSpec(label, *args, **kwargs)
+
+    @overload
+    def cases[**P](
+        self,
+        *specs: _CaseSpec[P],
+    ) -> Callable[[Callable[P, None]], Callable[P, None]]: ...
+    @overload
+    def cases(
+        self,
+        positional: list[tuple[str, CaseArgs]],
+        /,
+    ) -> Callable[[_Fn], _Fn]: ...
+    @overload
+    def cases(
+        self,
+        /,
+        **kwargs: CaseArgs,
+    ) -> Callable[[_Fn], _Fn]: ...
+
+    def cases(
+        self,
+        *positional: object,
+        **kwargs: CaseArgs,
+    ) -> Callable[[_Fn], _Fn]:
+        """Parametrize a test over multiple named cases.
+
+        Three forms are supported:
+
+        - **Typed form** (recommended) — one :meth:`case` spec per case.
+          PEP 612 ``ParamSpec`` binds the kwargs against the decorated
+          function's signature so typos and mismatched types become
+          static errors under mypy/pyright:
+
+              @test.cases(
+                  test.case("zero",     n=0,  expected=0),
+                  test.case("one",      n=1,  expected=1),
+                  test.case("ten",      n=10, expected=100),
+              )
+              def square(n: int, expected: int) -> None:
+                  expect(n * n).to_equal(expected)
+
+          ty (as of 0.0.21) does not yet enforce this pattern. Runtime
+          validation below still catches label collisions and
+          inconsistent key sets.
+
+        - **Legacy keyword form** — each kwarg name is a case label,
+          each value is a dict of arguments. Cases lose static typing:
+
+              @test.cases(
+                  zero={"n": 0, "squared": 0},
+                  one={"n": 1, "squared": 1},
+              )
+              def square(n, squared): ...
+
+        - **Legacy list form** — a list of ``(label, args_dict)``
+          tuples. Use when a label is not a valid Python identifier
+          and the typed form is unavailable:
+
+              @test.cases([
+                  ("2 + 3", {"a": 2, "b": 3, "sum": 5}),
+                  ("-1 + 1", {"a": -1, "b": 1, "sum": 0}),
+              ])
+              def add(a, b, sum): ...
+
+        Composes with ``@fixture``/``Depends()`` parameters,
+        ``describe(...)`` blocks, and ``@test.skip``/``@test.xfail``.
+
+        Raises:
+            TypeError: If no cases are provided, forms are mixed, two
+                cases share a label, or cases disagree on key sets.
+        """
+        table = _build_cases_table(positional, kwargs)
+        _validate_cases_table(table)
+
+        def decorator(f: _Fn) -> _Fn:
+            _stamp_cases(f, table)
             return f
 
         return decorator

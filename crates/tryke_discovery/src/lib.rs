@@ -193,6 +193,22 @@ fn is_locally_defined(name: &str, body: &[Stmt]) -> bool {
 
 const MARKER_ATTRS: &[&str] = &["skip", "todo", "xfail", "skip_if"];
 
+/// Returns `true` if `expr` is a `@test.cases(...)` call (bare or qualified).
+/// Must be a `Call` expression — the bare `test.cases` attribute form has no
+/// runtime meaning.
+fn is_tryke_test_cases_decorator(expr: &Expr, body: &[Stmt]) -> bool {
+    let Expr::Call(call) = expr else {
+        return false;
+    };
+    let Expr::Attribute(attr) = &*call.func else {
+        return false;
+    };
+    if attr.attr.id.as_str() != "cases" {
+        return false;
+    }
+    is_bare_test_or_qualified(&attr.value, body)
+}
+
 /// Recognises bare `test` / `tryke.test` plus the marker attribute forms
 /// (`test.skip`, `test.xfail`, …) and their call wrappers.
 fn is_tryke_test_decorator(expr: &Expr, body: &[Stmt]) -> bool {
@@ -431,6 +447,127 @@ fn extract_decorator_tags(expr: &Expr) -> Vec<String> {
         }
     }
     vec![]
+}
+
+/// Returns `true` if `expr` is a call to `test.case(...)` or `tryke.test.case(...)`.
+fn is_test_case_call(expr: &Expr) -> bool {
+    let Expr::Call(call) = expr else {
+        return false;
+    };
+    let Expr::Attribute(attr) = &*call.func else {
+        return false;
+    };
+    if attr.attr.id.as_str() != "case" {
+        return false;
+    }
+    match &*attr.value {
+        Expr::Name(n) => n.id.as_str() == "test",
+        Expr::Attribute(a) => {
+            a.attr.id.as_str() == "test"
+                && matches!(&*a.value, Expr::Name(n) if n.id.as_str() == "tryke")
+        }
+        _ => false,
+    }
+}
+
+/// Extract case labels from a `@test.cases(...)` decorator.
+///
+/// Supports three literal forms:
+/// - typed: `@test.cases(test.case("label1", ...), test.case("label2", ...))`
+///   — each positional argument is a `test.case(...)` call with a string
+///   literal label as its first positional argument
+/// - kwargs: `@test.cases(zero={...}, one={...})` — each keyword name is a label
+/// - list: `@test.cases([("label1", {...}), ("label2", {...})])` — first tuple
+///   element is a string-literal label
+///
+/// Returns `Err(msg)` if the decorator's shape is not statically recognizable
+/// (e.g. `@test.cases(build())` or `@test.cases([dynamic, ...])`).
+fn extract_cases(expr: &Expr) -> Result<Vec<String>, String> {
+    let Expr::Call(call) = expr else {
+        return Err("test.cases decorator must be called, e.g. @test.cases(a=...)".to_owned());
+    };
+
+    let has_args = !call.arguments.args.is_empty();
+    let has_kwargs = !call.arguments.keywords.is_empty();
+
+    if has_args && has_kwargs {
+        return Err(
+            "test.cases() accepts either positional specs/list or keyword arguments, not both"
+                .to_owned(),
+        );
+    }
+
+    if has_kwargs {
+        let mut labels = Vec::with_capacity(call.arguments.keywords.len());
+        for kw in &call.arguments.keywords {
+            let Some(k) = kw.arg.as_ref() else {
+                return Err("test.cases() does not support **kwargs expansion — \
+                            all labels must be literal keyword arguments"
+                    .to_owned());
+            };
+            labels.push(k.id.as_str().to_owned());
+        }
+        return Ok(labels);
+    }
+
+    if has_args {
+        // Typed form: every positional arg is a `test.case(...)` call.
+        if call.arguments.args.iter().all(is_test_case_call) {
+            let mut labels = Vec::with_capacity(call.arguments.args.len());
+            for (i, elt) in call.arguments.args.iter().enumerate() {
+                let Expr::Call(inner) = elt else {
+                    return Err(format!(
+                        "test.cases() positional arg {i} must be a test.case(...) call"
+                    ));
+                };
+                let Some(first) = inner.arguments.args.first() else {
+                    return Err(format!(
+                        "test.cases() positional arg {i}: test.case() requires a label"
+                    ));
+                };
+                let Expr::StringLiteral(s) = first else {
+                    return Err(format!(
+                        "test.cases() positional arg {i}: test.case() label must be a string literal"
+                    ));
+                };
+                labels.push(s.value.to_str().to_owned());
+            }
+            return Ok(labels);
+        }
+
+        if call.arguments.args.len() != 1 {
+            return Err("test.cases() positional form takes exactly one list argument".to_owned());
+        }
+        let Expr::List(list) = &call.arguments.args[0] else {
+            return Err(
+                "test.cases() positional argument must be a list literal of (label, args) tuples \
+                 or a sequence of test.case(...) calls"
+                    .to_owned(),
+            );
+        };
+        let mut labels = Vec::with_capacity(list.elts.len());
+        for (i, elt) in list.elts.iter().enumerate() {
+            let Expr::Tuple(tup) = elt else {
+                return Err(format!(
+                    "test.cases() list element {i} must be a (label, args) tuple literal"
+                ));
+            };
+            let Some(first) = tup.elts.first() else {
+                return Err(format!(
+                    "test.cases() list element {i} tuple must have a label as its first element"
+                ));
+            };
+            let Expr::StringLiteral(s) = first else {
+                return Err(format!(
+                    "test.cases() list element {i} label must be a string literal"
+                ));
+            };
+            labels.push(s.value.to_str().to_owned());
+        }
+        return Ok(labels);
+    }
+
+    Err("test.cases() requires at least one case".to_owned())
 }
 
 fn extract_decorator_name(expr: &Expr) -> Option<String> {
@@ -732,6 +869,92 @@ fn extract_describe_name(expr: &Expr) -> Option<String> {
 }
 
 #[expect(clippy::too_many_arguments)]
+fn collect_cases_from_func(
+    func: &ruff_python_ast::StmtFunctionDef,
+    cases_dec: &ruff_python_ast::Decorator,
+    top_body: &[Stmt],
+    root: &Path,
+    file: &Path,
+    source: &str,
+    line_index: &LineIndex,
+    groups: &[String],
+    tests_out: &mut Vec<TestItem>,
+    errors_out: &mut Vec<String>,
+) {
+    // Forbid `@test` and `@test.cases` on the same function — the runtime
+    // dispatch can only resolve one of them.
+    let plain_test_dec = func.decorator_list.iter().any(|d| {
+        is_tryke_test_decorator(&d.expression, top_body)
+            && !is_tryke_test_cases_decorator(&d.expression, top_body)
+            && matches!(extract_test_modifier(&d.expression), TestModifier::None)
+    });
+    if plain_test_dec {
+        let display_file = file.strip_prefix(root).unwrap_or(file).display();
+        let line = u32::try_from(line_index.line_index(func.range.start()).get()).unwrap_or(0);
+        errors_out.push(format!(
+            "{display_file}:{line}: function '{fn_name}' has both '@test' and \
+             '@test.cases' — use one or the other",
+            fn_name = func.name.id.as_str(),
+        ));
+        return;
+    }
+
+    let labels = match extract_cases(&cases_dec.expression) {
+        Ok(labels) => labels,
+        Err(msg) => {
+            let display_file = file.strip_prefix(root).unwrap_or(file).display();
+            let line = u32::try_from(line_index.line_index(func.range.start()).get()).unwrap_or(0);
+            errors_out.push(format!(
+                "{display_file}:{line}: @test.cases on '{fn_name}': {msg}",
+                fn_name = func.name.id.as_str(),
+            ));
+            return;
+        }
+    };
+
+    // Modifiers (@test.skip / @test.xfail / @test.todo) apply to every
+    // generated case. Look for any marker decorator on the same function.
+    let modifier_dec = func.decorator_list.iter().find(|d| {
+        is_tryke_test_decorator(&d.expression, top_body)
+            && !is_tryke_test_cases_decorator(&d.expression, top_body)
+            && !matches!(extract_test_modifier(&d.expression), TestModifier::None)
+    });
+    let modifier =
+        modifier_dec.map_or(TestModifier::None, |d| extract_test_modifier(&d.expression));
+    let (skip, todo, xfail) = match modifier {
+        TestModifier::Skip(r) => (Some(r), None, None),
+        TestModifier::Todo(d) => (None, Some(d), None),
+        TestModifier::Xfail(r) => (None, None, Some(r)),
+        TestModifier::SkipIf | TestModifier::None => (None, None, None),
+    };
+
+    let display_name = extract_docstring(&func.body);
+    let line_number = u32::try_from(line_index.line_index(func.range.start()).get()).ok();
+    let file_path = Some(file.strip_prefix(root).unwrap_or(file).to_path_buf());
+    let module_path = path_to_module(root, file);
+    let expected_assertions = extract_expected_assertions(&func.body, source, line_index);
+
+    for (i, label) in labels.into_iter().enumerate() {
+        tests_out.push(TestItem {
+            name: func.name.id.as_str().to_owned(),
+            module_path: module_path.clone(),
+            file_path: file_path.clone(),
+            line_number,
+            display_name: display_name.clone(),
+            expected_assertions: expected_assertions.clone(),
+            skip: skip.clone(),
+            todo: todo.clone(),
+            xfail: xfail.clone(),
+            tags: vec![],
+            groups: groups.to_vec(),
+            case_label: Some(label),
+            case_index: u32::try_from(i).ok(),
+            ..TestItem::default()
+        });
+    }
+}
+
+#[expect(clippy::too_many_arguments)]
 fn collect_tests_from_body(
     stmts: &[Stmt],
     top_body: &[Stmt],
@@ -746,12 +969,24 @@ fn collect_tests_from_body(
 ) {
     for stmt in stmts {
         if let Stmt::FunctionDef(func) = stmt {
-            // Check for test decorator
-            if let Some(dec) = func
+            // `@test.cases(...)` and `@test` (or its marker forms) live on
+            // different sub-paths. `@test.cases` emits N items per function;
+            // the plain `@test` path emits exactly one.
+            let cases_dec = func
                 .decorator_list
                 .iter()
-                .find(|d| is_tryke_test_decorator(&d.expression, top_body))
-            {
+                .find(|d| is_tryke_test_cases_decorator(&d.expression, top_body));
+            let test_dec = func
+                .decorator_list
+                .iter()
+                .find(|d| is_tryke_test_decorator(&d.expression, top_body));
+
+            if let Some(cases_dec) = cases_dec {
+                collect_cases_from_func(
+                    func, cases_dec, top_body, root, file, source, line_index, groups, tests_out,
+                    errors_out,
+                );
+            } else if let Some(dec) = test_dec {
                 let display_name = extract_decorator_name(&dec.expression)
                     .or_else(|| extract_docstring(&func.body));
                 let modifier = extract_test_modifier(&dec.expression);
@@ -1179,6 +1414,172 @@ def my_func():
         let items = parse_tests_from_file(dir.path(), &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "my_func");
+    }
+
+    #[test]
+    fn cases_kwargs_form_emits_one_item_per_case() {
+        let source = "@test.cases(
+    zero={\"n\": 0},
+    one={\"n\": 1},
+    two={\"n\": 2},
+)
+def square(n, expected):
+    expect(n * n).to_equal(expected)
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
+        assert_eq!(items.len(), 3, "expected one item per case");
+        for item in &items {
+            assert_eq!(item.name, "square");
+        }
+        let labels: Vec<_> = items
+            .iter()
+            .map(|i| i.case_label.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(labels, vec!["zero", "one", "two"]);
+        let indices: Vec<_> = items.iter().map(|i| i.case_index).collect();
+        assert_eq!(indices, vec![Some(0), Some(1), Some(2)]);
+        // All cases share the same line number (the decorated function's line).
+        assert_eq!(items[0].line_number, items[1].line_number);
+        assert_eq!(items[1].line_number, items[2].line_number);
+    }
+
+    #[test]
+    fn cases_kwargs_form_produces_unique_ids() {
+        let source = "@test.cases(a={}, b={})
+def fn():
+    pass
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let ids: Vec<_> = items.iter().map(TestItem::id).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids[0].ends_with("::fn[a]"), "got {}", ids[0]);
+        assert!(ids[1].ends_with("::fn[b]"), "got {}", ids[1]);
+    }
+
+    #[test]
+    fn cases_typed_form_emits_one_item_per_spec() {
+        let source = "@test.cases(
+    test.case(\"zero\", n=0, expected=0),
+    test.case(\"my test\", n=1, expected=1),
+    test.case(\"2 + 3\", n=2, expected=4),
+)
+def square(n, expected):
+    pass
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
+        assert_eq!(items.len(), 3, "expected one item per test.case spec");
+        let labels: Vec<_> = items
+            .iter()
+            .map(|i| i.case_label.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(labels, vec!["zero", "my test", "2 + 3"]);
+    }
+
+    #[test]
+    fn cases_typed_form_rejects_non_literal_label() {
+        let source = "label = \"dynamic\"
+@test.cases(test.case(label, n=0))
+def fn(n):
+    pass
+";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_file(dir.path(), &file);
+        assert!(parsed.tests.is_empty());
+        assert!(
+            parsed.errors.iter().any(|e| e.contains("test.case")),
+            "expected an error mentioning test.case, got {:?}",
+            parsed.errors
+        );
+    }
+
+    #[test]
+    fn cases_list_form_emits_one_item_per_entry() {
+        let source = "@test.cases([
+    (\"2 + 3\", {\"a\": 2, \"b\": 3, \"sum\": 5}),
+    (\"-1 + 1\", {\"a\": -1, \"b\": 1, \"sum\": 0}),
+])
+def add(a, b, sum):
+    pass
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
+        assert_eq!(items.len(), 2);
+        let labels: Vec<_> = items
+            .iter()
+            .map(|i| i.case_label.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(labels, vec!["2 + 3", "-1 + 1"]);
+    }
+
+    #[test]
+    fn cases_inherits_describe_groups() {
+        let source = "from tryke import describe
+with describe(\"math\"):
+    @test.cases(zero={}, one={})
+    def square():
+        pass
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
+        assert_eq!(items.len(), 2);
+        for item in &items {
+            assert_eq!(item.groups, vec!["math".to_string()]);
+        }
+    }
+
+    #[test]
+    fn cases_composes_with_skip_modifier() {
+        let source = "@test.skip(\"WIP\")
+@test.cases(a={}, b={})
+def fn():
+    pass
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
+        assert_eq!(items.len(), 2);
+        for item in &items {
+            assert_eq!(item.skip.as_deref(), Some("WIP"));
+        }
+    }
+
+    #[test]
+    fn cases_plain_test_unaffected() {
+        // Sanity: pre-existing @test decorator path should still produce
+        // exactly one item with case_label=None.
+        let source = "@test
+def plain():
+    pass
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].case_label, None);
+        assert_eq!(items[0].case_index, None);
+    }
+
+    #[test]
+    fn cases_non_literal_form_emits_error() {
+        let source = "@test.cases(build_cases())
+def fn():
+    pass
+";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_file(dir.path(), &file);
+        // Non-literal decorator argument should not silently produce
+        // a test — surface a diagnostic instead.
+        assert!(
+            parsed.tests.is_empty(),
+            "expected no tests for non-literal @test.cases, got {:?}",
+            parsed.tests
+        );
+        assert!(
+            parsed.errors.iter().any(|e| e.contains("test.cases")),
+            "expected an error mentioning test.cases, got {:?}",
+            parsed.errors
+        );
     }
 
     #[test]

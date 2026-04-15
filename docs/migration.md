@@ -230,15 +230,71 @@ Key differences:
 - `Depends()` is fully typed — type checkers see the correct return type
 - No `conftest.py` — fixtures live in the same file as the tests they serve
 
-### No parametrize (yet)
+### Parametrize → `@test.cases`
 
-Use a loop with named tests for now:
+**pytest:**
 
 ```python
-for x, expected in [(1, 2), (2, 3), (3, 4)]:
-    @test(name=f"increment {x}")
-    def _(x=x, expected=expected):
-        expect(x + 1).to_equal(expected)
+import pytest
+
+@pytest.mark.parametrize("n,expected", [(0, 0), (1, 1), (10, 100)])
+def test_square(n, expected):
+    assert n * n == expected
 ```
 
-Parametrize support is on the roadmap.
+**tryke** — typed form (recommended; statically checked under mypy/pyright):
+
+```python
+@test.cases(
+    test.case("zero", n=0, expected=0),
+    test.case("one",  n=1, expected=1),
+    test.case("ten",  n=10, expected=100),
+)
+def square(n: int, expected: int):
+    expect(n * n).to_equal(expected)
+```
+
+Labels are arbitrary strings — `"my test"`, `"2 + 3"`, `"negative one"` all work and survive `-k` filtering end-to-end.
+
+**tryke** — legacy kwargs form (labels are identifiers; untyped):
+
+```python
+@test.cases(
+    zero={"n": 0, "expected": 0},
+    one={"n": 1, "expected": 1},
+    ten={"n": 10, "expected": 100},
+)
+def square(n: int, expected: int):
+    expect(n * n).to_equal(expected)
+```
+
+**tryke** — legacy list form (string-literal labels; untyped):
+
+```python
+@test.cases([
+    ("2 + 3", {"a": 2, "b": 3, "sum": 5}),
+    ("-1 + 1", {"a": -1, "b": 1, "sum": 0}),
+])
+def add(a: int, b: int, sum: int):
+    expect(a + b).to_equal(sum)
+```
+
+Each case collects as its own test ID (`fn[label]`), composes with `describe()` blocks, `@fixture`/`Depends()`, and `@test.skip`/`xfail`. See [cases](concepts/cases.md) for the full reference.
+
+#### Runner parametrize (`[asyncio, trio]`)
+
+**pytest** — often seen with `pytest-asyncio` / `anyio`:
+
+```python
+@pytest.mark.parametrize("runner", [asyncio, trio])
+async def test_under_runner(runner):
+    ...
+```
+
+**tryke**:
+
+```python
+@test.cases(asyncio={"runner": asyncio}, trio={"runner": trio})
+async def under_runner(runner):
+    ...
+```

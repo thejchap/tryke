@@ -26,6 +26,7 @@ nav = [
   { "Concepts" = [
     "concepts/discovery.md",
     "concepts/soft-assertions.md",
+    "concepts/cases.md",
     "concepts/concurrency.md",
     "concepts/client-server.md",
   ] },

@@ -32,6 +32,8 @@ This is especially valuable when tests are slow (network calls, database setup) 
 
 Each soft assertion produces its own diagnostic output showing the expected and actual values. When multiple assertions fail, you see all of them in the test report — not just the first one.
 
+Soft assertions apply **per-case** for [parametrized tests](cases.md). Each case runs all its assertions independently; a failure inside one case never short-circuits the next case.
+
 ## `.fatal()` for early stopping
 
 Sometimes continuing after a failure doesn't make sense. Chain `.fatal()` to stop the test immediately:

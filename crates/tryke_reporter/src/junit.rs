@@ -77,13 +77,8 @@ impl<W: io::Write> Reporter for JUnitReporter<W> {
         );
 
         for result in &self.results {
-            let name = xml_escape(
-                result
-                    .test
-                    .display_name
-                    .as_deref()
-                    .unwrap_or(&result.test.name),
-            );
+            let display = result.test.display_label();
+            let name = xml_escape(&display);
             let classname = if result.test.groups.is_empty() {
                 xml_escape(&result.test.module_path)
             } else {

@@ -401,15 +401,18 @@ class HookExecutor:
         test_fn: _FixtureFn,
         *,
         groups: list[str],
+        case_args: tuple[object, ...] = (),
         case_kwargs: CaseArgs | None = None,
     ) -> None:
         """Execute fixtures in correct order around *test_fn*.
 
-        When *case_kwargs* is provided (from ``@test.cases``), its entries
-        are merged into the kwargs passed to *test_fn* alongside the
-        fixture-injected values. A collision between a case kwarg and a
-        fixture parameter raises ``TypeError`` — case parameters may not
-        shadow ``Depends()`` parameters.
+        When *case_args* / *case_kwargs* are provided (from
+        ``@test.cases``), ``case_args`` is splatted positionally and
+        ``case_kwargs`` entries are merged into the kwargs passed to
+        *test_fn* alongside the fixture-injected values. A collision
+        between a case kwarg and a fixture parameter raises
+        ``TypeError`` — case parameters may not shadow ``Depends()``
+        parameters.
         """
         # Build the scope chain: [], ["a"], ["a", "b"], ...
         scopes: list[tuple[str, ...]] = [
@@ -454,9 +457,9 @@ class HookExecutor:
                     raise TypeError(msg)
                 test_kwargs = {**test_kwargs, **case_kwargs}
             if inspect.iscoroutinefunction(test_fn):
-                asyncio.run(test_fn(**test_kwargs))
+                asyncio.run(test_fn(*case_args, **test_kwargs))
             else:
-                test_fn(**test_kwargs)
+                test_fn(*case_args, **test_kwargs)
         finally:
             # Teardown per-test generator fixtures in reverse setup order.
             self._resolver.teardown_test_generators()

@@ -4,15 +4,40 @@
 
 Each generated case is a first-class test: it has its own ID (`path::fn[label]`), its own row in reporters, and can be filtered, skipped, or re-run independently.
 
-## Two forms
+## Three forms
 
-### Kwargs form — identifier labels
+### Typed form — `test.case(...)` specs (recommended)
 
-The common form. Each keyword is a case label; the value is a dict of arguments passed to the function:
+Pass one `test.case(label, ...)` spec per row. Labels are arbitrary strings (spaces, math operators, punctuation all fine), and the kwargs you pass are checked against the decorated function's signature by `mypy` / `pyright` via a [PEP 612](https://peps.python.org/pep-0612/) `ParamSpec`:
 
 ```python
 from tryke import expect, test
 
+@test.cases(
+    test.case("zero",    n=0,  expected=0),
+    test.case("one",     n=1,  expected=1),
+    test.case("my test", n=10, expected=100),
+)
+def square(n: int, expected: int):
+    expect(n * n).to_equal(expected)
+```
+
+This collects as three tests: `square[zero]`, `square[one]`, `square[my test]`.
+
+Typing caught statically under `mypy` / `pyright`:
+
+- **Unknown kwarg** — `test.case("bad", n=0, expcted=0)` against `square(n, expected)` — `expcted` isn't in the signature.
+- **Wrong value type** — `test.case("bad", n="zero", expected=0)` against `n: int` — `str` doesn't match.
+- **Missing required kwarg** — `test.case("bad", n=0)` — the signature requires `expected`.
+- **Signature drift** — changing `def square(n: int, ...)` to `def square(n: str, ...)` after cases are written — the cases stop unifying with `_P`.
+
+`ty` (Astral's type checker, as of 0.0.21) does not yet fully enforce the PEP 612 `Generic[P]` constructor pattern this API uses — it will accept the above negatives silently. Runtime validation still catches label collisions and inconsistent key sets across cases regardless of the type checker.
+
+### Legacy kwargs form — identifier labels
+
+Each keyword is a case label; the value is a dict of arguments passed to the function. This form loses static case-value typing:
+
+```python
 @test.cases(
     zero={"n": 0, "expected": 0},
     one={"n": 1, "expected": 1},
@@ -22,11 +47,9 @@ def square(n: int, expected: int):
     expect(n * n).to_equal(expected)
 ```
 
-This collects as three tests: `square[zero]`, `square[one]`, `square[ten]`.
+### Legacy list form — arbitrary string labels
 
-### List form — arbitrary string labels
-
-When you want a label that isn't a valid Python identifier (spaces, operators, punctuation), use a list of `(label, args)` tuples:
+For labels that aren't valid Python identifiers. Also loses static case-value typing:
 
 ```python
 @test.cases([
@@ -37,6 +60,8 @@ When you want a label that isn't a valid Python identifier (spaces, operators, p
 def add(a: int, b: int, sum: int):
     expect(a + b).to_equal(sum)
 ```
+
+Prefer the typed form for new code. The legacy forms will continue to work for now but are no longer the recommended API.
 
 ## Composition rules
 
@@ -99,13 +124,16 @@ Both cases are skipped (or marked xfail) — there's currently no way to mark in
 
 ## The static-analysis constraint
 
-Tryke discovers tests by walking the AST without importing your code. That means `@test.cases(...)` must be **literal**: labels are string or identifier literals, and the top-level shape (kwargs vs. list of tuples) must be visible in the source.
+Tryke discovers tests by walking the AST without importing your code. That means `@test.cases(...)` must be **literal**: labels are string or identifier literals, and the top-level shape (typed specs, kwargs, or list of tuples) must be visible in the source.
 
 | Allowed | Rejected |
 |---------|----------|
+| `@test.cases(test.case("a", n=1))` | `@test.cases(*specs)` |
 | `@test.cases(a={"n": 1})` | `@test.cases(build_cases())` |
 | `@test.cases([("a", {"n": 1})])` | `@test.cases([*generated])` |
-| `@test.cases(a={"n": 10**6})` — values can be expressions | `@test.cases(**labels)` |
+| `@test.cases(test.case("big", n=10**6))` — kwarg values can be expressions | `@test.cases(**labels)` |
+
+For the typed form specifically: the label passed to `test.case(...)` must be a string literal. Dynamic labels (`test.case(label_var, ...)`) are rejected at discovery time.
 
 Non-literal decorator shapes emit a discovery error and the tests are skipped. This mirrors the same constraint that applies to `describe("name")`.
 

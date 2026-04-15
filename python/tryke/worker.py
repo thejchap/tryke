@@ -587,6 +587,7 @@ class Worker:
                 "",
             )
 
+        case_args: tuple[object, ...] = ()
         case_kwargs: CaseArgs | None = None
         if case_label is not None:
             if not isinstance(fn, CasesMarked):
@@ -602,19 +603,22 @@ class Worker:
                     "",
                 )
             cases = fn.__tryke_cases__
-            if case_label not in cases:
+            entry = next((e for e in cases if e.label == case_label), None)
+            if entry is None:
+                known = sorted(e.label for e in cases)
                 return _failed(
                     0,
                     (
                         f"{function_name} has no case labeled "
-                        f"{case_label!r}; known cases: {sorted(cases)}"
+                        f"{case_label!r}; known cases: {known}"
                     ),
                     "",
                     [],
                     "",
                     "",
                 )
-            case_kwargs = cases[case_label]
+            case_args = entry.args
+            case_kwargs = entry.kwargs
 
         # Runtime skip/todo (handles skip_if resolved at import time)
         if isinstance(fn, _SkipMarked):
@@ -645,12 +649,13 @@ class Worker:
                         executor.run_test(
                             fn,
                             groups=groups or [],
+                            case_args=case_args,
                             case_kwargs=case_kwargs,
                         )
                     elif inspect.iscoroutinefunction(fn):
-                        asyncio.run(fn(**(case_kwargs or {})))
+                        asyncio.run(fn(*case_args, **(case_kwargs or {})))
                     else:
-                        fn(**(case_kwargs or {}))
+                        fn(*case_args, **(case_kwargs or {}))
 
                 ms = int((time.monotonic() - start) * 1000)
                 out = stdout_buf.getvalue()

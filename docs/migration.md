@@ -242,7 +242,21 @@ def test_square(n, expected):
     assert n * n == expected
 ```
 
-**tryke** — kwargs form (labels are identifiers):
+**tryke** — typed form (recommended; statically checked under mypy/pyright):
+
+```python
+@test.cases(
+    test.case("zero", n=0, expected=0),
+    test.case("one",  n=1, expected=1),
+    test.case("ten",  n=10, expected=100),
+)
+def square(n: int, expected: int):
+    expect(n * n).to_equal(expected)
+```
+
+Labels are arbitrary strings — `"my test"`, `"2 + 3"`, `"negative one"` all work and survive `-k` filtering end-to-end.
+
+**tryke** — legacy kwargs form (labels are identifiers; untyped):
 
 ```python
 @test.cases(
@@ -254,7 +268,7 @@ def square(n: int, expected: int):
     expect(n * n).to_equal(expected)
 ```
 
-**tryke** — list form (labels are arbitrary string literals):
+**tryke** — legacy list form (string-literal labels; untyped):
 
 ```python
 @test.cases([

@@ -449,9 +449,33 @@ fn extract_decorator_tags(expr: &Expr) -> Vec<String> {
     vec![]
 }
 
+/// Returns `true` if `expr` is a call to `test.case(...)` or `tryke.test.case(...)`.
+fn is_test_case_call(expr: &Expr) -> bool {
+    let Expr::Call(call) = expr else {
+        return false;
+    };
+    let Expr::Attribute(attr) = &*call.func else {
+        return false;
+    };
+    if attr.attr.id.as_str() != "case" {
+        return false;
+    }
+    match &*attr.value {
+        Expr::Name(n) => n.id.as_str() == "test",
+        Expr::Attribute(a) => {
+            a.attr.id.as_str() == "test"
+                && matches!(&*a.value, Expr::Name(n) if n.id.as_str() == "tryke")
+        }
+        _ => false,
+    }
+}
+
 /// Extract case labels from a `@test.cases(...)` decorator.
 ///
-/// Supports two literal forms:
+/// Supports three literal forms:
+/// - typed: `@test.cases(test.case("label1", ...), test.case("label2", ...))`
+///   — each positional argument is a `test.case(...)` call with a string
+///   literal label as its first positional argument
 /// - kwargs: `@test.cases(zero={...}, one={...})` — each keyword name is a label
 /// - list: `@test.cases([("label1", {...}), ("label2", {...})])` — first tuple
 ///   element is a string-literal label
@@ -468,7 +492,7 @@ fn extract_cases(expr: &Expr) -> Result<Vec<String>, String> {
 
     if has_args && has_kwargs {
         return Err(
-            "test.cases() accepts either a positional list or keyword arguments, not both"
+            "test.cases() accepts either positional specs/list or keyword arguments, not both"
                 .to_owned(),
         );
     }
@@ -487,12 +511,37 @@ fn extract_cases(expr: &Expr) -> Result<Vec<String>, String> {
     }
 
     if has_args {
+        // Typed form: every positional arg is a `test.case(...)` call.
+        if call.arguments.args.iter().all(is_test_case_call) {
+            let mut labels = Vec::with_capacity(call.arguments.args.len());
+            for (i, elt) in call.arguments.args.iter().enumerate() {
+                let Expr::Call(inner) = elt else {
+                    return Err(format!(
+                        "test.cases() positional arg {i} must be a test.case(...) call"
+                    ));
+                };
+                let Some(first) = inner.arguments.args.first() else {
+                    return Err(format!(
+                        "test.cases() positional arg {i}: test.case() requires a label"
+                    ));
+                };
+                let Expr::StringLiteral(s) = first else {
+                    return Err(format!(
+                        "test.cases() positional arg {i}: test.case() label must be a string literal"
+                    ));
+                };
+                labels.push(s.value.to_str().to_owned());
+            }
+            return Ok(labels);
+        }
+
         if call.arguments.args.len() != 1 {
             return Err("test.cases() positional form takes exactly one list argument".to_owned());
         }
         let Expr::List(list) = &call.arguments.args[0] else {
             return Err(
-                "test.cases() positional argument must be a list literal of (label, args) tuples"
+                "test.cases() positional argument must be a list literal of (label, args) tuples \
+                 or a sequence of test.case(...) calls"
                     .to_owned(),
             );
         };
@@ -518,7 +567,7 @@ fn extract_cases(expr: &Expr) -> Result<Vec<String>, String> {
         return Ok(labels);
     }
 
-    Err("test.cases() requires either keyword arguments or a positional list".to_owned())
+    Err("test.cases() requires at least one case".to_owned())
 }
 
 fn extract_decorator_name(expr: &Expr) -> Option<String> {
@@ -1407,6 +1456,43 @@ def fn():
         assert_eq!(ids.len(), 2);
         assert!(ids[0].ends_with("::fn[a]"), "got {}", ids[0]);
         assert!(ids[1].ends_with("::fn[b]"), "got {}", ids[1]);
+    }
+
+    #[test]
+    fn cases_typed_form_emits_one_item_per_spec() {
+        let source = "@test.cases(
+    test.case(\"zero\", n=0, expected=0),
+    test.case(\"my test\", n=1, expected=1),
+    test.case(\"2 + 3\", n=2, expected=4),
+)
+def square(n, expected):
+    pass
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
+        assert_eq!(items.len(), 3, "expected one item per test.case spec");
+        let labels: Vec<_> = items
+            .iter()
+            .map(|i| i.case_label.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(labels, vec!["zero", "my test", "2 + 3"]);
+    }
+
+    #[test]
+    fn cases_typed_form_rejects_non_literal_label() {
+        let source = "label = \"dynamic\"
+@test.cases(test.case(label, n=0))
+def fn(n):
+    pass
+";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_file(dir.path(), &file);
+        assert!(parsed.tests.is_empty());
+        assert!(
+            parsed.errors.iter().any(|e| e.contains("test.case")),
+            "expected an error mentioning test.case, got {:?}",
+            parsed.errors
+        );
     }
 
     #[test]

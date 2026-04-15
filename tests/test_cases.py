@@ -1,8 +1,22 @@
 from __future__ import annotations
 
 from tryke import CasesMarked, Depends, describe, expect, fixture, test
+from tryke.expect import _build_cases_table
 from tryke.hooks import HookExecutor
 from tryke.hooks import fixture as _fixture
+
+with describe("test.cases typed form (test.case)"):
+
+    @test.cases(
+        test.case("zero", n=0, expected=0),
+        test.case("one", n=1, expected=1),
+        test.case("ten", n=10, expected=100),
+        test.case("my test", n=2, expected=4),
+        test.case("2 + 3", n=5, expected=25),
+    )
+    def square_typed(n: int, expected: int) -> None:
+        expect(n * n).to_equal(expected)
+
 
 with describe("test.cases kwargs form"):
 
@@ -48,11 +62,12 @@ with describe("test.cases decorator returns function-like object"):
         if not isinstance(fn, CasesMarked):
             msg = "decorator should produce a CasesMarked function"
             raise TypeError(msg)
-        cases = fn.__tryke_cases__
-        expect(isinstance(cases, dict)).to_be_truthy()
-        expect(list(cases.keys())).to_equal(["a", "b"])
-        expect(cases["a"]).to_equal({"x": 1})
-        expect(cases["b"]).to_equal({"x": 2})
+        table = fn.__tryke_cases__
+        expect(isinstance(table, tuple)).to_be_truthy()
+        expect([e.label for e in table]).to_equal(["a", "b"])
+        expect(table[0].kwargs).to_equal({"x": 1})
+        expect(table[1].kwargs).to_equal({"x": 2})
+        expect(table[0].args).to_equal(())
 
     @test
     def cases_list_form_stamps_attribute() -> None:
@@ -63,16 +78,34 @@ with describe("test.cases decorator returns function-like object"):
         if not isinstance(fn, CasesMarked):
             msg = "decorator should produce a CasesMarked function"
             raise TypeError(msg)
-        expect(list(fn.__tryke_cases__.keys())).to_equal(["first", "second"])
+        expect([e.label for e in fn.__tryke_cases__]).to_equal(["first", "second"])
+
+    @test
+    def cases_typed_form_stamps_attribute() -> None:
+        @test.cases(
+            test.case("my test", n=0, expected=0),
+            test.case("other test", n=1, expected=1),
+        )
+        def fn(n: int, expected: int) -> None:  # noqa: ARG001
+            return
+
+        if not isinstance(fn, CasesMarked):
+            msg = "decorator should produce a CasesMarked function"
+            raise TypeError(msg)
+        table = fn.__tryke_cases__
+        expect([e.label for e in table]).to_equal(["my test", "other test"])
+        expect(table[0].kwargs).to_equal({"n": 0, "expected": 0})
+        expect(table[1].kwargs).to_equal({"n": 1, "expected": 1})
 
     @test
     def cases_rejects_mixed_forms() -> None:
+        # ty correctly rejects the overload combination at call sites,
+        # so we exercise the runtime dispatcher directly to verify the
+        # complementary runtime check still raises.
         def attempt() -> None:
-            @test.cases([("a", {})], b={})
-            def _fn() -> None:
-                pass
+            _build_cases_table(([("a", {})],), {"b": {}})
 
-        expect(attempt).to_raise(TypeError, match="list form")
+        expect(attempt).to_raise(TypeError, match="positional or kwargs")
 
     @test
     def cases_rejects_no_args() -> None:
@@ -82,6 +115,30 @@ with describe("test.cases decorator returns function-like object"):
                 pass
 
         expect(attempt).to_raise(TypeError)
+
+    @test
+    def cases_rejects_duplicate_labels_typed_form() -> None:
+        def attempt() -> None:
+            @test.cases(
+                test.case("same", n=0, expected=0),
+                test.case("same", n=1, expected=1),
+            )
+            def _fn(n: int, expected: int) -> None:  # noqa: ARG001
+                return
+
+        expect(attempt).to_raise(TypeError, match="duplicate case label 'same'")
+
+    @test
+    def cases_rejects_inconsistent_key_sets() -> None:
+        def attempt() -> None:
+            @test.cases(
+                test.case("a", n=0, expected=0),
+                test.case("b", n=1),
+            )
+            def _fn(n: int, expected: int = 0) -> None:  # noqa: ARG001
+                return
+
+        expect(attempt).to_raise(TypeError, match="missing")
 
 
 with describe("test.cases composes with fixtures"):

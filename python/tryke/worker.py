@@ -65,6 +65,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict
 
 from tryke.expect import (
+    CaseArgs,
+    CasesMarked,
     ExpectationError,
     SoftContext,
     SoftFailure,
@@ -446,11 +448,14 @@ class Worker:
             groups = (
                 [str(g) for g in raw_groups] if isinstance(raw_groups, list) else []
             )
+            case_label_raw = params.get("case_label")
+            case_label = str(case_label_raw) if case_label_raw is not None else None
             return self._run_test(
                 self._require_str(params, "module", method),
                 self._require_str(params, "function", method),
                 xfail=(str(xfail_raw) if xfail_raw is not None else None),
                 groups=groups,
+                case_label=case_label,
             )
         if method == "run_doctest":
             return self._run_doctest(
@@ -560,13 +565,14 @@ class Worker:
         finally:
             _set_soft_context(None)
 
-    def _run_test(  # noqa: C901, PLR0911, PLR0912
+    def _run_test(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
         module_name: str,
         function_name: str,
         *,
         xfail: str | None = None,
         groups: list[str] | None = None,
+        case_label: str | None = None,
     ) -> _TestResult:
         try:
             mod = self._get_module(module_name)
@@ -580,6 +586,35 @@ class Worker:
                 "",
                 "",
             )
+
+        case_kwargs: CaseArgs | None = None
+        if case_label is not None:
+            if not isinstance(fn, CasesMarked):
+                return _failed(
+                    0,
+                    (
+                        f"{function_name} was dispatched with case_label="
+                        f"{case_label!r} but has no __tryke_cases__ attribute"
+                    ),
+                    "",
+                    [],
+                    "",
+                    "",
+                )
+            cases = fn.__tryke_cases__
+            if case_label not in cases:
+                return _failed(
+                    0,
+                    (
+                        f"{function_name} has no case labeled "
+                        f"{case_label!r}; known cases: {sorted(cases)}"
+                    ),
+                    "",
+                    [],
+                    "",
+                    "",
+                )
+            case_kwargs = cases[case_label]
 
         # Runtime skip/todo (handles skip_if resolved at import time)
         if isinstance(fn, _SkipMarked):
@@ -607,11 +642,15 @@ class Worker:
                 ):
                     executor = self._get_executor(module_name)
                     if executor is not None:
-                        executor.run_test(fn, groups=groups or [])
+                        executor.run_test(
+                            fn,
+                            groups=groups or [],
+                            case_kwargs=case_kwargs,
+                        )
                     elif inspect.iscoroutinefunction(fn):
-                        asyncio.run(fn())
+                        asyncio.run(fn(**(case_kwargs or {})))
                     else:
-                        fn()
+                        fn(**(case_kwargs or {}))
 
                 ms = int((time.monotonic() - start) * 1000)
                 out = stdout_buf.getvalue()

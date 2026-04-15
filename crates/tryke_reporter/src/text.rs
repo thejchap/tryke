@@ -177,11 +177,8 @@ impl<W: io::Write> Reporter for TextReporter<W> {
             "  ".repeat(test_groups.len() + 1)
         };
 
-        let display = result
-            .test
-            .display_name
-            .as_deref()
-            .unwrap_or(&result.test.name);
+        let display = result.test.display_label();
+        let display = display.as_str();
         match &result.outcome {
             TestOutcome::Passed => {
                 if !matches!(self.verbosity, Verbosity::Quiet) {
@@ -385,7 +382,7 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                 current_groups.clone_from(&test.groups);
             }
             let group_indent = "  ".repeat(test.groups.len());
-            let display = test.display_name.as_deref().unwrap_or(&test.name);
+            let display = test.display_label();
             let _ = writeln!(self.writer, "  {group_indent}{}", display.dimmed());
         }
         let _ = writeln!(self.writer);
@@ -878,6 +875,53 @@ mod tests {
         let out = String::from_utf8_lossy(&r.into_writer()).into_owned();
         assert!(out.contains("✓"));
         assert!(out.contains("expect(x).not_.to_be_none()"));
+    }
+
+    #[test]
+    fn case_label_appended_to_name_in_output() {
+        let mut r = reporter();
+        r.on_test_complete(&TestResult {
+            test: TestItem {
+                name: "square".into(),
+                module_path: "tests.test_math".into(),
+                case_label: Some("zero".into()),
+                case_index: Some(0),
+                ..Default::default()
+            },
+            outcome: TestOutcome::Passed,
+            duration: Duration::from_millis(1),
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+        let out = output(&r);
+        assert!(out.contains("square[zero]"), "out: {out}");
+    }
+
+    #[test]
+    fn case_label_appears_in_collect_only_output() {
+        let mut r = reporter();
+        let tests = vec![
+            TestItem {
+                name: "square".into(),
+                module_path: "tests.test_math".into(),
+                file_path: Some(PathBuf::from("tests/test_math.py")),
+                case_label: Some("zero".into()),
+                case_index: Some(0),
+                ..Default::default()
+            },
+            TestItem {
+                name: "square".into(),
+                module_path: "tests.test_math".into(),
+                file_path: Some(PathBuf::from("tests/test_math.py")),
+                case_label: Some("one".into()),
+                case_index: Some(1),
+                ..Default::default()
+            },
+        ];
+        r.on_collect_complete(&tests);
+        let out = output(&r);
+        assert!(out.contains("square[zero]"), "out: {out}");
+        assert!(out.contains("square[one]"), "out: {out}");
     }
 
     #[test]

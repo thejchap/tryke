@@ -129,6 +129,7 @@ impl WorkerProcess {
             function: test.name.clone(),
             xfail: test.xfail.clone(),
             groups: test.groups.clone(),
+            case_label: test.case_label.clone(),
         })?;
         let wire: RunTestResultWire = self.call("run_test", Some(params)).await?;
         Ok(convert_result(test.clone(), wire))

@@ -59,6 +59,11 @@ pub struct RunTestParams {
     pub xfail: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
+    /// For `@test.cases(...)` items, the label of the case to dispatch.
+    /// The worker looks up `fn.__tryke_cases__[case_label]` and passes the
+    /// stored kwargs when invoking the test function.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub case_label: Option<String>,
 }
 
 /// Wire format for a single fixture sent to the Python worker.

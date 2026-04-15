@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, Protocol, overload, runtime_checkable
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Callable, Coroutine, Mapping
     from typing import Any, ClassVar, Self
 
     class _SupportsGT(Protocol):
@@ -35,10 +35,19 @@ if TYPE_CHECKING:
         def __call__(self) -> object: ...
 
 
-type _Fn = Callable[[], None]
-type _AsyncFn = Callable[[], Coroutine[Any, Any, None]]
+type _Fn = Callable[..., None]
+type _AsyncFn = Callable[..., Coroutine[Any, Any, None]]
 type _AnyTestFn = _Fn | _AsyncFn
 type _Decorator = Callable[[_AnyTestFn], _AnyTestFn]
+
+#: The kwargs a single ``@test.cases`` case passes to its test function.
+#: Values are typed as ``object`` because each test is free to declare its
+#: own parameter types — the worker passes values through unchanged and the
+#: test function's own signature is the source of truth for argument shapes.
+type CaseArgs = Mapping[str, object]
+
+#: Full parametrize table: case label → per-case kwargs.
+type CaseTable = Mapping[str, CaseArgs]
 
 
 @runtime_checkable
@@ -68,9 +77,99 @@ class _XfailMarked(Protocol):
     __tryke_xfail__: str
 
 
+@runtime_checkable
+class CasesMarked(Protocol):
+    """A function stamped with ``__tryke_cases__``.
+
+    The attribute maps case labels to the kwargs dict that should be passed
+    to the function when that case runs.
+    """
+
+    def __call__(self, *args: object, **kwargs: object) -> None: ...
+
+    __tryke_cases__: CaseTable
+
+
 def _stamp(fn: object, attr: str, value: str) -> None:
     """Stamp a marker attribute on a function object."""
     setattr(fn, attr, value)
+
+
+_CASES_ATTR = "__tryke_cases__"
+_CASES_TUPLE_LEN = 2
+
+
+class CaseEntry(NamedTuple):
+    """One row in the positional ``@test.cases([...])`` list form.
+
+    Users pass plain ``(label, args)`` tuples at the call site; the
+    decorator normalizes them into ``CaseEntry`` before building the table,
+    so downstream code can rely on a named shape.
+    """
+
+    label: str
+    args: CaseArgs
+
+
+def _stamp_cases(fn: object, table: CaseTable) -> None:
+    """Stamp the ``__tryke_cases__`` attribute on a function object."""
+    setattr(fn, _CASES_ATTR, table)
+
+
+def _validate_case_entry(index: int, item: object) -> CaseEntry:
+    """Coerce one positional ``@test.cases`` element into a ``CaseEntry``."""
+    if not (isinstance(item, tuple) and len(item) == _CASES_TUPLE_LEN):
+        msg = f"test.cases() list element {index} must be a (label, args) tuple"
+        raise TypeError(msg)
+    label, raw_args = item
+    if not isinstance(label, str):
+        msg = f"test.cases() list element {index} label must be a string"
+        raise TypeError(msg)
+    if not isinstance(raw_args, dict):
+        msg = f"test.cases() list element {index} args must be a dict"
+        raise TypeError(msg)
+    args: dict[str, object] = {}
+    for key, value in raw_args.items():
+        if not isinstance(key, str):
+            msg = (
+                f"test.cases() list element {index} args keys must be strings "
+                f"(got {type(key).__name__})"
+            )
+            raise TypeError(msg)
+        args[key] = value
+    return CaseEntry(label=label, args=args)
+
+
+def _cases_list_to_table(raw: object) -> CaseTable:
+    """Validate and convert a positional ``@test.cases([...])`` list.
+
+    Raises:
+        TypeError: If any element is not a ``(label: str, args: dict)`` tuple.
+    """
+    if not isinstance(raw, list):
+        msg = "test.cases() positional argument must be a list of (label, args) tuples"
+        raise TypeError(msg)
+    entries = [_validate_case_entry(i, item) for i, item in enumerate(raw)]
+    return {entry.label: entry.args for entry in entries}
+
+
+def _build_cases_table(
+    positional: tuple[list[tuple[str, CaseArgs]], ...],
+    kwargs: dict[str, CaseArgs],
+) -> CaseTable:
+    """Resolve ``@test.cases(...)`` arguments to a `{label: args}` table."""
+    if positional and kwargs:
+        msg = "test.cases() accepts either list form or kwargs form, not both"
+        raise TypeError(msg)
+    if kwargs:
+        return dict(kwargs)
+    if positional:
+        if len(positional) != 1:
+            msg = "test.cases() positional form takes exactly one list argument"
+            raise TypeError(msg)
+        return _cases_list_to_table(positional[0])
+    msg = "test.cases() requires at least one case (kwargs or a list)"
+    raise TypeError(msg)
 
 
 class _Marker:
@@ -337,6 +436,54 @@ class _TestBuilder:
             return fn
 
         def decorator(f: Callable[[], None]) -> Callable[[], None]:
+            return f
+
+        return decorator
+
+    def cases(
+        self,
+        *positional: list[tuple[str, CaseArgs]],
+        **kwargs: CaseArgs,
+    ) -> Callable[[_Fn], _Fn]:
+        """Parametrize a test over multiple named cases.
+
+        Two forms are supported:
+
+        - Keyword form — each kwarg name is a case label, each value is a
+          dict of arguments passed to the function:
+
+              @test.cases(
+                  zero={"n": 0, "squared": 0},
+                  one={"n": 1, "squared": 1},
+              )
+              def square(n, squared):
+                  expect(n * n).to_equal(squared)
+
+        - Positional list form — a list of (label, args) tuples. Use this
+          when labels are not valid Python identifiers:
+
+              @test.cases([
+                  ("2 + 3", {"a": 2, "b": 3, "sum": 5}),
+                  ("-1 + 1", {"a": -1, "b": 1, "sum": 0}),
+              ])
+              def add(a, b, sum):
+                  expect(a + b).to_equal(sum)
+
+        Composes with ``@fixture``/``Depends()`` parameters, ``describe(...)``
+        blocks, and ``@test.skip``/``@test.xfail`` modifiers.
+
+        Args:
+            positional: A single positional list of (label, args) tuples.
+            kwargs: Case-label → args-dict mapping.
+
+        Raises:
+            TypeError: If neither form is provided, both are mixed, or the
+                positional argument is not a list of (str, dict) tuples.
+        """
+        table = _build_cases_table(positional, kwargs)
+
+        def decorator(f: _Fn) -> _Fn:
+            _stamp_cases(f, table)
             return f
 
         return decorator

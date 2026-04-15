@@ -70,14 +70,41 @@ pub struct TestItem {
     /// module-level docstring.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doctest_object: Option<String>,
+    /// For tests declared with `@test.cases(...)`, the label of the specific
+    /// case this item represents (e.g. `"zero"` for `@test.cases(zero=...)`).
+    /// `None` for plain `@test` functions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub case_label: Option<String>,
+    /// Zero-based index of this case within its parent function, preserving
+    /// declaration order. `None` when `case_label` is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub case_index: Option<u32>,
 }
 
 impl TestItem {
     #[must_use]
     pub fn id(&self) -> String {
-        match &self.file_path {
+        let base = match &self.file_path {
             Some(path) => format!("{}::{}", path.display(), self.name),
             None => format!("{}::{}", self.module_path, self.name),
+        };
+        match &self.case_label {
+            Some(label) => format!("{base}[{label}]"),
+            None => base,
+        }
+    }
+
+    /// Human-readable label for reporters.
+    ///
+    /// Returns the `display_name` override if present, otherwise the bare
+    /// function name. For `@test.cases(...)` items, appends `[case_label]`
+    /// so every row in the output is disambiguated.
+    #[must_use]
+    pub fn display_label(&self) -> String {
+        let base = self.display_name.as_deref().unwrap_or(&self.name);
+        match &self.case_label {
+            Some(label) => format!("{base}[{label}]"),
+            None => base.to_owned(),
         }
     }
 }
@@ -311,6 +338,106 @@ mod tests {
         let json = serde_json::to_string(&hook).expect("serialize");
         let back: HookItem = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(hook, back);
+    }
+
+    #[test]
+    fn test_item_id_plain() {
+        let item = TestItem {
+            name: "test_square".into(),
+            module_path: "tests.test_math".into(),
+            file_path: Some(PathBuf::from("tests/test_math.py")),
+            ..Default::default()
+        };
+        assert_eq!(item.id(), "tests/test_math.py::test_square");
+    }
+
+    #[test]
+    fn test_item_id_with_case_label() {
+        let item = TestItem {
+            name: "square".into(),
+            module_path: "tests.test_math".into(),
+            file_path: Some(PathBuf::from("tests/test_math.py")),
+            case_label: Some("zero".into()),
+            case_index: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(item.id(), "tests/test_math.py::square[zero]");
+    }
+
+    #[test]
+    fn test_item_case_label_round_trips_through_serde() {
+        let item = TestItem {
+            name: "square".into(),
+            module_path: "tests.test_math".into(),
+            file_path: Some(PathBuf::from("tests/test_math.py")),
+            case_label: Some("ten".into()),
+            case_index: Some(2),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&item).expect("serialize");
+        assert!(json.contains(r#""case_label":"ten""#), "json: {json}");
+        assert!(json.contains(r#""case_index":2"#), "json: {json}");
+        let back: TestItem = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.case_label.as_deref(), Some("ten"));
+        assert_eq!(back.case_index, Some(2));
+    }
+
+    #[test]
+    fn test_item_display_label_plain() {
+        let item = TestItem {
+            name: "test_square".into(),
+            module_path: "tests.m".into(),
+            ..Default::default()
+        };
+        assert_eq!(item.display_label(), "test_square");
+    }
+
+    #[test]
+    fn test_item_display_label_prefers_display_name() {
+        let item = TestItem {
+            name: "test_square".into(),
+            module_path: "tests.m".into(),
+            display_name: Some("squares a number".into()),
+            ..Default::default()
+        };
+        assert_eq!(item.display_label(), "squares a number");
+    }
+
+    #[test]
+    fn test_item_display_label_with_case_label() {
+        let item = TestItem {
+            name: "square".into(),
+            module_path: "tests.m".into(),
+            case_label: Some("zero".into()),
+            case_index: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(item.display_label(), "square[zero]");
+    }
+
+    #[test]
+    fn test_item_display_label_combines_display_name_and_case_label() {
+        let item = TestItem {
+            name: "square".into(),
+            module_path: "tests.m".into(),
+            display_name: Some("squares a number".into()),
+            case_label: Some("zero".into()),
+            case_index: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(item.display_label(), "squares a number[zero]");
+    }
+
+    #[test]
+    fn test_item_case_label_omitted_when_none() {
+        let item = TestItem {
+            name: "plain".into(),
+            module_path: "tests.test_math".into(),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&item).expect("serialize");
+        assert!(!json.contains("case_label"), "json: {json}");
+        assert!(!json.contains("case_index"), "json: {json}");
     }
 
     #[test]

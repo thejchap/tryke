@@ -57,11 +57,8 @@ impl<W: io::Write> Reporter for LlmReporter<W> {
     fn on_run_start(&mut self, _tests: &[TestItem]) {}
 
     fn on_test_complete(&mut self, result: &TestResult) {
-        let display = result
-            .test
-            .display_name
-            .as_deref()
-            .unwrap_or(&result.test.name);
+        let display = result.test.display_label();
+        let display = display.as_str();
 
         match &result.outcome {
             TestOutcome::Passed

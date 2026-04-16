@@ -145,8 +145,8 @@ Non-literal decorator shapes emit a discovery error and the tests are skipped. T
 
 | pytest | tryke |
 |--------|-------|
-| `@pytest.mark.parametrize("x,y", [(1, 2), (3, 4)])` | `@test.cases(a={"x": 1, "y": 2}, b={"x": 3, "y": 4})` |
-| `@pytest.mark.parametrize("x", [1, 2], ids=["one", "two"])` | `@test.cases(one={"x": 1}, two={"x": 2})` |
+| `@pytest.mark.parametrize("x,y", [(1, 2), (3, 4)])` | `@test.cases(test.case("a", x=1, y=2), test.case("b", x=3, y=4))` |
+| `@pytest.mark.parametrize("x", [1, 2], ids=["one", "two"])` | `@test.cases(test.case("one", x=1), test.case("two", x=2))` |
 | Case ID: `test_fn[one-two]` | Case ID: `fn[one]`, `fn[two]` |
 | Parameters match by name positionally | Each case is a dict — names are explicit |
 

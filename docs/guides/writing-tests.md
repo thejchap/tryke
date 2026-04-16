@@ -320,15 +320,17 @@ Use `@test.cases` to run the same test against multiple inputs. Each case collec
 
 ```python
 @test.cases(
-    zero={"n": 0, "expected": 0},
-    one={"n": 1, "expected": 1},
-    ten={"n": 10, "expected": 100},
+    test.case("zero",    n=0,  expected=0),
+    test.case("one",     n=1,  expected=1),
+    test.case("my test", n=10, expected=100),
 )
 def square(n: int, expected: int):
     expect(n * n).to_equal(expected)
 ```
 
-Cases compose with `describe()`, `@fixture`/`Depends()`, and modifiers. See [the cases concept page](../concepts/cases.md) for the two forms, composition rules, and the static-analysis constraint on decorator arguments.
+Labels are arbitrary strings — spaces and operators are fine — and each case's kwargs are checked against the decorated function's signature under `mypy` / `pyright` via a [PEP 612](https://peps.python.org/pep-0612/) `ParamSpec`. Legacy kwargs and list forms are still accepted but are no longer recommended for new tests.
+
+Cases compose with `describe()`, `@fixture` / `Depends()`, and modifiers. See [the cases concept page](../concepts/cases.md) for all three forms, composition rules, and the static-analysis constraint on decorator arguments.
 
 ## Skipping tests
 

@@ -22,7 +22,7 @@ Use uv or your package manager of choice to add tryke as a dev dependency.
 uv add --dev tryke
 ```
 
-Then, use uv run to invoke ty:
+Then, use uv run to invoke tryke:
 
 ```bash
 uv run tryke

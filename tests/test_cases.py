@@ -194,3 +194,66 @@ with describe("test.cases rejects kwarg / fixture collision"):
             executor.run_test(conflict, groups=[], case_kwargs={"v": 1})
 
         expect(invoke).to_raise(TypeError, match="collide")
+
+
+with describe("per-case modifiers"):
+
+    @test.cases(
+        test.case("normal", n=1, expected=1),
+        test.case("skipped", n=2, expected=999, skip="known bug"),
+    )
+    def per_case_skip(n: int, expected: int) -> None:
+        expect(n * n).to_equal(expected)
+
+    @test.cases(
+        test.case("passing", n=3, expected=9),
+        test.case("xfailing", n=4, expected=-1, xfail="known issue"),
+    )
+    def per_case_xfail(n: int, expected: int) -> None:
+        expect(n * n).to_equal(expected)
+
+    @test.cases(
+        test.case("done", n=5, expected=25),
+        test.case("placeholder", n=6, expected=0, todo="not implemented yet"),
+    )
+    def per_case_todo(n: int, expected: int) -> None:
+        expect(n * n).to_equal(expected)
+
+    @test
+    def case_entry_stores_modifiers() -> None:
+        """test.case() steals skip/xfail/todo before forwarding to kwargs."""
+        spec = test.case("lbl", x=1, skip="reason", xfail="xr", todo="td")
+        entry = spec.entry
+        expect(entry.skip).to_equal("reason")
+        expect(entry.xfail).to_equal("xr")
+        expect(entry.todo).to_equal("td")
+        expect(entry.kwargs).to_equal({"x": 1})
+
+    @test
+    def case_entry_modifiers_default_none() -> None:
+        spec = test.case("lbl", x=1)
+        entry = spec.entry
+        expect(entry.skip).to_be(None)
+        expect(entry.xfail).to_be(None)
+        expect(entry.todo).to_be(None)
+
+    @test
+    def case_modifier_must_be_string() -> None:
+        def build() -> None:
+            test.case("bad", skip=42)  # type: ignore[arg-type]
+
+        expect(build).to_raise(TypeError, match="skip= must be a string")
+
+    @test
+    def reserved_names_rejected_in_list_form() -> None:
+        raw = [("label", {"skip": "oops", "x": 1})]
+
+        expect(lambda: _build_cases_table((raw,), {})).to_raise(
+            TypeError, match="reserved name"
+        )
+
+    @test
+    def reserved_names_rejected_in_kwargs_form() -> None:
+        expect(lambda: _build_cases_table((), {"todo": {"skip": "oops"}})).to_raise(
+            TypeError, match="reserved name"
+        )

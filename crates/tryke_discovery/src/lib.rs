@@ -373,6 +373,20 @@ pub enum TestModifier {
     SkipIf,
 }
 
+/// Per-case metadata extracted from a `test.case(...)` call.
+///
+/// The typed form supports `skip`, `xfail`, and `todo` as reserved keyword
+/// arguments. Non-literal values are silently treated as `None` because
+/// discovery cannot evaluate them — the Python worker handles those at
+/// runtime as a fallback.
+#[derive(Debug, Clone, Default)]
+struct CaseInfo {
+    label: String,
+    skip: Option<String>,
+    xfail: Option<String>,
+    todo: Option<String>,
+}
+
 /// Walk through Call / Attribute layers to extract the modifier.
 /// - `@test`              → None
 /// - `@test.skip`         → Skip("")
@@ -470,19 +484,43 @@ fn is_test_case_call(expr: &Expr) -> bool {
     }
 }
 
-/// Extract case labels from a `@test.cases(...)` decorator.
+/// Extract a named string-literal keyword argument from a call's keywords.
+fn extract_string_kwarg(keywords: &[ruff_python_ast::Keyword], name: &str) -> Option<String> {
+    keywords.iter().find_map(|kw| {
+        if kw.arg.as_ref().is_some_and(|k| k.id.as_str() == name)
+            && let Expr::StringLiteral(s) = &kw.value
+        {
+            Some(s.value.to_str().to_owned())
+        } else {
+            Option::None
+        }
+    })
+}
+
+/// Extract per-case modifiers (`skip`, `xfail`, `todo`) from a `test.case(...)` call.
+fn extract_case_modifiers(call: &ruff_python_ast::ExprCall) -> CaseInfo {
+    CaseInfo {
+        label: String::new(),
+        skip: extract_string_kwarg(&call.arguments.keywords, "skip"),
+        xfail: extract_string_kwarg(&call.arguments.keywords, "xfail"),
+        todo: extract_string_kwarg(&call.arguments.keywords, "todo"),
+    }
+}
+
+/// Extract case info from a `@test.cases(...)` decorator.
 ///
 /// Supports three literal forms:
 /// - typed: `@test.cases(test.case("label1", ...), test.case("label2", ...))`
 ///   — each positional argument is a `test.case(...)` call with a string
-///   literal label as its first positional argument
+///   literal label as its first positional argument. Per-case `skip`, `xfail`,
+///   and `todo` keyword arguments are extracted when they are string literals.
 /// - kwargs: `@test.cases(zero={...}, one={...})` — each keyword name is a label
 /// - list: `@test.cases([("label1", {...}), ("label2", {...})])` — first tuple
 ///   element is a string-literal label
 ///
 /// Returns `Err(msg)` if the decorator's shape is not statically recognizable
 /// (e.g. `@test.cases(build())` or `@test.cases([dynamic, ...])`).
-fn extract_cases(expr: &Expr) -> Result<Vec<String>, String> {
+fn extract_cases(expr: &Expr) -> Result<Vec<CaseInfo>, String> {
     let Expr::Call(call) = expr else {
         return Err("test.cases decorator must be called, e.g. @test.cases(a=...)".to_owned());
     };
@@ -498,22 +536,25 @@ fn extract_cases(expr: &Expr) -> Result<Vec<String>, String> {
     }
 
     if has_kwargs {
-        let mut labels = Vec::with_capacity(call.arguments.keywords.len());
+        let mut cases = Vec::with_capacity(call.arguments.keywords.len());
         for kw in &call.arguments.keywords {
             let Some(k) = kw.arg.as_ref() else {
                 return Err("test.cases() does not support **kwargs expansion — \
                             all labels must be literal keyword arguments"
                     .to_owned());
             };
-            labels.push(k.id.as_str().to_owned());
+            cases.push(CaseInfo {
+                label: k.id.as_str().to_owned(),
+                ..CaseInfo::default()
+            });
         }
-        return Ok(labels);
+        return Ok(cases);
     }
 
     if has_args {
         // Typed form: every positional arg is a `test.case(...)` call.
         if call.arguments.args.iter().all(is_test_case_call) {
-            let mut labels = Vec::with_capacity(call.arguments.args.len());
+            let mut cases = Vec::with_capacity(call.arguments.args.len());
             for (i, elt) in call.arguments.args.iter().enumerate() {
                 let Expr::Call(inner) = elt else {
                     return Err(format!(
@@ -530,9 +571,11 @@ fn extract_cases(expr: &Expr) -> Result<Vec<String>, String> {
                         "test.cases() positional arg {i}: test.case() label must be a string literal"
                     ));
                 };
-                labels.push(s.value.to_str().to_owned());
+                let mut info = extract_case_modifiers(inner);
+                s.value.to_str().clone_into(&mut info.label);
+                cases.push(info);
             }
-            return Ok(labels);
+            return Ok(cases);
         }
 
         if call.arguments.args.len() != 1 {
@@ -545,7 +588,7 @@ fn extract_cases(expr: &Expr) -> Result<Vec<String>, String> {
                     .to_owned(),
             );
         };
-        let mut labels = Vec::with_capacity(list.elts.len());
+        let mut cases = Vec::with_capacity(list.elts.len());
         for (i, elt) in list.elts.iter().enumerate() {
             let Expr::Tuple(tup) = elt else {
                 return Err(format!(
@@ -562,9 +605,12 @@ fn extract_cases(expr: &Expr) -> Result<Vec<String>, String> {
                     "test.cases() list element {i} label must be a string literal"
                 ));
             };
-            labels.push(s.value.to_str().to_owned());
+            cases.push(CaseInfo {
+                label: s.value.to_str().to_owned(),
+                ..CaseInfo::default()
+            });
         }
-        return Ok(labels);
+        return Ok(cases);
     }
 
     Err("test.cases() requires at least one case".to_owned())
@@ -899,8 +945,8 @@ fn collect_cases_from_func(
         return;
     }
 
-    let labels = match extract_cases(&cases_dec.expression) {
-        Ok(labels) => labels,
+    let cases = match extract_cases(&cases_dec.expression) {
+        Ok(cases) => cases,
         Err(msg) => {
             let display_file = file.strip_prefix(root).unwrap_or(file).display();
             let line = u32::try_from(line_index.line_index(func.range.start()).get()).unwrap_or(0);
@@ -912,8 +958,8 @@ fn collect_cases_from_func(
         }
     };
 
-    // Modifiers (@test.skip / @test.xfail / @test.todo) apply to every
-    // generated case. Look for any marker decorator on the same function.
+    // Function-level modifiers (@test.skip / @test.xfail / @test.todo) act as
+    // defaults — per-case modifiers from test.case(...) take precedence.
     let modifier_dec = func.decorator_list.iter().find(|d| {
         is_tryke_test_decorator(&d.expression, top_body)
             && !is_tryke_test_cases_decorator(&d.expression, top_body)
@@ -921,7 +967,7 @@ fn collect_cases_from_func(
     });
     let modifier =
         modifier_dec.map_or(TestModifier::None, |d| extract_test_modifier(&d.expression));
-    let (skip, todo, xfail) = match modifier {
+    let (fn_skip, fn_todo, fn_xfail) = match modifier {
         TestModifier::Skip(r) => (Some(r), None, None),
         TestModifier::Todo(d) => (None, Some(d), None),
         TestModifier::Xfail(r) => (None, None, Some(r)),
@@ -934,7 +980,7 @@ fn collect_cases_from_func(
     let module_path = path_to_module(root, file);
     let expected_assertions = extract_expected_assertions(&func.body, source, line_index);
 
-    for (i, label) in labels.into_iter().enumerate() {
+    for (i, case) in cases.into_iter().enumerate() {
         tests_out.push(TestItem {
             name: func.name.id.as_str().to_owned(),
             module_path: module_path.clone(),
@@ -942,12 +988,12 @@ fn collect_cases_from_func(
             line_number,
             display_name: display_name.clone(),
             expected_assertions: expected_assertions.clone(),
-            skip: skip.clone(),
-            todo: todo.clone(),
-            xfail: xfail.clone(),
+            skip: case.skip.or_else(|| fn_skip.clone()),
+            todo: case.todo.or_else(|| fn_todo.clone()),
+            xfail: case.xfail.or_else(|| fn_xfail.clone()),
             tags: vec![],
             groups: groups.to_vec(),
-            case_label: Some(label),
+            case_label: Some(case.label),
             case_index: u32::try_from(i).ok(),
             ..TestItem::default()
         });
@@ -1543,6 +1589,124 @@ def fn():
         for item in &items {
             assert_eq!(item.skip.as_deref(), Some("WIP"));
         }
+    }
+
+    #[test]
+    fn cases_per_case_skip_from_typed_form() {
+        let source = r#"@test.cases(
+    test.case("normal", n=1),
+    test.case("broken", n=2, skip="known bug"),
+)
+def square(n):
+    pass
+"#;
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].skip, None);
+        assert_eq!(items[1].skip.as_deref(), Some("known bug"));
+    }
+
+    #[test]
+    fn cases_per_case_xfail_from_typed_form() {
+        let source = r#"@test.cases(
+    test.case("passing", n=1),
+    test.case("failing", n=2, xfail="upstream issue"),
+)
+def check(n):
+    pass
+"#;
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].xfail, None);
+        assert_eq!(items[1].xfail.as_deref(), Some("upstream issue"));
+    }
+
+    #[test]
+    fn cases_per_case_todo_from_typed_form() {
+        let source = r#"@test.cases(
+    test.case("done", n=1),
+    test.case("wip", n=2, todo="not implemented"),
+)
+def feature(n):
+    pass
+"#;
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].todo, None);
+        assert_eq!(items[1].todo.as_deref(), Some("not implemented"));
+    }
+
+    #[test]
+    fn cases_per_case_overrides_function_level() {
+        let source = r#"@test.skip("default skip")
+@test.cases(
+    test.case("skipped_by_default", n=1),
+    test.case("actually_xfail", n=2, xfail="override"),
+)
+def fn(n):
+    pass
+"#;
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
+        assert_eq!(items.len(), 2);
+        // First case inherits function-level skip.
+        assert_eq!(items[0].skip.as_deref(), Some("default skip"));
+        assert_eq!(items[0].xfail, None);
+        // Second case has per-case xfail which takes precedence;
+        // function-level skip is still inherited since xfail != skip.
+        assert_eq!(items[1].skip.as_deref(), Some("default skip"));
+        assert_eq!(items[1].xfail.as_deref(), Some("override"));
+    }
+
+    #[test]
+    fn cases_per_case_skip_overrides_function_skip() {
+        let source = r#"@test.skip("default")
+@test.cases(
+    test.case("inherited", n=1),
+    test.case("overridden", n=2, skip="per-case reason"),
+)
+def fn(n):
+    pass
+"#;
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].skip.as_deref(), Some("default"));
+        assert_eq!(items[1].skip.as_deref(), Some("per-case reason"));
+    }
+
+    #[test]
+    fn cases_kwargs_form_has_no_per_case_modifiers() {
+        let source = "@test.cases(a={\"skip\": \"ignored\"}, b={})
+def fn():
+    pass
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
+        assert_eq!(items.len(), 2);
+        // kwargs form doesn't support per-case modifiers — "skip" inside
+        // the dict is a test parameter, not a modifier.
+        assert_eq!(items[0].skip, None);
+        assert_eq!(items[1].skip, None);
+    }
+
+    #[test]
+    fn cases_non_literal_modifier_ignored() {
+        let source = r#"reason = "dynamic"
+@test.cases(
+    test.case("a", n=1, skip=reason),
+)
+def fn(n):
+    pass
+"#;
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
+        assert_eq!(items.len(), 1);
+        // Non-literal skip value is silently ignored at discovery time.
+        assert_eq!(items[0].skip, None);
     }
 
     #[test]

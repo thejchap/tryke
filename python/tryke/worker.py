@@ -620,6 +620,15 @@ class Worker:
             case_args = entry.args
             case_kwargs = entry.kwargs
 
+            # Per-case modifiers (runtime fallback for non-literal values
+            # that static discovery could not extract).
+            if entry.skip is not None:
+                return _skipped(0, entry.skip, "", "")
+            if entry.todo is not None:
+                return _todo(0, entry.todo, "", "")
+            if entry.xfail is not None:
+                xfail = entry.xfail
+
         # Runtime skip/todo (handles skip_if resolved at import time)
         if isinstance(fn, _SkipMarked):
             return _skipped(0, fn.__tryke_skip__, "", "")

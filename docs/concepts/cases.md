@@ -68,9 +68,11 @@ def scaled(n: int, expected: int, factor: int = Depends(multiplier)):
 
 A case kwarg must not collide with a fixture-injected parameter — tryke raises `TypeError` at call time if it does. Pick a different name for the case argument.
 
-### With `@test.skip` and `@test.xfail`
+### With `@test.skip`, `@test.xfail`, and `@test.todo`
 
-Modifiers apply to every generated case:
+#### Function-level modifiers
+
+Decorators apply to every generated case:
 
 ```python
 @test.skip("not ready yet")
@@ -80,17 +82,32 @@ Modifiers apply to every generated case:
 )
 def pending(x: int):
     ...
-
-@test.xfail("upstream bug #42")
-@test.cases(
-    test.case("a", x=1),
-    test.case("b", x=2),
-)
-def known_broken(x: int):
-    expect(x).to_equal(-1)
 ```
 
-Both cases are skipped (or marked xfail) — there's currently no way to mark individual cases. If you need per-case xfail, split the cases into separate functions.
+Both cases are skipped.
+
+#### Per-case modifiers
+
+Pass `skip`, `xfail`, or `todo` as keyword arguments to `test.case()` to mark individual cases:
+
+```python
+@test.cases(
+    test.case("normal", n=1, expected=1),
+    test.case("broken", n=2, expected=999, xfail="known bug #42"),
+    test.case("pending", n=3, expected=9, skip="waiting on upstream"),
+    test.case("placeholder", n=4, expected=16, todo="not implemented"),
+)
+def square(n: int, expected: int):
+    expect(n * n).to_equal(expected)
+```
+
+`skip`, `xfail`, and `todo` are reserved keyword names in `test.case()` — they are consumed by the framework before the remaining kwargs are forwarded to the test function. They must be strings.
+
+**Precedence:** a per-case modifier overrides the function-level modifier of the same kind. If a case has `skip="reason"`, it uses that reason regardless of `@test.skip` on the function. Cases without a per-case modifier inherit the function-level modifier.
+
+Per-case modifiers are only supported in the typed `test.case(...)` form. Using `skip`, `xfail`, or `todo` as keys in the kwargs or list forms raises `TypeError` — the framework cannot distinguish modifier intent from test data in those forms.
+
+**Static discovery:** for per-case modifiers to be recognized at discovery time (before import), the value must be a string literal. Non-literal values (e.g. `skip=some_variable`) are handled at runtime as a fallback.
 
 ### With `@test`
 

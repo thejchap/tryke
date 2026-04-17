@@ -7,6 +7,7 @@
       show_root_heading: false
       members:
         - __call__
+        - case
         - cases
         - skip_if
 

@@ -107,6 +107,7 @@ def _stamp(fn: object, attr: str, value: str) -> None:
 
 _CASES_ATTR = "__tryke_cases__"
 _CASES_TUPLE_LEN = 2
+_RESERVED_CASE_KWARGS: frozenset[str] = frozenset({"skip", "xfail", "todo"})
 
 
 class CaseEntry(NamedTuple):
@@ -122,11 +123,20 @@ class CaseEntry(NamedTuple):
         kwargs: Keyword arguments the decorated function receives for
             this case. Merged with any fixture-injected kwargs by the
             hook executor; collisions raise ``TypeError``.
+        skip: Per-case skip reason. When set, this case is skipped
+            independently of other cases in the same table.
+        xfail: Per-case expected-failure reason. When set, this case
+            is marked xfail independently of other cases.
+        todo: Per-case todo description. When set, this case is
+            treated as a placeholder independently of other cases.
     """
 
     label: str
     args: tuple[object, ...]
     kwargs: CaseArgs
+    skip: str | None = None
+    xfail: str | None = None
+    todo: str | None = None
 
 
 class _CaseSpec[**P]:
@@ -160,10 +170,21 @@ class _CaseSpec[**P]:
         *args: P.args,
         **kwargs: P.kwargs,
     ) -> None:
+        mutable = dict(kwargs)
+        skip = mutable.pop("skip", None)
+        xfail = mutable.pop("xfail", None)
+        todo = mutable.pop("todo", None)
+        for name, val in [("skip", skip), ("xfail", xfail), ("todo", todo)]:
+            if val is not None and not isinstance(val, str):
+                msg = f"test.case() {name}= must be a string, got {type(val).__name__}"
+                raise TypeError(msg)
         self._entry = CaseEntry(
             label=label,
             args=tuple(args),
-            kwargs=dict(kwargs),
+            kwargs=mutable,
+            skip=skip,  # type: ignore[arg-type]
+            xfail=xfail,  # type: ignore[arg-type]
+            todo=todo,  # type: ignore[arg-type]
         )
 
     @property
@@ -197,6 +218,14 @@ def _validate_case_entry(index: int, item: object) -> CaseEntry:
             )
             raise TypeError(msg)
         kwargs[key] = value
+    reserved = _RESERVED_CASE_KWARGS.intersection(kwargs)
+    if reserved:
+        names = ", ".join(sorted(reserved))
+        msg = (
+            f"test.cases() list element {index} uses reserved name(s) {{{names}}}; "
+            f"use the typed test.case(..., {names}=...) form for per-case modifiers"
+        )
+        raise TypeError(msg)
     return CaseEntry(label=label, args=(), kwargs=kwargs)
 
 
@@ -214,10 +243,20 @@ def _cases_list_to_table(raw: object) -> CaseTable:
 
 def _cases_from_kwargs(kwargs: dict[str, CaseArgs]) -> CaseTable:
     """Convert ``@test.cases(label=args_dict, ...)`` kwargs."""
-    return tuple(
-        CaseEntry(label=label, args=(), kwargs=dict(args))
-        for label, args in kwargs.items()
-    )
+    entries: list[CaseEntry] = []
+    for label, args in kwargs.items():
+        d = dict(args)
+        reserved = _RESERVED_CASE_KWARGS.intersection(d)
+        if reserved:
+            names = ", ".join(sorted(reserved))
+            msg = (
+                f"test.cases() kwargs entry {label!r} uses reserved name(s) "
+                f"{{{names}}}; use the typed test.case(..., {names}=...) form "
+                f"for per-case modifiers"
+            )
+            raise TypeError(msg)
+        entries.append(CaseEntry(label=label, args=(), kwargs=d))
+    return tuple(entries)
 
 
 def _validate_cases_table(table: CaseTable) -> None:
@@ -578,12 +617,17 @@ class _TestBuilder:
         does not yet enforce this pattern; see the module docstring for
         :class:`_CaseSpec` for details.
 
+        The keyword names ``skip``, ``xfail``, and ``todo`` are reserved
+        for per-case modifiers. When passed, they must be strings and
+        are consumed by the framework — they are not forwarded to the
+        test function.
+
         Example:
             ```python
             @test.cases(
                 test.case("zero", n=0, expected=0),
                 test.case("one",  n=1, expected=1),
-                test.case("ten",  n=10, expected=100),
+                test.case("broken", n=2, expected=999, xfail="bug #42"),
             )
             def square(n: int, expected: int) -> None:
                 expect(n * n).to_equal(expected)

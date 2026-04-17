@@ -328,9 +328,9 @@ def square(n: int, expected: int):
     expect(n * n).to_equal(expected)
 ```
 
-Labels are arbitrary strings — spaces and operators are fine — and each case's kwargs are checked against the decorated function's signature under `mypy` / `pyright` via a [PEP 612](https://peps.python.org/pep-0612/) `ParamSpec`. Legacy kwargs and list forms are still accepted but are no longer recommended for new tests.
+Labels are arbitrary strings — spaces and operators are fine — and each case's kwargs are checked against the decorated function's signature under `mypy` / `pyright` via a [PEP 612](https://peps.python.org/pep-0612/) `ParamSpec`.
 
-Cases compose with `describe()`, `@fixture` / `Depends()`, and modifiers. See [the cases concept page](../concepts/cases.md) for all three forms, composition rules, and the static-analysis constraint on decorator arguments.
+Cases compose with `describe()`, `@fixture` / `Depends()`, and modifiers. See [the cases concept page](../concepts/cases.md) for composition rules and the static-analysis constraint on decorator arguments.
 
 ## Skipping tests
 

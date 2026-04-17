@@ -242,7 +242,7 @@ def test_square(n, expected):
     assert n * n == expected
 ```
 
-**tryke** — typed form (recommended; statically checked under mypy/pyright):
+**tryke:**
 
 ```python
 @test.cases(
@@ -254,30 +254,7 @@ def square(n: int, expected: int):
     expect(n * n).to_equal(expected)
 ```
 
-Labels are arbitrary strings — `"my test"`, `"2 + 3"`, `"negative one"` all work and survive `-k` filtering end-to-end.
-
-**tryke** — legacy kwargs form (labels are identifiers; untyped):
-
-```python
-@test.cases(
-    zero={"n": 0, "expected": 0},
-    one={"n": 1, "expected": 1},
-    ten={"n": 10, "expected": 100},
-)
-def square(n: int, expected: int):
-    expect(n * n).to_equal(expected)
-```
-
-**tryke** — legacy list form (string-literal labels; untyped):
-
-```python
-@test.cases([
-    ("2 + 3", {"a": 2, "b": 3, "sum": 5}),
-    ("-1 + 1", {"a": -1, "b": 1, "sum": 0}),
-])
-def add(a: int, b: int, sum: int):
-    expect(a + b).to_equal(sum)
-```
+Labels are arbitrary strings — `"my test"`, `"2 + 3"`, `"negative one"` all work and survive `-k` filtering end-to-end. Case kwargs are statically checked against the function signature under `mypy` / `pyright`.
 
 Each case collects as its own test ID (`fn[label]`), composes with `describe()` blocks, `@fixture`/`Depends()`, and `@test.skip`/`xfail`. See [cases](concepts/cases.md) for the full reference.
 
@@ -291,10 +268,13 @@ async def test_under_runner(runner):
     ...
 ```
 
-**tryke**:
+**tryke:**
 
 ```python
-@test.cases(asyncio={"runner": asyncio}, trio={"runner": trio})
+@test.cases(
+    test.case("asyncio", runner=asyncio),
+    test.case("trio", runner=trio),
+)
 async def under_runner(runner):
     ...
 ```

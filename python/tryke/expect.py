@@ -213,7 +213,7 @@ def _cases_list_to_table(raw: object) -> CaseTable:
 
 
 def _cases_from_kwargs(kwargs: dict[str, CaseArgs]) -> CaseTable:
-    """Convert legacy ``@test.cases(label=args_dict, ...)`` kwargs."""
+    """Convert ``@test.cases(label=args_dict, ...)`` kwargs."""
     return tuple(
         CaseEntry(label=label, args=(), kwargs=dict(args))
         for label, args in kwargs.items()
@@ -223,9 +223,9 @@ def _cases_from_kwargs(kwargs: dict[str, CaseArgs]) -> CaseTable:
 def _validate_cases_table(table: CaseTable) -> None:
     """Check cross-row invariants: unique labels and consistent key sets.
 
-    Called after every form (typed, legacy kwargs, legacy list) so each
-    form enforces the same shape guarantees at runtime regardless of
-    what the type checker did or did not catch.
+    Called after every form so each form enforces the same shape
+    guarantees at runtime regardless of what the type checker did or
+    did not catch.
     """
     if not table:
         return
@@ -270,12 +270,9 @@ def _build_cases_table(
 ) -> CaseTable:
     """Resolve ``@test.cases(...)`` arguments into a :data:`CaseTable`.
 
-    Three input shapes are supported:
-
-    - Typed: ``cases(test.case(...), test.case(...))`` — every positional
-      arg is a :class:`_CaseSpec`.
-    - Legacy kwargs: ``cases(label=args_dict, ...)``.
-    - Legacy list: ``cases([(label, args_dict), ...])``.
+    The primary input shape is typed specs: ``cases(test.case(...), ...)``
+    where every positional arg is a :class:`_CaseSpec`. Kwargs and list
+    forms are also accepted for backward compatibility.
     """
     if positional and kwargs:
         msg = "test.cases() accepts either positional or kwargs form, not both"
@@ -619,43 +616,22 @@ class _TestBuilder:
     ) -> Callable[[_Fn], _Fn]:
         """Parametrize a test over multiple named cases.
 
-        Three forms are supported:
+        Pass one :meth:`case` spec per row. PEP 612 ``ParamSpec``
+        binds the kwargs against the decorated function's signature so
+        typos and mismatched types become static errors under
+        mypy/pyright::
 
-        - **Typed form** (recommended) — one :meth:`case` spec per case.
-          PEP 612 ``ParamSpec`` binds the kwargs against the decorated
-          function's signature so typos and mismatched types become
-          static errors under mypy/pyright:
+            @test.cases(
+                test.case("zero",     n=0,  expected=0),
+                test.case("one",      n=1,  expected=1),
+                test.case("ten",      n=10, expected=100),
+            )
+            def square(n: int, expected: int) -> None:
+                expect(n * n).to_equal(expected)
 
-              @test.cases(
-                  test.case("zero",     n=0,  expected=0),
-                  test.case("one",      n=1,  expected=1),
-                  test.case("ten",      n=10, expected=100),
-              )
-              def square(n: int, expected: int) -> None:
-                  expect(n * n).to_equal(expected)
-
-          ty (as of 0.0.21) does not yet enforce this pattern. Runtime
-          validation below still catches label collisions and
-          inconsistent key sets.
-
-        - **Legacy keyword form** — each kwarg name is a case label,
-          each value is a dict of arguments. Cases lose static typing:
-
-              @test.cases(
-                  zero={"n": 0, "squared": 0},
-                  one={"n": 1, "squared": 1},
-              )
-              def square(n, squared): ...
-
-        - **Legacy list form** — a list of ``(label, args_dict)``
-          tuples. Use when a label is not a valid Python identifier
-          and the typed form is unavailable:
-
-              @test.cases([
-                  ("2 + 3", {"a": 2, "b": 3, "sum": 5}),
-                  ("-1 + 1", {"a": -1, "b": 1, "sum": 0}),
-              ])
-              def add(a, b, sum): ...
+        ty (as of 0.0.21) does not yet enforce this pattern. Runtime
+        validation still catches label collisions and inconsistent key
+        sets.
 
         Composes with ``@fixture``/``Depends()`` parameters,
         ``describe(...)`` blocks, and ``@test.skip``/``@test.xfail``.

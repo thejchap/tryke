@@ -123,6 +123,44 @@ def check_response():
     expect(response.body).to_contain("ok")
 ```
 
+## In-source testing
+
+Put tests directly inside production modules by guarding them with
+`__TRYKE_TESTING__` from the tiny `tryke_guard` module:
+
+```python
+# myapp/math_utils.py
+from tryke_guard import __TRYKE_TESTING__
+
+def add(a: int, b: int) -> int:
+    return a + b
+
+if __TRYKE_TESTING__:
+    from tryke import test, expect
+
+    @test
+    def adds():
+        expect(add(1, 2)).to_equal(3)
+```
+
+In production `__TRYKE_TESTING__` is `False`, the `if` block is dead code,
+and `tryke` itself never loads. Under `tryke test` the worker flips the flag
+at startup and tryke discovers the guarded tests exactly like top-level
+ones. `@test`, `@test.cases`, `@fixture`, `with describe(...)`, and
+doctests all work inside the guard; imports inside it participate in the
+`--changed` import graph.
+
+**Subprocesses default to production mode.** The worker sets the flag via a
+module attribute, not an env var, so `subprocess.run([...])` and
+`multiprocessing.Process(start_method="spawn")` children start with
+`__TRYKE_TESTING__ == False`. Opt a child in with
+`env={**os.environ, "TRYKE_TESTING": "1"}`.
+
+**v1 limitations** (intentionally narrow): the condition must be exactly
+`__TRYKE_TESTING__` or `tryke_guard.__TRYKE_TESTING__`, and the `if` must
+have no `elif`/`else`. A guard with an alternative branch emits a
+discovery warning rather than silently dropping its tests.
+
 ## Grouping tests with `describe()`
 
 Use `describe()` to group related tests under a label:

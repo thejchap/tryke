@@ -18,7 +18,7 @@ tests legitimately nest:
 - `if __TRYKE_TESTING__:` — the in-source testing guard. Tests, fixtures, doctests,
   and nested `describe` blocks inside are discovered identically to module-level code,
   and static imports inside contribute to the import graph. See
-  [in-source testing](../guides/in-source-testing.md).
+  [in-source testing](../guides/writing-tests.md#in-source-testing).
 
 No other `if`/`for`/`while` bodies are descended: keeping discovery narrow means
 "where is this test defined?" has an obvious answer.

@@ -12,7 +12,6 @@ nav = [
   { "Guides" = [
     "guides/installation.md",
     "guides/writing-tests.md",
-    "guides/in-source-testing.md",
     "guides/running-tests.md",
     "guides/filtering.md",
     "guides/async.md",

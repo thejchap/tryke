@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cargo test"
+          },
+          {
+            "type": "command",
+            "command": "cargo run test"
+          }
+        ]
+      }
+    ]
+  }
+}

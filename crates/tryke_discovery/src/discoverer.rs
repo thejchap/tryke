@@ -243,6 +243,22 @@ impl Discoverer {
         self.import_graph.always_dirty_files()
     }
 
+    /// Returns `(file, line)` pairs for every `if __TRYKE_TESTING__:` statement
+    /// that has an `elif` or `else` branch. Discovery silently drops these
+    /// guards; the caller surfaces them as warnings so users don't debug
+    /// missing tests from an unsupported guard shape.
+    pub fn testing_guard_else_locations(&self) -> Vec<(PathBuf, u32)> {
+        let mut results: Vec<(PathBuf, u32)> = Vec::new();
+        for (path, file) in &self.inputs {
+            let parsed = parse_tests(&self.db, *file);
+            for line in &parsed.testing_guard_else_lines {
+                results.push((path.clone(), *line));
+            }
+        }
+        results.sort();
+        results
+    }
+
     /// Returns a sorted summary of the import graph for all known files.
     pub fn import_graph_summary(&self) -> Vec<GraphEntry> {
         let mut entries: Vec<GraphEntry> = self

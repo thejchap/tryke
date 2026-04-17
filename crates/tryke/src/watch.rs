@@ -19,7 +19,7 @@ fn clear_if_tty() {
     }
 }
 
-fn emit_dynamic_import_warnings(reporter: &mut dyn Reporter, discoverer: &Discoverer) {
+fn emit_discovery_warnings(reporter: &mut dyn Reporter, discoverer: &Discoverer) {
     for path in discoverer.dynamic_import_files() {
         let message = format!(
             "{} — dynamic imports found; will always re-run and may serve stale module state in watch mode",
@@ -28,6 +28,18 @@ fn emit_dynamic_import_warnings(reporter: &mut dyn Reporter, discoverer: &Discov
         reporter.on_discovery_warning(&DiscoveryWarning {
             file_path: path,
             kind: DiscoveryWarningKind::DynamicImports,
+            message,
+        });
+    }
+    for (path, line) in discoverer.testing_guard_else_locations() {
+        let message = format!(
+            "{}:{line} — `if __TRYKE_TESTING__:` has elif/else; tests inside will NOT be \
+             discovered. Move production fallback code above or below the guard.",
+            path.display()
+        );
+        reporter.on_discovery_warning(&DiscoveryWarning {
+            file_path: path,
+            kind: DiscoveryWarningKind::TestingGuardHasElseBranch,
             message,
         });
     }
@@ -57,7 +69,7 @@ pub async fn run_watch(
     let tests = test_filter.apply(discoverer.rediscover());
     let hooks = discoverer.hooks();
     let disc_dur = Some(disc_start.elapsed());
-    emit_dynamic_import_warnings(reporter, &discoverer);
+    emit_discovery_warnings(reporter, &discoverer);
     report_cycle(
         reporter, tests, &hooks, &pool, maxfail, dist, disc_dur, None,
     )
@@ -93,7 +105,7 @@ pub async fn run_watch(
         let tests = test_filter.apply(discoverer.tests_for_changed(&paths));
         let hooks = discoverer.hooks();
         let disc_dur = Some(disc_start.elapsed());
-        emit_dynamic_import_warnings(reporter, &discoverer);
+        emit_discovery_warnings(reporter, &discoverer);
         report_cycle(
             reporter, tests, &hooks, &pool, maxfail, dist, disc_dur, None,
         )

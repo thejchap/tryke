@@ -64,6 +64,7 @@ import unittest
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict
 
+import tryke_guard
 from tryke.expect import (
     CaseArgs,
     CasesMarked,
@@ -76,6 +77,17 @@ from tryke.expect import (
     _XfailMarked,
 )
 from tryke.hooks import HookExecutor, _fixture_per
+
+# Flip `tryke_guard.__TRYKE_TESTING__` on for this worker process. User
+# modules imported later via `_get_module` do
+# `from tryke_guard import __TRYKE_TESTING__`, which binds the (now-True)
+# module attribute into their globals, causing their `if __TRYKE_TESTING__:`
+# guards to execute.
+#
+# Process-local by construction: children spawned by user tests start with a
+# fresh `tryke_guard` import that reads the env-var default (False). To opt a
+# child into test mode, pass env={**os.environ, "TRYKE_TESTING": "1"}.
+tryke_guard.__TRYKE_TESTING__ = True
 
 if TYPE_CHECKING:
     from collections.abc import Generator

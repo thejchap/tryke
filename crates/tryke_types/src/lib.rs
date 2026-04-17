@@ -201,6 +201,10 @@ pub enum DiscoveryWarningKind {
     /// tryke cannot statically trace these imports, so the file is always
     /// included in `--changed` runs regardless of what actually changed.
     DynamicImports,
+    /// File contains `if __TRYKE_TESTING__:` with an `elif` or `else` branch.
+    /// Discovery does not descend into guards with alternative branches, so
+    /// any tests inside would be silently dropped; surface it instead.
+    TestingGuardHasElseBranch,
 }
 
 /// A non-fatal issue detected during test discovery that may degrade
@@ -256,6 +260,12 @@ pub struct ParsedFile {
     pub tests: Vec<TestItem>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<HookItem>,
+    /// 1-indexed source lines where `if __TRYKE_TESTING__:` has an
+    /// `elif`/`else` clause. These shapes get silently ignored by discovery
+    /// (see `TestingGuardHasElseBranch` warning) so we record them here and
+    /// surface them to the user.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub testing_guard_else_lines: Vec<u32>,
     /// Human-readable diagnostics produced during parsing. Currently used
     /// to report unsupported ``Depends(...)`` argument forms so users see
     /// a loud error instead of a silent no-op at resolution time.
@@ -463,6 +473,7 @@ mod tests {
                 depends_on: vec![],
                 line_number: Some(5),
             }],
+            testing_guard_else_lines: vec![],
             errors: vec![],
         };
         let json = serde_json::to_string(&pf).expect("serialize");

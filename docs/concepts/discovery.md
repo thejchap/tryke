@@ -8,6 +8,21 @@ ever involved.
 This is why tryke is fast: it reasons about your code the way a compiler does, at
 parse time rather than runtime.
 
+## Recursion into structured blocks
+
+Beyond scanning the module body, tryke recurses into two specific block shapes where
+tests legitimately nest:
+
+- `with describe("name"):` — tests inside are collected with the group name as a
+  prefix. See [writing tests](../guides/writing-tests.md#grouping-tests-with-describe).
+- `if __TRYKE_TESTING__:` — the in-source testing guard. Tests, fixtures, doctests,
+  and nested `describe` blocks inside are discovered identically to module-level code,
+  and static imports inside contribute to the import graph. See
+  [in-source testing](../guides/writing-tests.md#in-source-testing).
+
+No other `if`/`for`/`while` bodies are descended: keeping discovery narrow means
+"where is this test defined?" has an obvious answer.
+
 ## What static analysis can see
 
 | Pattern | Tracked |

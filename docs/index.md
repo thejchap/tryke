@@ -8,7 +8,7 @@ diagnostics, and a clean decorator-based API.
 - [Watch mode](guides/watch-mode.md)
 - Native `async` support
 - [Fast](concepts/discovery.md) test discovery
-- In-source testing
+- [In-source testing](guides/writing-tests.md#in-source-testing)
 - Support for [doctests](https://docs.python.org/3/library/doctest.html)
 - [Client/server](concepts/client-server.md) mode for fast editor integrations
 - Pretty, per-assertion diagnostics

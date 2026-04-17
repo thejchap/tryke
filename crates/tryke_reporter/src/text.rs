@@ -6,7 +6,7 @@ use std::time::Duration;
 use owo_colors::OwoColorize;
 use tryke_types::{RunSummary, TestItem, TestOutcome, TestResult};
 
-use tryke_types::{DiscoveryError, DiscoveryWarning};
+use tryke_types::{DiscoveryError, DiscoveryWarning, DiscoveryWarningKind};
 
 use crate::Reporter;
 use crate::diagnostic::{
@@ -408,19 +408,31 @@ impl<W: io::Write> Reporter for TextReporter<W> {
     }
 
     fn on_discovery_warning(&mut self, warning: &DiscoveryWarning) {
-        let _ = writeln!(
-            self.writer,
-            "{} {} — dynamic imports found; this file will always re-run with {}",
-            "warning:".yellow().bold(),
-            warning.file_path.display().to_string().yellow(),
-            "--changed".bold(),
-        );
-        let _ = writeln!(
-            self.writer,
-            "         replace {} or {} with static imports to restore selective re-runs",
-            "importlib.import_module()".dimmed(),
-            "__import__()".dimmed(),
-        );
+        match warning.kind {
+            DiscoveryWarningKind::DynamicImports => {
+                let _ = writeln!(
+                    self.writer,
+                    "{} {} — dynamic imports found; this file will always re-run with {}",
+                    "warning:".yellow().bold(),
+                    warning.file_path.display().to_string().yellow(),
+                    "--changed".bold(),
+                );
+                let _ = writeln!(
+                    self.writer,
+                    "         replace {} or {} with static imports to restore selective re-runs",
+                    "importlib.import_module()".dimmed(),
+                    "__import__()".dimmed(),
+                );
+            }
+            DiscoveryWarningKind::TestingGuardHasElseBranch => {
+                let _ = writeln!(
+                    self.writer,
+                    "{} {}",
+                    "warning:".yellow().bold(),
+                    warning.message.yellow(),
+                );
+            }
+        }
     }
 }
 

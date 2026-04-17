@@ -36,6 +36,31 @@ fn dynamic_import_warnings(discoverer: &Discoverer) -> Vec<DiscoveryWarning> {
         .collect()
 }
 
+fn testing_guard_else_warnings(discoverer: &Discoverer) -> Vec<DiscoveryWarning> {
+    discoverer
+        .testing_guard_else_locations()
+        .into_iter()
+        .map(|(path, line)| {
+            let message = format!(
+                "{}:{line} — `if __TRYKE_TESTING__:` has elif/else; tests inside will NOT be \
+                 discovered. Move production fallback code above or below the guard.",
+                path.display()
+            );
+            DiscoveryWarning {
+                file_path: path,
+                kind: DiscoveryWarningKind::TestingGuardHasElseBranch,
+                message,
+            }
+        })
+        .collect()
+}
+
+fn all_discovery_warnings(discoverer: &Discoverer) -> Vec<DiscoveryWarning> {
+    let mut warnings = dynamic_import_warnings(discoverer);
+    warnings.extend(testing_guard_else_warnings(discoverer));
+    warnings
+}
+
 pub fn resolved_excludes(
     root: &Path,
     cli_excludes: &[String],
@@ -64,7 +89,7 @@ pub fn discover_tests(
 ) -> DiscoverySelection {
     let mut discoverer = Discoverer::new_with_excludes(root, excludes);
     discoverer.rediscover();
-    let warnings = dynamic_import_warnings(&discoverer);
+    let warnings = all_discovery_warnings(&discoverer);
     let hooks = discoverer.hooks();
 
     if changed {
@@ -119,7 +144,7 @@ pub fn discover_tests_changed_first(
 ) -> DiscoverySelection {
     let mut discoverer = Discoverer::new_with_excludes(root, excludes);
     discoverer.rediscover();
-    let warnings = dynamic_import_warnings(&discoverer);
+    let warnings = all_discovery_warnings(&discoverer);
     let hooks = discoverer.hooks();
     let changed_files = resolve_changed_files(root, base_branch);
     let all_tests = discoverer.tests();

@@ -110,12 +110,23 @@ fn resolve_relative_import_path(root: &Path, base: &Path, module_name: &str) -> 
 pub(crate) fn extract_local_imports(root: &Path, file: &Path, body: &[Stmt]) -> Vec<PathBuf> {
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut result: Vec<PathBuf> = Vec::new();
+    collect_local_imports(root, file, body, &mut seen, &mut result);
+    result
+}
 
-    let mut add = |p: PathBuf| {
-        if seen.insert(p.clone()) {
-            result.push(p);
-        }
-    };
+fn collect_local_imports(
+    root: &Path,
+    file: &Path,
+    body: &[Stmt],
+    seen: &mut std::collections::HashSet<PathBuf>,
+    result: &mut Vec<PathBuf>,
+) {
+    let add =
+        |p: PathBuf, seen: &mut std::collections::HashSet<PathBuf>, result: &mut Vec<PathBuf>| {
+            if seen.insert(p.clone()) {
+                result.push(p);
+            }
+        };
 
     for stmt in body {
         match stmt {
@@ -123,7 +134,7 @@ pub(crate) fn extract_local_imports(root: &Path, file: &Path, body: &[Stmt]) -> 
                 for alias in &import_stmt.names {
                     let module_name = alias.name.id.as_str();
                     if let Some(path) = resolve_absolute_import(root, module_name) {
-                        add(path);
+                        add(path, seen, result);
                     }
                 }
             }
@@ -134,13 +145,13 @@ pub(crate) fn extract_local_imports(root: &Path, file: &Path, body: &[Stmt]) -> 
                     if let Some(module) = &from_stmt.module {
                         let module_name = module.id.as_str();
                         if let Some(path) = resolve_absolute_import(root, module_name) {
-                            add(path);
+                            add(path, seen, result);
                         }
                         for alias in &from_stmt.names {
                             let imported = alias.name.id.as_str();
                             let submodule = format!("{module_name}.{imported}");
                             if let Some(path) = resolve_absolute_import(root, &submodule) {
-                                add(path);
+                                add(path, seen, result);
                             }
                         }
                     }
@@ -156,7 +167,7 @@ pub(crate) fn extract_local_imports(root: &Path, file: &Path, body: &[Stmt]) -> 
                             if let Some(path) =
                                 resolve_relative_import_path(root, &base, module.id.as_str())
                             {
-                                add(path);
+                                add(path, seen, result);
                             }
                         } else {
                             // from . import x, y → try each name as a submodule
@@ -164,18 +175,23 @@ pub(crate) fn extract_local_imports(root: &Path, file: &Path, body: &[Stmt]) -> 
                                 let name = alias.name.id.as_str();
                                 if let Some(path) = resolve_relative_import_path(root, &base, name)
                                 {
-                                    add(path);
+                                    add(path, seen, result);
                                 }
                             }
                         }
                     }
                 }
             }
-            _ => {}
+            _ => {
+                // Imports inside `if __TRYKE_TESTING__:` participate in the
+                // static import graph so `--changed` mode can precisely
+                // re-run in-source tests when their dependencies change.
+                if let Some(inner) = testing_guard_body(stmt) {
+                    collect_local_imports(root, file, inner, seen, result);
+                }
+            }
         }
     }
-
-    result
 }
 
 fn is_locally_defined(name: &str, body: &[Stmt]) -> bool {
@@ -857,6 +873,13 @@ fn stmt_has_dynamic_import(stmt: &Stmt) -> bool {
         Stmt::AnnAssign(s) => s.value.as_ref().is_some_and(|v| expr_has_dynamic_import(v)),
         Stmt::FunctionDef(f) => f.body.iter().any(stmt_has_dynamic_import),
         Stmt::If(s) => {
+            // `if __TRYKE_TESTING__:` is unreachable in production, so a
+            // dynamic import inside must not mark the file always-dirty.
+            // `testing_guard_body` requires an empty elif/else, so if it
+            // matches the body is the only branch to skip.
+            if testing_guard_body(stmt).is_some() {
+                return false;
+            }
             s.body.iter().any(stmt_has_dynamic_import)
                 || s.elif_else_clauses
                     .iter()
@@ -887,6 +910,94 @@ fn stmt_has_dynamic_import(stmt: &Stmt) -> bool {
 /// (`importlib.import_module(...)` or `__import__(...)`).
 pub(crate) fn has_dynamic_imports(body: &[Stmt]) -> bool {
     body.iter().any(stmt_has_dynamic_import)
+}
+
+/// Collect 1-indexed source lines of any `if __TRYKE_TESTING__:` statement
+/// that has an `elif` or `else` branch. These shapes are silently dropped by
+/// `testing_guard_body`, so we record them to surface a warning.
+pub(crate) fn find_testing_guard_else_lines(body: &[Stmt], line_index: &LineIndex) -> Vec<u32> {
+    let mut out = Vec::new();
+    collect_testing_guard_else_lines(body, line_index, &mut out);
+    out
+}
+
+fn collect_testing_guard_else_lines(body: &[Stmt], line_index: &LineIndex, out: &mut Vec<u32>) {
+    for stmt in body {
+        if let Stmt::If(s) = stmt
+            && is_testing_guard_condition(&s.test)
+            && !s.elif_else_clauses.is_empty()
+        {
+            let line = u32::try_from(line_index.line_index(s.range.start()).get()).unwrap_or(1);
+            out.push(line);
+        }
+        // Recurse into nested bodies so a guard-with-else inside a function,
+        // class, describe(), or another if-block is still reported.
+        match stmt {
+            Stmt::If(s) => {
+                collect_testing_guard_else_lines(&s.body, line_index, out);
+                for c in &s.elif_else_clauses {
+                    collect_testing_guard_else_lines(&c.body, line_index, out);
+                }
+            }
+            Stmt::With(s) => collect_testing_guard_else_lines(&s.body, line_index, out),
+            Stmt::For(s) => {
+                collect_testing_guard_else_lines(&s.body, line_index, out);
+                collect_testing_guard_else_lines(&s.orelse, line_index, out);
+            }
+            Stmt::While(s) => {
+                collect_testing_guard_else_lines(&s.body, line_index, out);
+                collect_testing_guard_else_lines(&s.orelse, line_index, out);
+            }
+            Stmt::FunctionDef(f) => collect_testing_guard_else_lines(&f.body, line_index, out),
+            Stmt::ClassDef(c) => collect_testing_guard_else_lines(&c.body, line_index, out),
+            Stmt::Try(s) => {
+                collect_testing_guard_else_lines(&s.body, line_index, out);
+                collect_testing_guard_else_lines(&s.orelse, line_index, out);
+                collect_testing_guard_else_lines(&s.finalbody, line_index, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// If `stmt` is `if __TRYKE_TESTING__:` or `if tryke_guard.__TRYKE_TESTING__:`
+/// with no elif/else clauses, return its body. Otherwise, return `None`.
+///
+/// This is the canonical "in-source testing guard" pattern: code inside the
+/// block is executed only when `tryke_guard.__TRYKE_TESTING__` is truthy (i.e.
+/// under the tryke worker). Discovery descends into matched guards to pick up
+/// tests / fixtures / doctests / imports, and treats dynamic imports inside
+/// the guard as unreachable in production (so they do not flag the file
+/// always-dirty).
+///
+/// Narrow by design: no negation, no elif/else, no compound conditions, no
+/// aliases. Shapes with elif/else get detected separately by
+/// `is_testing_guard_with_else` so we can surface a warning rather than
+/// silently dropping tests.
+fn testing_guard_body(stmt: &Stmt) -> Option<&[Stmt]> {
+    let Stmt::If(s) = stmt else {
+        return None;
+    };
+    if !s.elif_else_clauses.is_empty() {
+        return None;
+    }
+    if !is_testing_guard_condition(&s.test) {
+        return None;
+    }
+    Some(&s.body)
+}
+
+/// Returns `true` when `expr` is the bare name `__TRYKE_TESTING__` or the
+/// attribute `tryke_guard.__TRYKE_TESTING__`.
+fn is_testing_guard_condition(expr: &Expr) -> bool {
+    match expr {
+        Expr::Name(n) => n.id.as_str() == "__TRYKE_TESTING__",
+        Expr::Attribute(a) => {
+            a.attr.id.as_str() == "__TRYKE_TESTING__"
+                && matches!(&*a.value, Expr::Name(n) if n.id.as_str() == "tryke_guard")
+        }
+        _ => false,
+    }
 }
 
 /// Check whether an expression is a call to `describe` (bare or `tryke.describe`).
@@ -1101,6 +1212,15 @@ fn collect_tests_from_body(
                     errors_out,
                 );
             }
+        } else if let Some(inner) = testing_guard_body(stmt) {
+            // `if __TRYKE_TESTING__:` block — recurse with the same top_body
+            // so decorator / fixture / describe resolution still sees
+            // module-level imports, and with the same groups so tests inside
+            // the guard keep their enclosing describe() context.
+            collect_tests_from_body(
+                inner, top_body, root, file, source, line_index, groups, tests_out, hooks_out,
+                errors_out,
+            );
         }
     }
 }
@@ -1190,7 +1310,14 @@ fn collect_doctests_from_body(
                 // Recurse into methods
                 collect_doctests_from_body(&class.body, root, file, line_index, &class_name, out);
             }
-            _ => {}
+            _ => {
+                // `if __TRYKE_TESTING__:` block — doctests on functions/classes
+                // inside the guard should be discovered the same as at module
+                // top level.
+                if let Some(inner) = testing_guard_body(stmt) {
+                    collect_doctests_from_body(inner, root, file, line_index, prefix, out);
+                }
+            }
         }
     }
 }
@@ -1223,12 +1350,14 @@ pub(crate) fn parse_tests_from_source(root: &Path, file: &Path, source: &str) ->
         &mut errors,
     );
     collect_doctests_from_body(body, root, file, &line_index, "", &mut tests);
+    let testing_guard_else_lines = find_testing_guard_else_lines(body, &line_index);
     for err in &errors {
         log::error!("tryke discovery: {err}");
     }
     ParsedFile {
         tests,
         hooks,
+        testing_guard_else_lines,
         errors,
     }
 }
@@ -2742,5 +2871,312 @@ def fixture(fn):\n    return fn\n\
         let (dir, file) = write_source(source);
         let parsed = parse_tests_from_source(dir.path(), &file, source);
         assert_eq!(parsed.hooks[0].line_number, Some(3));
+    }
+
+    // ------------------------------------------------------------------
+    // __TRYKE_TESTING__ guard tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn tests_inside_testing_guard_are_discovered() {
+        let source = "\
+from tryke_guard import __TRYKE_TESTING__
+
+if __TRYKE_TESTING__:
+    from tryke import test
+    @test
+    def guarded():
+        pass
+";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let names: Vec<&str> = parsed.tests.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["guarded"]);
+    }
+
+    #[test]
+    fn attribute_form_guard_is_recognized() {
+        let source = "\
+import tryke_guard
+
+if tryke_guard.__TRYKE_TESTING__:
+    from tryke import test
+    @test
+    def guarded():
+        pass
+";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let names: Vec<&str> = parsed.tests.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["guarded"]);
+    }
+
+    #[test]
+    fn plain_if_block_does_not_descend() {
+        // Regression: tests inside a non-guard `if` should NOT be collected,
+        // preserving today's behavior.
+        let source = "\
+if CONFIG_FLAG:
+    @test
+    def should_not_be_found():
+        pass
+";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert!(parsed.tests.is_empty());
+    }
+
+    #[test]
+    fn negated_guard_does_not_descend() {
+        let source = "\
+if not __TRYKE_TESTING__:
+    @test
+    def prod_only():
+        pass
+";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert!(parsed.tests.is_empty());
+    }
+
+    #[test]
+    fn guard_with_else_skips_tests_and_emits_warning() {
+        let source = "\
+if __TRYKE_TESTING__:
+    @test
+    def dropped():
+        pass
+else:
+    pass
+";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        // Discovery must NOT pick up tests under a guard with else.
+        assert!(parsed.tests.is_empty());
+        // But it MUST record the line so a warning is surfaced.
+        assert_eq!(parsed.testing_guard_else_lines, vec![1]);
+    }
+
+    #[test]
+    fn guard_with_elif_emits_warning() {
+        let source = "\
+if __TRYKE_TESTING__:
+    @test
+    def dropped():
+        pass
+elif OTHER_FLAG:
+    pass
+";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert!(parsed.tests.is_empty());
+        assert_eq!(parsed.testing_guard_else_lines, vec![1]);
+    }
+
+    #[test]
+    fn guard_without_else_emits_no_warning() {
+        let source = "\
+if __TRYKE_TESTING__:
+    @test
+    def ok():
+        pass
+";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert!(parsed.testing_guard_else_lines.is_empty());
+    }
+
+    #[test]
+    fn non_guard_if_with_else_emits_no_warning() {
+        // Regression: plain if/else without the guard condition must not
+        // trigger the testing-guard warning.
+        let source = "\
+if CONFIG:
+    pass
+else:
+    pass
+";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert!(parsed.testing_guard_else_lines.is_empty());
+    }
+
+    #[test]
+    fn imports_inside_guard_resolve_test_decorator() {
+        // Pin the invariant: is_locally_defined only scans function/class/
+        // assign statements, so a nested `from tryke import test` inside
+        // `if __TRYKE_TESTING__:` does NOT shadow the bare `test` decorator.
+        let source = "\
+if __TRYKE_TESTING__:
+    from tryke import test
+    @test
+    def guarded():
+        pass
+    @test.skip(\"not yet\")
+    def skipped():
+        pass
+";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let names: Vec<&str> = parsed.tests.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"guarded"));
+        assert!(names.contains(&"skipped"));
+    }
+
+    #[test]
+    fn fixtures_inside_testing_guard_are_discovered() {
+        let source = "\
+if __TRYKE_TESTING__:
+    from tryke import fixture
+    @fixture
+    def db():
+        yield \"conn\"
+";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let names: Vec<&str> = parsed.hooks.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(names, vec!["db"]);
+    }
+
+    #[test]
+    fn doctests_inside_testing_guard_are_discovered() {
+        let source = "\
+if __TRYKE_TESTING__:
+    def add(a, b):
+        \"\"\"Add two numbers.
+
+        >>> add(1, 2)
+        3
+        \"\"\"
+        return a + b
+";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let doctests: Vec<&str> = parsed
+            .tests
+            .iter()
+            .filter(|t| t.doctest_object.is_some())
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(doctests, vec!["add"]);
+    }
+
+    #[test]
+    fn imports_inside_guard_are_in_graph() {
+        // Imports inside `if __TRYKE_TESTING__:` must contribute to the
+        // static import graph so --changed precision is preserved.
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        fs::write(dir.path().join("helpers.py"), "VALUE = 1\n").expect("write helpers.py");
+        let user_src = "\
+from tryke_guard import __TRYKE_TESTING__
+
+if __TRYKE_TESTING__:
+    from tryke import test, expect
+    import helpers
+
+    @test
+    def uses_helpers():
+        expect(helpers.VALUE).to_equal(1)
+";
+        fs::write(dir.path().join("user.py"), user_src).expect("write user.py");
+
+        let mut discoverer = crate::Discoverer::new(dir.path());
+        discoverer.rediscover();
+        // Changing helpers.py must re-select user.py because the import
+        // graph now follows the guard-nested import of `helpers`.
+        let changed = vec![dir.path().join("helpers.py")];
+        let tests = discoverer.tests_for_changed(&changed);
+        let names: Vec<&str> = tests.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            names.contains(&"uses_helpers"),
+            "expected uses_helpers in affected tests, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn dynamic_import_inside_guard_does_not_mark_always_dirty() {
+        // An `importlib.import_module(...)` call inside `if __TRYKE_TESTING__:`
+        // is unreachable in production — it must not flag the file as
+        // always-dirty for `--changed`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        let guarded_dyn = "\
+from tryke_guard import __TRYKE_TESTING__
+
+if __TRYKE_TESTING__:
+    import importlib
+    from tryke import test
+
+    @test
+    def ok():
+        mod = importlib.import_module('os')
+";
+        fs::write(dir.path().join("test_guarded_dyn.py"), guarded_dyn).expect("write");
+
+        let mut discoverer = crate::Discoverer::new(dir.path());
+        discoverer.rediscover();
+        let files = discoverer.dynamic_import_files();
+        let names: Vec<&str> = files
+            .iter()
+            .filter_map(|p| p.file_name())
+            .filter_map(|n| n.to_str())
+            .collect();
+        assert!(
+            !names.contains(&"test_guarded_dyn.py"),
+            "guarded dynamic import must NOT mark file always-dirty, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn unguarded_dynamic_import_still_marks_always_dirty() {
+        // Regression: the guard-exemption in stmt_has_dynamic_import must
+        // not suppress legitimate always-dirty flags for non-guarded
+        // dynamic imports.
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        let raw_dyn = "\
+import importlib
+mod = importlib.import_module('os')
+from tryke import test
+@test
+def t(): pass
+";
+        fs::write(dir.path().join("test_raw_dyn.py"), raw_dyn).expect("write");
+
+        let mut discoverer = crate::Discoverer::new(dir.path());
+        discoverer.rediscover();
+        let files = discoverer.dynamic_import_files();
+        let names: Vec<&str> = files
+            .iter()
+            .filter_map(|p| p.file_name())
+            .filter_map(|n| n.to_str())
+            .collect();
+        assert!(
+            names.contains(&"test_raw_dyn.py"),
+            "unguarded dynamic import MUST mark file always-dirty, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn guard_inside_describe_inherits_group() {
+        // Tests inside `with describe(...): if __TRYKE_TESTING__:` should
+        // carry the describe group through.
+        let source = "\
+from tryke import describe
+
+with describe(\"math\"):
+    if __TRYKE_TESTING__:
+        from tryke import test
+        @test
+        def addition():
+            pass
+";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        assert_eq!(parsed.tests.len(), 1);
+        assert_eq!(parsed.tests[0].name, "addition");
+        assert_eq!(parsed.tests[0].groups, vec!["math".to_string()]);
     }
 }

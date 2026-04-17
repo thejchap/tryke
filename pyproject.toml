@@ -31,6 +31,10 @@ exclude = ["benchmarks/suites"] # TODO
 
 [tool.ruff]
 exclude = ["benchmarks/suites"]
+# Treat `python/` as a source root so files like `python/tryke_guard.py`
+# are recognised as top-level modules instead of implicit namespace
+# packages (INP001). Mirrors maturin's `python-source = "python"`.
+src = ["python"]
 
 [tool.ruff.lint]
 select = ["ALL"]
@@ -43,6 +47,10 @@ ignore = ["D", "COM812"]
 [tool.ruff.lint.per-file-ignores]
 "tests/test_hooks.py" = ["B008", "PT028"]
 "python/tryke/hooks.py" = ["B008"]
+# This test deliberately spawns subprocesses to prove that the in-source
+# testing flag does NOT leak into child processes. The subprocess args are
+# fully controlled (sys.executable, fixed -c script), so S603 is spurious.
+"tests/test_in_source_guard.py" = ["S603"]
 
 [tool.tryke]
 exclude = ["benchmarks/suites", "demo"]

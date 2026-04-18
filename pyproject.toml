@@ -59,6 +59,7 @@ exclude = ["benchmarks/suites", "demo"]
 bindings = "bin"
 manifest-path = "crates/tryke/Cargo.toml"
 python-source = "python"
+include = [{ path = "python/tryke_guard.py", format = ["sdist", "wheel"] }]
 
 [build-system]
 requires = ["maturin>=1.0,<2.0"]

@@ -209,10 +209,88 @@ fn is_locally_defined(name: &str, body: &[Stmt]) -> bool {
 
 const MARKER_ATTRS: &[&str] = &["skip", "todo", "xfail", "skip_if"];
 
+/// Tryke symbols that can be imported directly with `from tryke import …`.
+/// Used to bound the `symbol_aliases` table so unrelated imports don't
+/// pollute it.
+const TRYKE_SYMBOLS: &[&str] = &["describe", "test", "fixture", "Depends"];
+
+/// Per-file table of local names that refer to tryke module / symbols.
+///
+/// Built once from the parsed module body so discovery matchers can
+/// recognise both `import tryke as t` (module alias) and
+/// `from tryke import describe as d` (symbol alias) without re-walking
+/// the import statements on every match.
+#[derive(Default)]
+struct TrykeAliases {
+    /// Local names bound to the `tryke` module.
+    /// Contains "tryke" after `import tryke`; "t" after `import tryke as t`.
+    module_aliases: std::collections::HashSet<String>,
+    /// Local name → canonical tryke symbol name.
+    /// `{"describe": "describe"}` after `from tryke import describe`;
+    /// `{"d": "describe"}` after `from tryke import describe as d`.
+    symbol_aliases: std::collections::HashMap<String, &'static str>,
+}
+
+impl TrykeAliases {
+    fn collect(body: &[Stmt]) -> Self {
+        let mut out = Self::default();
+        // Seed with the canonical module name so qualified `tryke.describe`,
+        // `tryke.test`, etc. remain recognised even in files with no visible
+        // `import tryke` — this mirrors the bare-symbol legacy fallback
+        // (`name == canon` in `is_bare_tryke_symbol`) and keeps synthetic
+        // snippets working.
+        out.module_aliases.insert("tryke".to_owned());
+        out.walk(body);
+        out
+    }
+
+    fn walk(&mut self, body: &[Stmt]) {
+        for stmt in body {
+            match stmt {
+                Stmt::Import(s) => {
+                    for alias in &s.names {
+                        if alias.name.id.as_str() == "tryke" {
+                            let local = alias.asname.as_ref().map_or("tryke", |n| n.id.as_str());
+                            self.module_aliases.insert(local.to_owned());
+                        }
+                    }
+                }
+                Stmt::ImportFrom(s)
+                    if s.level == 0
+                        && s.module.as_ref().is_some_and(|m| m.id.as_str() == "tryke") =>
+                {
+                    for alias in &s.names {
+                        let name = alias.name.id.as_str();
+                        if let Some(canon) = TRYKE_SYMBOLS.iter().find(|s| **s == name) {
+                            let local = alias.asname.as_ref().map_or(name, |n| n.id.as_str());
+                            self.symbol_aliases.insert(local.to_owned(), canon);
+                        }
+                    }
+                }
+                _ => {
+                    if let Some(inner) = testing_guard_body(stmt) {
+                        self.walk(inner);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Is `name` a local reference to the `tryke` module?
+    fn is_module(&self, name: &str) -> bool {
+        self.module_aliases.contains(name)
+    }
+
+    /// Does `name` resolve to the tryke symbol `canon`?
+    fn is_symbol(&self, name: &str, canon: &str) -> bool {
+        self.symbol_aliases.get(name).copied() == Some(canon)
+    }
+}
+
 /// Returns `true` if `expr` is a `@test.cases(...)` call (bare or qualified).
 /// Must be a `Call` expression — the bare `test.cases` attribute form has no
 /// runtime meaning.
-fn is_tryke_test_cases_decorator(expr: &Expr, body: &[Stmt]) -> bool {
+fn is_tryke_test_cases_decorator(expr: &Expr, body: &[Stmt], aliases: &TrykeAliases) -> bool {
     let Expr::Call(call) = expr else {
         return false;
     };
@@ -222,39 +300,52 @@ fn is_tryke_test_cases_decorator(expr: &Expr, body: &[Stmt]) -> bool {
     if attr.attr.id.as_str() != "cases" {
         return false;
     }
-    is_bare_test_or_qualified(&attr.value, body)
+    is_bare_test_or_qualified(&attr.value, body, aliases)
 }
 
 /// Recognises bare `test` / `tryke.test` plus the marker attribute forms
 /// (`test.skip`, `test.xfail`, …) and their call wrappers.
-fn is_tryke_test_decorator(expr: &Expr, body: &[Stmt]) -> bool {
+fn is_tryke_test_decorator(expr: &Expr, body: &[Stmt], aliases: &TrykeAliases) -> bool {
     match expr {
-        // tryke.test
+        // tryke.test (or any module alias of tryke)
         Expr::Attribute(a) if a.attr.id.as_str() == "test" => {
-            matches!(&*a.value, Expr::Name(n) if n.id.as_str() == "tryke")
+            matches!(&*a.value, Expr::Name(n) if aliases.is_module(n.id.as_str()))
         }
         // test.skip, test.todo, test.xfail, test.skip_if
         Expr::Attribute(a) if MARKER_ATTRS.contains(&a.attr.id.as_str()) => {
-            is_bare_test_or_qualified(&a.value, body)
+            is_bare_test_or_qualified(&a.value, body, aliases)
         }
-        // Bare test
-        Expr::Name(n) => n.id.as_str() == "test" && !is_locally_defined("test", body),
+        // Bare test (possibly via `from tryke import test as X`)
+        Expr::Name(n) => is_bare_tryke_symbol(n.id.as_str(), "test", body, aliases),
         // Call wrapper: @test(), @test.skip("reason"), @test("name"), etc.
-        Expr::Call(c) => is_tryke_test_decorator(&c.func, body),
+        Expr::Call(c) => is_tryke_test_decorator(&c.func, body, aliases),
         _ => false,
     }
 }
 
 /// Returns true for `test` (Name) or `tryke.test` (Attribute).
-fn is_bare_test_or_qualified(expr: &Expr, body: &[Stmt]) -> bool {
+fn is_bare_test_or_qualified(expr: &Expr, body: &[Stmt], aliases: &TrykeAliases) -> bool {
     match expr {
-        Expr::Name(n) => n.id.as_str() == "test" && !is_locally_defined("test", body),
+        Expr::Name(n) => is_bare_tryke_symbol(n.id.as_str(), "test", body, aliases),
         Expr::Attribute(a) => {
             a.attr.id.as_str() == "test"
-                && matches!(&*a.value, Expr::Name(n) if n.id.as_str() == "tryke")
+                && matches!(&*a.value, Expr::Name(n) if aliases.is_module(n.id.as_str()))
         }
         _ => false,
     }
+}
+
+/// Resolve a bare name to a canonical tryke symbol.
+///
+/// Matches when either (a) the name is explicitly aliased to `canon` via
+/// `from tryke import <canon> [as <name>]`, or (b) the name is literally
+/// `canon` and not shadowed by a local definition — the legacy heuristic
+/// that keeps working for files with no visible import.
+fn is_bare_tryke_symbol(name: &str, canon: &str, body: &[Stmt], aliases: &TrykeAliases) -> bool {
+    if is_locally_defined(name, body) {
+        return false;
+    }
+    aliases.is_symbol(name, canon) || name == canon
 }
 
 /// Check whether a decorator is the tryke `@fixture` decorator. Returns the
@@ -265,22 +356,26 @@ fn is_bare_test_or_qualified(expr: &Expr, body: &[Stmt]) -> bool {
 /// - `@fixture()`
 /// - `@fixture(per="scope")`
 /// - `@tryke.fixture` / `@tryke.fixture(per="scope")`
-fn is_tryke_fixture_decorator(expr: &Expr, body: &[Stmt]) -> Option<FixturePer> {
+fn is_tryke_fixture_decorator(
+    expr: &Expr,
+    body: &[Stmt],
+    aliases: &TrykeAliases,
+) -> Option<FixturePer> {
     match expr {
-        // Bare name: @fixture
-        Expr::Name(n) if n.id.as_str() == "fixture" && !is_locally_defined("fixture", body) => {
+        // Bare name: @fixture (or alias from `from tryke import fixture as X`)
+        Expr::Name(n) if is_bare_tryke_symbol(n.id.as_str(), "fixture", body, aliases) => {
             Some(FixturePer::Test)
         }
-        // Qualified: @tryke.fixture
+        // Qualified: @tryke.fixture (or any module alias of tryke)
         Expr::Attribute(a)
             if a.attr.id.as_str() == "fixture"
-                && matches!(&*a.value, Expr::Name(n) if n.id.as_str() == "tryke") =>
+                && matches!(&*a.value, Expr::Name(n) if aliases.is_module(n.id.as_str())) =>
         {
             Some(FixturePer::Test)
         }
         // Call wrapper: @fixture(...) or @tryke.fixture(...)
         Expr::Call(c) => {
-            let base = is_tryke_fixture_decorator(&c.func, body)?;
+            let base = is_tryke_fixture_decorator(&c.func, body, aliases)?;
             // Inspect keyword arguments for `per="scope"`.
             for kw in &c.arguments.keywords {
                 if kw.arg.as_ref().is_some_and(|k| k.id.as_str() == "per")
@@ -312,6 +407,8 @@ fn extract_depends_from_params(
     file: &Path,
     root: &Path,
     line_index: &LineIndex,
+    top_body: &[Stmt],
+    aliases: &TrykeAliases,
     errors: &mut Vec<String>,
 ) -> Vec<String> {
     let mut deps = Vec::new();
@@ -323,10 +420,10 @@ fn extract_depends_from_params(
             continue;
         };
         let is_depends = match call.func.as_ref() {
-            Expr::Name(n) => n.id.as_str() == "Depends",
+            Expr::Name(n) => is_bare_tryke_symbol(n.id.as_str(), "Depends", top_body, aliases),
             Expr::Attribute(a) => {
                 a.attr.id.as_str() == "Depends"
-                    && matches!(&*a.value, Expr::Name(n) if n.id.as_str() == "tryke")
+                    && matches!(&*a.value, Expr::Name(n) if aliases.is_module(n.id.as_str()))
             }
             _ => false,
         };
@@ -480,7 +577,7 @@ fn extract_decorator_tags(expr: &Expr) -> Vec<String> {
 }
 
 /// Returns `true` if `expr` is a call to `test.case(...)` or `tryke.test.case(...)`.
-fn is_test_case_call(expr: &Expr) -> bool {
+fn is_test_case_call(expr: &Expr, body: &[Stmt], aliases: &TrykeAliases) -> bool {
     let Expr::Call(call) = expr else {
         return false;
     };
@@ -491,10 +588,10 @@ fn is_test_case_call(expr: &Expr) -> bool {
         return false;
     }
     match &*attr.value {
-        Expr::Name(n) => n.id.as_str() == "test",
+        Expr::Name(n) => is_bare_tryke_symbol(n.id.as_str(), "test", body, aliases),
         Expr::Attribute(a) => {
             a.attr.id.as_str() == "test"
-                && matches!(&*a.value, Expr::Name(n) if n.id.as_str() == "tryke")
+                && matches!(&*a.value, Expr::Name(n) if aliases.is_module(n.id.as_str()))
         }
         _ => false,
     }
@@ -536,7 +633,11 @@ fn extract_case_modifiers(call: &ruff_python_ast::ExprCall) -> CaseInfo {
 ///
 /// Returns `Err(msg)` if the decorator's shape is not statically recognizable
 /// (e.g. `@test.cases(build())` or `@test.cases([dynamic, ...])`).
-fn extract_cases(expr: &Expr) -> Result<Vec<CaseInfo>, String> {
+fn extract_cases(
+    expr: &Expr,
+    body: &[Stmt],
+    aliases: &TrykeAliases,
+) -> Result<Vec<CaseInfo>, String> {
     let Expr::Call(call) = expr else {
         return Err("test.cases decorator must be called, e.g. @test.cases(a=...)".to_owned());
     };
@@ -569,7 +670,12 @@ fn extract_cases(expr: &Expr) -> Result<Vec<CaseInfo>, String> {
 
     if has_args {
         // Typed form: every positional arg is a `test.case(...)` call.
-        if call.arguments.args.iter().all(is_test_case_call) {
+        if call
+            .arguments
+            .args
+            .iter()
+            .all(|a| is_test_case_call(a, body, aliases))
+        {
             let mut cases = Vec::with_capacity(call.arguments.args.len());
             for (i, elt) in call.arguments.args.iter().enumerate() {
                 let Expr::Call(inner) = elt else {
@@ -1002,15 +1108,15 @@ fn is_testing_guard_condition(expr: &Expr) -> bool {
 
 /// Check whether an expression is a call to `describe` (bare or `tryke.describe`).
 /// Returns the describe name if it is, `None` otherwise.
-fn extract_describe_name(expr: &Expr) -> Option<String> {
+fn extract_describe_name(expr: &Expr, body: &[Stmt], aliases: &TrykeAliases) -> Option<String> {
     let Expr::Call(call) = expr else {
         return None;
     };
     let is_describe = match call.func.as_ref() {
-        Expr::Name(n) => n.id.as_str() == "describe",
+        Expr::Name(n) => is_bare_tryke_symbol(n.id.as_str(), "describe", body, aliases),
         Expr::Attribute(a) => {
             a.attr.id.as_str() == "describe"
-                && matches!(&*a.value, Expr::Name(n) if n.id.as_str() == "tryke")
+                && matches!(&*a.value, Expr::Name(n) if aliases.is_module(n.id.as_str()))
         }
         _ => return None,
     };
@@ -1021,6 +1127,14 @@ fn extract_describe_name(expr: &Expr) -> Option<String> {
         && let Expr::StringLiteral(s) = first
     {
         return Some(s.value.to_str().to_owned());
+    }
+    // Also accept the kwarg form: `describe(name="…")`.
+    for kw in &call.arguments.keywords {
+        if kw.arg.as_ref().is_some_and(|k| k.id.as_str() == "name")
+            && let Expr::StringLiteral(s) = &kw.value
+        {
+            return Some(s.value.to_str().to_owned());
+        }
     }
     None
 }
@@ -1034,6 +1148,7 @@ fn collect_cases_from_func(
     file: &Path,
     source: &str,
     line_index: &LineIndex,
+    aliases: &TrykeAliases,
     groups: &[String],
     tests_out: &mut Vec<TestItem>,
     errors_out: &mut Vec<String>,
@@ -1041,8 +1156,8 @@ fn collect_cases_from_func(
     // Forbid `@test` and `@test.cases` on the same function — the runtime
     // dispatch can only resolve one of them.
     let plain_test_dec = func.decorator_list.iter().any(|d| {
-        is_tryke_test_decorator(&d.expression, top_body)
-            && !is_tryke_test_cases_decorator(&d.expression, top_body)
+        is_tryke_test_decorator(&d.expression, top_body, aliases)
+            && !is_tryke_test_cases_decorator(&d.expression, top_body, aliases)
             && matches!(extract_test_modifier(&d.expression), TestModifier::None)
     });
     if plain_test_dec {
@@ -1056,7 +1171,7 @@ fn collect_cases_from_func(
         return;
     }
 
-    let cases = match extract_cases(&cases_dec.expression) {
+    let cases = match extract_cases(&cases_dec.expression, top_body, aliases) {
         Ok(cases) => cases,
         Err(msg) => {
             let display_file = file.strip_prefix(root).unwrap_or(file).display();
@@ -1072,8 +1187,8 @@ fn collect_cases_from_func(
     // Function-level modifiers (@test.skip / @test.xfail / @test.todo) act as
     // defaults — per-case modifiers from test.case(...) take precedence.
     let modifier_dec = func.decorator_list.iter().find(|d| {
-        is_tryke_test_decorator(&d.expression, top_body)
-            && !is_tryke_test_cases_decorator(&d.expression, top_body)
+        is_tryke_test_decorator(&d.expression, top_body, aliases)
+            && !is_tryke_test_cases_decorator(&d.expression, top_body, aliases)
             && !matches!(extract_test_modifier(&d.expression), TestModifier::None)
     });
     let modifier =
@@ -1119,6 +1234,7 @@ fn collect_tests_from_body(
     file: &Path,
     source: &str,
     line_index: &LineIndex,
+    aliases: &TrykeAliases,
     groups: &[String],
     tests_out: &mut Vec<TestItem>,
     hooks_out: &mut Vec<HookItem>,
@@ -1132,16 +1248,16 @@ fn collect_tests_from_body(
             let cases_dec = func
                 .decorator_list
                 .iter()
-                .find(|d| is_tryke_test_cases_decorator(&d.expression, top_body));
+                .find(|d| is_tryke_test_cases_decorator(&d.expression, top_body, aliases));
             let test_dec = func
                 .decorator_list
                 .iter()
-                .find(|d| is_tryke_test_decorator(&d.expression, top_body));
+                .find(|d| is_tryke_test_decorator(&d.expression, top_body, aliases));
 
             if let Some(cases_dec) = cases_dec {
                 collect_cases_from_func(
-                    func, cases_dec, top_body, root, file, source, line_index, groups, tests_out,
-                    errors_out,
+                    func, cases_dec, top_body, root, file, source, line_index, aliases, groups,
+                    tests_out, errors_out,
                 );
             } else if let Some(dec) = test_dec {
                 let display_name = extract_decorator_name(&dec.expression)
@@ -1176,10 +1292,11 @@ fn collect_tests_from_body(
             else if let Some(per) = func
                 .decorator_list
                 .iter()
-                .find_map(|d| is_tryke_fixture_decorator(&d.expression, top_body))
+                .find_map(|d| is_tryke_fixture_decorator(&d.expression, top_body, aliases))
             {
-                let depends_on =
-                    extract_depends_from_params(func, file, root, line_index, errors_out);
+                let depends_on = extract_depends_from_params(
+                    func, file, root, line_index, top_body, aliases, errors_out,
+                );
                 hooks_out.push(HookItem {
                     name: func.name.id.as_str().to_owned(),
                     module_path: path_to_module(root, file),
@@ -1195,7 +1312,7 @@ fn collect_tests_from_body(
             let describe_name = with_stmt
                 .items
                 .iter()
-                .find_map(|item| extract_describe_name(&item.context_expr));
+                .find_map(|item| extract_describe_name(&item.context_expr, top_body, aliases));
             if let Some(name) = describe_name {
                 let mut nested_groups = groups.to_vec();
                 nested_groups.push(name);
@@ -1206,6 +1323,7 @@ fn collect_tests_from_body(
                     file,
                     source,
                     line_index,
+                    aliases,
                     &nested_groups,
                     tests_out,
                     hooks_out,
@@ -1218,8 +1336,8 @@ fn collect_tests_from_body(
             // module-level imports, and with the same groups so tests inside
             // the guard keep their enclosing describe() context.
             collect_tests_from_body(
-                inner, top_body, root, file, source, line_index, groups, tests_out, hooks_out,
-                errors_out,
+                inner, top_body, root, file, source, line_index, aliases, groups, tests_out,
+                hooks_out, errors_out,
             );
         }
     }
@@ -1334,6 +1452,7 @@ pub(crate) fn parse_tests_from_source(root: &Path, file: &Path, source: &str) ->
     let line_index = LineIndex::from_source_text(source);
     let module = parsed.syntax();
     let body = &module.body;
+    let aliases = TrykeAliases::collect(body);
     let mut tests = Vec::new();
     let mut hooks = Vec::new();
     let mut errors = Vec::new();
@@ -1344,6 +1463,7 @@ pub(crate) fn parse_tests_from_source(root: &Path, file: &Path, source: &str) ->
         file,
         source,
         &line_index,
+        &aliases,
         &[],
         &mut tests,
         &mut hooks,
@@ -3178,5 +3298,167 @@ with describe(\"math\"):
         assert_eq!(parsed.tests.len(), 1);
         assert_eq!(parsed.tests[0].name, "addition");
         assert_eq!(parsed.tests[0].groups, vec!["math".to_string()]);
+    }
+
+    #[test]
+    fn recognizes_tryke_module_alias() {
+        let source = "\
+import tryke as t
+with t.describe(\"Channel\"):
+    @t.test
+    def test_basic():
+        pass
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "test_basic");
+        assert_eq!(items[0].groups, vec!["Channel".to_string()]);
+    }
+
+    #[test]
+    fn recognizes_tryke_fixture_alias() {
+        let source = "\
+import tryke as t
+@t.fixture
+def db():
+    pass
+";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_file(dir.path(), &file);
+        assert_eq!(parsed.hooks.len(), 1);
+        assert_eq!(parsed.hooks[0].name, "db");
+    }
+
+    #[test]
+    fn recognizes_tryke_test_cases_alias() {
+        let source = "\
+import tryke as tk
+@tk.test.cases(a={}, b={})
+def fn():
+    pass
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
+        assert_eq!(items.len(), 2);
+        let labels: Vec<_> = items
+            .iter()
+            .map(|i| i.case_label.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(labels, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn recognizes_tryke_test_case_typed_alias() {
+        let source = "\
+import tryke as t
+@t.test.cases(
+    t.test.case(\"zero\", n=0),
+    t.test.case(\"one\", n=1),
+)
+def fn(n):
+    pass
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
+        assert_eq!(items.len(), 2);
+        let labels: Vec<_> = items
+            .iter()
+            .map(|i| i.case_label.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(labels, vec!["zero", "one"]);
+    }
+
+    #[test]
+    fn recognizes_symbol_alias_bare_describe() {
+        let source = "\
+from tryke import describe as d, test as tst
+with d(\"Group\"):
+    @tst
+    def fn():
+        pass
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "fn");
+        assert_eq!(items[0].groups, vec!["Group".to_string()]);
+    }
+
+    #[test]
+    fn recognizes_symbol_alias_test_skip() {
+        let source = "\
+from tryke import test as tst
+@tst.skip(\"broken\")
+def fn():
+    pass
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].skip.as_deref(), Some("broken"));
+    }
+
+    #[test]
+    fn recognizes_alias_inside_testing_guard() {
+        // Screenshot scenario: `import tryke as t` sits inside the
+        // `if __TRYKE_TESTING__:` guard. Discovery must still see it.
+        let source = "\
+from tryke_guard import __TRYKE_TESTING__
+
+if __TRYKE_TESTING__:
+    import tryke as t
+
+    with t.describe(name=\"Channel\"):
+        @t.test
+        def test_basic() -> None:
+            pass
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "test_basic");
+        assert_eq!(items[0].groups, vec!["Channel".to_string()]);
+    }
+
+    #[test]
+    fn local_def_shadows_imported_alias() {
+        // A local `def tst` wins over `from tryke import test as tst`,
+        // matching Python scoping.
+        let source = "\
+from tryke import test as tst
+
+def tst(fn):
+    return fn
+
+@tst
+def fn():
+    pass
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &file).tests;
+        assert!(items.is_empty(), "expected shadowed alias to not match");
+    }
+
+    #[test]
+    fn recognizes_aliased_depends() {
+        let source = "\
+from tryke import fixture, Depends as Dep
+@fixture
+def parent():
+    pass
+
+@fixture
+def child(p=Dep(parent)):
+    pass
+";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_file(dir.path(), &file);
+        let child = parsed
+            .hooks
+            .iter()
+            .find(|h| h.name == "child")
+            .expect("child fixture not found");
+        assert_eq!(child.depends_on, vec!["parent".to_string()]);
     }
 }

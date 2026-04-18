@@ -1,6 +1,6 @@
 # Configuration
 
-tryke is configured via `pyproject.toml` under the `[tool.tryke]` table.
+Tryke is configured via `pyproject.toml` under the `[tool.tryke]` table.
 
 ## `pyproject.toml`
 
@@ -48,7 +48,7 @@ This is useful for one-off runs against normally excluded paths without editing 
 
 ### `--root`
 
-Override the project root (where tryke looks for `pyproject.toml` and test files):
+Override the project root (where Tryke looks for `pyproject.toml` and test files):
 
 ```bash
 tryke test --root /path/to/project

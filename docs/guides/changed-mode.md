@@ -40,7 +40,7 @@ tryke test --changed --base-branch origin/main
 
 ## How it works
 
-1. tryke runs `git diff` to find changed `.py` files
+1. Tryke runs `git diff` to find changed `.py` files
 2. The static import graph (see [test discovery](../concepts/discovery.md)) maps each changed file to the test files that depend on it
 3. Only the affected test files are collected and run
 

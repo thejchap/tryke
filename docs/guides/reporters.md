@@ -1,6 +1,6 @@
 # Reporters
 
-tryke supports multiple output formats via the `--reporter` flag.
+Tryke supports multiple output formats via the `--reporter` flag.
 
 ```bash
 tryke test --reporter <format>

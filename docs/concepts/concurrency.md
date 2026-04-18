@@ -1,6 +1,6 @@
 # Concurrency
 
-tryke runs tests in parallel using a pool of Python worker processes managed by the Rust runtime.
+Tryke runs tests in parallel using a pool of Python worker processes managed by the Rust runtime.
 
 ## Worker pool
 
@@ -26,7 +26,7 @@ The `tryke test` default avoids creating more workers than there are tests to ru
 
 ## Pre-warming
 
-Workers are pre-warmed at startup. Before any tests execute, tryke sends a ping to every worker, causing each one to spawn its Python subprocess in parallel. This means Python startup latency is absorbed before the first test begins, not during it.
+Workers are pre-warmed at startup. Before any tests execute, Tryke sends a ping to every worker, causing each one to spawn its Python subprocess in parallel. This means Python startup latency is absorbed before the first test begins, not during it.
 
 ## Distribution modes
 
@@ -67,7 +67,7 @@ Fixtures interact with the distribution mode. The key constraint:
 `@fixture(per="scope")` caches its return value in the worker's Python
 process. All tests that share a cached value must run on the same worker.
 
-When tryke detects `per="scope"` fixtures during discovery, it
+When Tryke detects `per="scope"` fixtures during discovery, it
 automatically upgrades the distribution mode:
 
 | Fixtures present | Requested mode | Effective mode | Why |

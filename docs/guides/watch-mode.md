@@ -8,7 +8,7 @@ Watch mode monitors your project for file changes and reruns only the affected t
 tryke watch
 ```
 
-tryke watches all `.py` files in the project, respecting `.gitignore`. When a file changes, it:
+Tryke watches all `.py` files in the project, respecting `.gitignore`. When a file changes, it:
 
 1. Identifies which modules were modified
 2. Walks the import graph to find all tests that depend on the changed modules
@@ -18,7 +18,7 @@ This gives you fast feedback without rerunning the entire suite.
 
 ## How affected tests are determined
 
-tryke builds a static import graph at startup (see [test discovery](../concepts/discovery.md)). When a file changes, it traces the graph forward to find every test file that transitively imports the changed module, then reruns the tests in those files.
+Tryke builds a static import graph at startup (see [test discovery](../concepts/discovery.md)). When a file changes, it traces the graph forward to find every test file that transitively imports the changed module, then reruns the tests in those files.
 
 Files with dynamic imports (`importlib.import_module()`, `__import__()`) are always included in every rerun. See [discovery](../concepts/discovery.md#what-happens-when-dynamic-imports-are-detected) for details.
 

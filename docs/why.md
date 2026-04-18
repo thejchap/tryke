@@ -1,8 +1,8 @@
-# Why tryke?
+# Why Tryke?
 
-An honest look at what tryke does well, where pytest wins, and when each tool is the right choice.
+An honest look at what Tryke does well, where pytest wins, and when each tool is the right choice.
 
-## What makes tryke different
+## What makes Tryke different
 
 ### Rust-powered speed
 
@@ -49,7 +49,7 @@ Tryke also supports project-level discovery excludes through `[tool.tryke]` in `
 
 ## Comparison
 
-| | tryke | pytest |
+| | Tryke | pytest |
 |---|---|---|
 | **Startup speed** | Fast (Rust binary) | Slower (Python + plugin loading) |
 | **Discovery speed** | Fast (Rust AST parsing) | Slower (Python import) |
@@ -68,12 +68,12 @@ Tryke also supports project-level discovery excludes through `[tool.tryke]` in `
 | **Documentation** | Growing | Extensive |
 | **IDE support** | VS Code, Neovim | All major IDEs |
 
-## When to use tryke
+## When to use Tryke
 
 - **New projects** where you don't need existing pytest plugins
 - **Speed-sensitive CI** where test startup time matters
 - **Developer experience** — rich diagnostics, watch mode, and server mode out of the box
-- **Clean dependency trees** — tryke adds zero transitive dependencies
+- **Clean dependency trees** — Tryke adds zero transitive dependencies
 - **Async-heavy projects** — no extra plugins for async test support
 - **Fast incremental local runs** — `--changed` is useful when you want a lightweight affected-tests pass
 
@@ -83,11 +83,11 @@ Tryke also supports project-level discovery excludes through `[tool.tryke]` in `
 - **Complex fixture graphs** — pytest's fixture system is unmatched
 - **Stability requirements** — pytest is battle-tested across millions of projects
 - **Team familiarity** — if your team knows pytest well and switching cost is high
-- **High-confidence test impact analysis** — `pytest-testmon` is more thorough than tryke's static changed-files mode
+- **High-confidence test impact analysis** — `pytest-testmon` is more thorough than Tryke's static changed-files mode
 
 ## Roadmap
 
-What's coming to tryke:
+What's coming to Tryke:
 
 - **Fixtures / dependency injection** — a lightweight fixture system
 - **Parametrize** — built-in test parameterization

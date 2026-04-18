@@ -1,6 +1,6 @@
 # Filtering tests
 
-tryke supports three ways to narrow which tests run: name expressions, tag expressions, and path targeting. They can be combined freely.
+Tryke supports three ways to narrow which tests run: name expressions, tag expressions, and path targeting. They can be combined freely.
 
 ## Name filtering with `-k`
 

@@ -1,10 +1,10 @@
 # Doctests
 
-tryke automatically discovers and runs Python doctests alongside your regular tests. No configuration needed.
+Tryke automatically discovers and runs Python doctests alongside your regular tests. No configuration needed.
 
 ## How discovery works
 
-tryke's static parser scans docstrings for the `>>>` prompt marker. Any docstring containing interactive examples is collected as a single test — even if the docstring has several `>>>` lines, they run together and report as one `doctest: name` entry. This works at every level:
+Tryke's static parser scans docstrings for the `>>>` prompt marker. Any docstring containing interactive examples is collected as a single test — even if the docstring has several `>>>` lines, they run together and report as one `doctest: name` entry. This works at every level:
 
 ### Module-level
 
@@ -100,4 +100,4 @@ tryke test -k "doctest"
 
 ## Static discovery
 
-Like all tryke test discovery, doctests are found by parsing source files — not by importing modules. This means discovery is fast and side-effect free. See [test discovery](../concepts/discovery.md) for details.
+Like all Tryke test discovery, doctests are found by parsing source files — not by importing modules. This means discovery is fast and side-effect free. See [test discovery](../concepts/discovery.md) for details.

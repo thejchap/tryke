@@ -2,11 +2,11 @@
 
 ## Requirements
 
-tryke requires **Python 3.12 or newer**. Wheels are published for Linux (x86_64), macOS (arm64), and Windows (x86_64).
+Tryke requires **Python 3.12 or newer**. Wheels are published for Linux (x86_64), macOS (arm64), and Windows (x86_64).
 
 ## Running without installation
 
-The easiest way to get started with tryke is with [uvx](https://docs.astral.sh/uv/guides/tools/)
+The easiest way to get started with Tryke is with [uvx](https://docs.astral.sh/uv/guides/tools/)
 
 ```bash
 uvx tryke test
@@ -14,26 +14,26 @@ uvx tryke test
 
 ## Installation methods
 
-### Adding tryke to your project
+### Adding Tryke to your project
 
-Use uv or your package manager of choice to add tryke as a dev dependency.
+Use uv or your package manager of choice to add Tryke as a dev dependency.
 
 ```bash
 uv add --dev tryke
 ```
 
-Then, use uv run to invoke tryke:
+Then, use uv run to invoke Tryke:
 
 ```bash
 uv run tryke
 ```
 
-To update tryke, use --upgrade-package:
+To update Tryke, use --upgrade-package:
 
 ```bash
 uv lock --upgrade-package tryke
 ```
 
-## Using tryke in your editor
+## Using Tryke in your editor
 
 See the [editor integration guide](editor-integration.md)

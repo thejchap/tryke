@@ -1,6 +1,6 @@
 # Soft assertions
 
-In tryke, assertions are **soft by default**. Every assertion in a test runs even if earlier ones fail. This is the opposite of pytest, where the first failing `assert` stops the test.
+In Tryke, assertions are **soft by default**. Every assertion in a test runs even if earlier ones fail. This is the opposite of pytest, where the first failing `assert` stops the test.
 
 ## Why soft assertions
 
@@ -50,7 +50,7 @@ Use `.fatal()` when later assertions depend on an earlier one passing — like c
 
 ## Comparison with pytest
 
-| Behavior | pytest | tryke |
+| Behavior | pytest | Tryke |
 |----------|--------|-------|
 | Default | Hard — first failure stops the test | Soft — all assertions run |
 | Early stop | Default behavior | Opt-in via `.fatal()` |

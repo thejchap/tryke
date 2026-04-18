@@ -1,6 +1,6 @@
 # Client/server mode
 
-tryke can run as a persistent server that keeps Python workers warm and caches test discovery. Clients connect over TCP to request test runs with minimal startup overhead.
+Tryke can run as a persistent server that keeps Python workers warm and caches test discovery. Clients connect over TCP to request test runs with minimal startup overhead.
 
 ## Starting the server
 

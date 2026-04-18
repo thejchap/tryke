@@ -1,16 +1,16 @@
 # Test Discovery
 
-tryke discovers tests without running your code. It uses a Rust-powered Python parser
+Tryke discovers tests without running your code. It uses a Rust-powered Python parser
 ([Ruff](https://github.com/astral-sh/ruff)) to read your source files at startup, build
 an import graph, and identify every test function — all before a Python interpreter is
 ever involved.
 
-This is why tryke is fast: it reasons about your code the way a compiler does, at
+This is why Tryke is fast: it reasons about your code the way a compiler does, at
 parse time rather than runtime.
 
 ## Recursion into structured blocks
 
-Beyond scanning the module body, tryke recurses into two specific block shapes where
+Beyond scanning the module body, Tryke recurses into two specific block shapes where
 tests legitimately nest:
 
 - `with describe("name"):` — tests inside are collected with the group name as a
@@ -38,8 +38,8 @@ No other `if`/`for`/`while` bodies are descended: keeping discovery narrow means
 
 ## What happens when dynamic imports are detected
 
-tryke detects `importlib.import_module()` and `__import__()` calls during the parse
-phase. When a file contains either, tryke marks it as **always re-run**.
+Tryke detects `importlib.import_module()` and `__import__()` calls during the parse
+phase. When a file contains either, Tryke marks it as **always re-run**.
 
 ### Effect on `--changed` and `--changed-first` mode
 
@@ -48,7 +48,7 @@ statically imports changed. A single widely-imported helper with one dynamic imp
 pull many tests back into every run — silently undermining the precision of
 impact-based filtering.
 
-tryke will emit a warning when this happens:
+Tryke will emit a warning when this happens:
 
 ```text
 warning: tests/helpers/loader.py — dynamic imports found; this file will always re-run with --changed
@@ -57,7 +57,7 @@ warning: tests/helpers/loader.py — dynamic imports found; this file will alway
 
 ### Effect on watch and server mode
 
-tryke tracks which Python modules to reload between test cycles by following static
+Tryke tracks which Python modules to reload between test cycles by following static
 import edges. Dynamic import edges are invisible to this graph. This means:
 
 - If `helper.py` is only imported dynamically by `loader.py`, and `helper.py` changes,
@@ -107,7 +107,7 @@ are unaffected.
 
 ### Use `TYPE_CHECKING` for type-only imports
 
-tryke already handles `TYPE_CHECKING` blocks correctly — they are treated as static
+Tryke already handles `TYPE_CHECKING` blocks correctly — they are treated as static
 imports and fully tracked:
 
 ```python
@@ -121,7 +121,7 @@ if TYPE_CHECKING:
 ### Exclude files that don't contain tests
 
 If a file uses dynamic imports for non-test purposes (code generation, benchmarks,
-scripts) and contains no tests, tell tryke to ignore it:
+scripts) and contains no tests, tell Tryke to ignore it:
 
 ```toml
 # pyproject.toml

@@ -1,6 +1,6 @@
 # Benchmarks
 
-Performance comparisons between tryke and pytest using synthetic test suites.
+Performance comparisons between Tryke and pytest using synthetic test suites.
 
 Published results on this page are generated from benchmark artifacts checked into the
 repo. They reflect the local machine they were recorded on, so treat them as directional
@@ -22,7 +22,7 @@ Benchmarks use [hyperfine](https://github.com/sharkdp/hyperfine) to measure wall
 
 Time to find and parse all tests without executing them:
 
-- **tryke:** `tryke test --collect-only`
+- **Tryke:** `tryke test --collect-only`
 - **pytest:** `pytest --collect-only -q`
 
 Tryke discovers tests by parsing Python AST in Rust, without importing modules. Pytest imports modules to collect tests.
@@ -31,7 +31,7 @@ Tryke discovers tests by parsing Python AST in Rust, without importing modules. 
 
 Full cold-start execution:
 
-- **tryke:** `tryke test`
+- **Tryke:** `tryke test`
 - **pytest:** `pytest -q`
 
 ### Execution time (server mode)
@@ -58,7 +58,7 @@ uv run python benchmarks/summarize.py --check
 Results are saved to `benchmarks/results/` as JSON files. Generated summaries are written
 to `benchmarks/RESULTS.md` and embedded below.
 
-## Why tryke is faster
+## Why Tryke is faster
 
 1. **Rust binary startup** — no Python interpreter startup cost for the runner itself
 2. **AST-based discovery** — tests are found by parsing source files in Rust, not by importing Python modules

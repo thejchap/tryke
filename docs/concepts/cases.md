@@ -1,6 +1,6 @@
 ## Parametrized tests with `@test.cases`
 
-`@test.cases` expands a single test function into one test per input row, so you can exercise the same assertions against a table of inputs without copy-pasting (or sneaking a `for`-loop into the module body where tryke's static discovery can't see it).
+`@test.cases` expands a single test function into one test per input row, so you can exercise the same assertions against a table of inputs without copy-pasting (or sneaking a `for`-loop into the module body where Tryke's static discovery can't see it).
 
 Each generated case is a first-class test: it has its own ID (`path::fn[label]`), its own row in reporters, and can be filtered, skipped, or re-run independently.
 
@@ -66,7 +66,7 @@ def scaled(n: int, expected: int, factor: int = Depends(multiplier)):
     expect(n * factor).to_equal(expected)
 ```
 
-A case kwarg must not collide with a fixture-injected parameter — tryke raises `TypeError` at call time if it does. Pick a different name for the case argument.
+A case kwarg must not collide with a fixture-injected parameter — Tryke raises `TypeError` at call time if it does. Pick a different name for the case argument.
 
 ### With `@test.skip`, `@test.xfail`, and `@test.todo`
 
@@ -132,11 +132,11 @@ Non-literal decorator shapes emit a discovery error and the tests are skipped. T
 
 ## Comparison with pytest
 
-| pytest | tryke |
+| pytest | Tryke |
 |--------|-------|
 | `@pytest.mark.parametrize("x,y", [(1, 2), (3, 4)])` | `@test.cases(test.case("a", x=1, y=2), test.case("b", x=3, y=4))` |
 | `@pytest.mark.parametrize("x", [1, 2], ids=["one", "two"])` | `@test.cases(test.case("one", x=1), test.case("two", x=2))` |
 | Case ID: `test_fn[one-two]` | Case ID: `fn[one]`, `fn[two]` |
 | Parameters match by name positionally | Each case is a dict — names are explicit |
 
-The key difference: tryke cases are discovered statically (no import), so editor plugins, `--collect-only`, and distributed scheduling all see every case as a first-class test up front.
+The key difference: Tryke cases are discovered statically (no import), so editor plugins, `--collect-only`, and distributed scheduling all see every case as a first-class test up front.

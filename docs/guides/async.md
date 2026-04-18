@@ -15,7 +15,7 @@ async def fetches_data():
     expect(result).to_equal(42)
 ```
 
-That's it. tryke detects async test functions and runs them on an event loop automatically.
+That's it. Tryke detects async test functions and runs them on an event loop automatically.
 
 ## Comparison with pytest
 
@@ -30,7 +30,7 @@ async def test_fetches_data():
     assert result == 42
 ```
 
-tryke needs neither — `@test` + `async def` is all you need.
+Tryke needs neither — `@test` + `async def` is all you need.
 
 ## All decorators work with async
 

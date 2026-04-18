@@ -1,6 +1,6 @@
 # Migration from pytest
 
-A side-by-side guide for moving from pytest to tryke.
+A side-by-side guide for moving from pytest to Tryke.
 
 ## Cheat sheet
 
@@ -13,7 +13,7 @@ def test_addition():
     assert 1 + 1 == 2
 ```
 
-**tryke:**
+**Tryke:**
 
 ```python
 from tryke import expect, test
@@ -27,7 +27,7 @@ The `@test` decorator replaces the `test_` prefix convention. Assertions use `ex
 
 ### Assertions
 
-| pytest | tryke |
+| pytest | Tryke |
 |--------|-------|
 | `assert x == y` | `expect(x).to_equal(y)` |
 | `assert x is y` | `expect(x).to_be(y)` |
@@ -52,7 +52,7 @@ def test_raises():
         int("abc")
 ```
 
-**tryke:**
+**Tryke:**
 
 ```python
 from tryke import expect, test
@@ -78,7 +78,7 @@ def test_unix():
     ...
 ```
 
-**tryke:**
+**Tryke:**
 
 ```python
 from tryke import test
@@ -102,7 +102,7 @@ def test_known():
     assert 1 == 2
 ```
 
-**tryke:**
+**Tryke:**
 
 ```python
 @test.xfail("known bug")
@@ -123,7 +123,7 @@ async def test_async():
     assert result == 42
 ```
 
-**tryke** (built-in):
+**Tryke** (built-in):
 
 ```python
 @test
@@ -134,7 +134,7 @@ async def async_operation():
 
 ### Filtering
 
-| pytest | tryke |
+| pytest | Tryke |
 |--------|-------|
 | `pytest -k "math"` | `tryke test -k "math"` |
 | `pytest -m "slow"` | `tryke test -m "slow"` |
@@ -143,7 +143,7 @@ async def async_operation():
 
 ### Reporters
 
-| pytest | tryke |
+| pytest | Tryke |
 |--------|-------|
 | default verbose | `tryke test` (text reporter) |
 | `--tb=short` | `tryke test --reporter dot` |
@@ -158,7 +158,7 @@ async def async_operation():
 pytest --lf  # last failed
 ```
 
-**tryke** (built-in):
+**Tryke** (built-in):
 
 ```bash
 tryke test --changed  # tests affected by git changes
@@ -203,7 +203,7 @@ def test_query(table):
     assert table.count() == 1
 ```
 
-**tryke:**
+**Tryke:**
 
 ```python
 from tryke import test, expect, fixture, Depends
@@ -242,7 +242,7 @@ def test_square(n, expected):
     assert n * n == expected
 ```
 
-**tryke:**
+**Tryke:**
 
 ```python
 @test.cases(
@@ -268,7 +268,7 @@ async def test_under_runner(runner):
     ...
 ```
 
-**tryke:**
+**Tryke:**
 
 ```python
 @test.cases(

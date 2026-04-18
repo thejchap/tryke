@@ -31,7 +31,7 @@ Jump to a specific test by pointing at the line where it's defined:
 tryke test tests/test_math.py:12
 ```
 
-tryke runs the test whose definition spans that line. This is especially useful from editor integrations that can resolve the cursor position.
+Tryke runs the test whose definition spans that line. This is especially useful from editor integrations that can resolve the cursor position.
 
 ## Collecting without running
 
@@ -41,7 +41,7 @@ Use `--collect-only` to list discovered tests without executing them:
 tryke test --collect-only
 ```
 
-This is useful for verifying [filtering](filtering.md) expressions or checking that tryke sees your tests.
+This is useful for verifying [filtering](filtering.md) expressions or checking that Tryke sees your tests.
 
 ## Stopping on failure
 
@@ -59,7 +59,7 @@ tryke test --maxfail 3
 
 ## Parallel execution
 
-tryke runs tests in parallel by default. The worker count defaults to `min(test_count, cpu_count)`. Override with `-j` / `--workers`:
+Tryke runs tests in parallel by default. The worker count defaults to `min(test_count, cpu_count)`. Override with `-j` / `--workers`:
 
 ```bash
 tryke test -j 4
@@ -81,13 +81,13 @@ See [concurrency](../concepts/concurrency.md) for details on the worker pool mod
 
 ## Project root
 
-By default tryke uses the current directory as the project root. Override with `--root`:
+By default Tryke uses the current directory as the project root. Override with `--root`:
 
 ```bash
 tryke test --root /path/to/project
 ```
 
-The root determines where tryke looks for `pyproject.toml`, test files, and the import graph.
+The root determines where Tryke looks for `pyproject.toml`, test files, and the import graph.
 
 ## Filtering
 

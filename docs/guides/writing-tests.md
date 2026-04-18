@@ -31,7 +31,7 @@ for x, expected in [(1, 2), (2, 3), (3, 4)]:
         expect(x + 1).to_equal(expected)
 ```
 
-If you don't pass `name=`, tryke uses the first line of the function's docstring as the display name, falling back to the function name if there is no docstring:
+If you don't pass `name=`, Tryke uses the first line of the function's docstring as the display name, falling back to the function name if there is no docstring:
 
 ```python
 @test
@@ -145,7 +145,7 @@ if __TRYKE_TESTING__:
 
 In production `__TRYKE_TESTING__` is `False`, the `if` block is dead code,
 and `tryke` itself never loads. Under `tryke test` the worker flips the flag
-at startup and tryke discovers the guarded tests exactly like top-level
+at startup and Tryke discovers the guarded tests exactly like top-level
 ones. `@test`, `@test.cases`, `@fixture`, `with describe(...)`, and
 doctests all work inside the guard; imports inside it participate in the
 `--changed` import graph.
@@ -410,4 +410,4 @@ def known_broken():
     expect(1).to_equal(2)
 ```
 
-If the test passes unexpectedly, tryke reports it so you know the issue may be resolved.
+If the test passes unexpectedly, Tryke reports it so you know the issue may be resolved.

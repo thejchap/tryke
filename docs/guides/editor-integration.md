@@ -11,5 +11,5 @@ VS Code support is provided by the [tryke-vscode](https://github.com/thejchap/tr
 ## In-source tests
 
 Both plugins support [in-source tests](writing-tests.md#in-source-testing) unchanged —
-they consume tryke's discovery output, which already carries guard-nested tests with
+they consume Tryke's discovery output, which already carries guard-nested tests with
 correct file and line information.

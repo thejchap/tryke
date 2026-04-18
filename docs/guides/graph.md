@@ -1,6 +1,6 @@
 # Graph
 
-`tryke graph` prints dependency graphs that tryke builds during discovery — the import graph by default, and the fixture graph with `--fixtures`. These are the same graphs that power [changed mode](changed-mode.md) and fixture resolution, so exposing them directly is useful for debugging collection problems, exploring how files or fixtures are connected, and sanity-checking what `--changed` will actually run.
+`tryke graph` prints dependency graphs that Tryke builds during discovery — the import graph by default, and the fixture graph with `--fixtures`. These are the same graphs that power [changed mode](changed-mode.md) and fixture resolution, so exposing them directly is useful for debugging collection problems, exploring how files or fixtures are connected, and sanity-checking what `--changed` will actually run.
 
 ## Basic usage
 
@@ -82,7 +82,7 @@ tests.test_db::session  [per=test]
   used by:     (none)
 ```
 
-References to hooks tryke cannot resolve (typos, missing imports, dynamically-constructed names) are printed with a `?` suffix so you can spot them without running the suite. `--fixtures` is mutually exclusive with `--changed` / `--connected-only`.
+References to hooks Tryke cannot resolve (typos, missing imports, dynamically-constructed names) are printed with a `?` suffix so you can spot them without running the suite. `--fixtures` is mutually exclusive with `--changed` / `--connected-only`.
 
 ### `--root`, `--exclude`, `--include`
 

@@ -3,7 +3,11 @@ config:
   MD033:
     allowed_elements:
       - a
+      - code
       - h1
       - img
+      - li
       - p
+      - span
+      - ul
   MD041: false

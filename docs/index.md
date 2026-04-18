@@ -1,4 +1,9 @@
-<p align="center">
+# Tryke
+
+Tryke is a fast Python test runner with zero runtime dependencies, per-assertion
+diagnostics, and a clean decorator-based API.
+
+<p class="md-badges">
   <a href="https://github.com/astral-sh/ruff">
     <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="ruff" />
   </a>
@@ -19,25 +24,22 @@
   </a>
 </p>
 
-# Tryke
-
-Tryke is a fast Python test runner with zero runtime dependencies, per-assertion
-diagnostics, and a clean decorator-based API.
-
 ## Highlights
 
-- [Watch mode](guides/watch-mode.md)
-- Native `async` support
-- [Fast](concepts/discovery.md) test discovery
-- [In-source testing](guides/writing-tests.md#in-source-testing)
-- Support for [doctests](https://docs.python.org/3/library/doctest.html)
-- [Client/server](concepts/client-server.md) mode for fast editor integrations
-- Pretty, per-assertion diagnostics
-- Filtering and marks
-- [Changed mode](guides/changed-mode.md) (like [pytest-picked](https://github.com/anapaulagomes/pytest-picked))
-- Concurrent tests
-- [Soft assertions](concepts/soft-assertions.md)
-- JSON, JUnit, Dot, and LLM reporters
+<ul class="md-highlights">
+  <li><span class="hl-icon hl-icon-watch"></span><a href="guides/watch-mode/">Watch mode</a></li>
+  <li><span class="hl-icon hl-icon-async"></span>Native <code>async</code> support</li>
+  <li><span class="hl-icon hl-icon-fast"></span><a href="concepts/discovery/">Fast</a> test discovery</li>
+  <li><span class="hl-icon hl-icon-insource"></span><a href="guides/writing-tests/#in-source-testing">In-source testing</a></li>
+  <li><span class="hl-icon hl-icon-doctests"></span>Support for <a href="https://docs.python.org/3/library/doctest.html">doctests</a></li>
+  <li><span class="hl-icon hl-icon-clientsrv"></span><a href="concepts/client-server/">Client/server</a> mode for fast editor integrations</li>
+  <li><span class="hl-icon hl-icon-pretty"></span>Pretty, per-assertion diagnostics</li>
+  <li><span class="hl-icon hl-icon-filter"></span>Filtering and marks</li>
+  <li><span class="hl-icon hl-icon-changed"></span><a href="guides/changed-mode/">Changed mode</a> (like <a href="https://github.com/anapaulagomes/pytest-picked">pytest-picked</a>)</li>
+  <li><span class="hl-icon hl-icon-concurrent"></span>Concurrent tests</li>
+  <li><span class="hl-icon hl-icon-soft"></span><a href="concepts/soft-assertions/">Soft assertions</a></li>
+  <li><span class="hl-icon hl-icon-reporters"></span>JSON, JUnit, Dot, and LLM reporters</li>
+</ul>
 
 ## Getting started
 

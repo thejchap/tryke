@@ -1,0 +1,85 @@
+/* Top-nav tab icons. Order matches the `nav` list in zensical.toml:
+   1) Introduction, 2) Guides, 3) Concepts, 4) Reference. */
+.md-tabs__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+}
+
+.md-tabs__link::before {
+  content: "";
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  background-color: currentColor;
+  -webkit-mask: var(--tab-icon) center / contain no-repeat;
+  mask: var(--tab-icon) center / contain no-repeat;
+  flex: none;
+}
+
+.md-tabs__list > li:nth-child(1) .md-tabs__link {
+  --tab-icon: url("../assets/icons/house.svg");
+}
+.md-tabs__list > li:nth-child(2) .md-tabs__link {
+  --tab-icon: url("../assets/icons/book-open.svg");
+}
+.md-tabs__list > li:nth-child(3) .md-tabs__link {
+  --tab-icon: url("../assets/icons/lightbulb.svg");
+}
+.md-tabs__list > li:nth-child(4) .md-tabs__link {
+  --tab-icon: url("../assets/icons/file-code.svg");
+}
+
+/* Demoted shields.io badges below the hero. */
+.md-badges {
+  margin-top: 1.25rem;
+  opacity: 0.8;
+}
+
+.md-badges a {
+  margin-right: 0.25rem;
+}
+
+/* Highlights list icons. The icon class travels with each <li> so
+   reordering the list does not require touching CSS. */
+.hl-icon {
+  display: inline-block;
+  width: 1.1em;
+  height: 1.1em;
+  margin-right: 0.5em;
+  vertical-align: -0.2em;
+  background-color: var(--md-primary-fg-color);
+  -webkit-mask: var(--hl-icon) center / contain no-repeat;
+  mask: var(--hl-icon) center / contain no-repeat;
+}
+
+.hl-icon-watch       { --hl-icon: url("../assets/icons/eye.svg"); }
+.hl-icon-async       { --hl-icon: url("../assets/icons/zap.svg"); }
+.hl-icon-fast        { --hl-icon: url("../assets/icons/search.svg"); }
+.hl-icon-insource    { --hl-icon: url("../assets/icons/file-code.svg"); }
+.hl-icon-doctests    { --hl-icon: url("../assets/icons/book-open.svg"); }
+.hl-icon-clientsrv   { --hl-icon: url("../assets/icons/server.svg"); }
+.hl-icon-pretty      { --hl-icon: url("../assets/icons/sparkles.svg"); }
+.hl-icon-filter      { --hl-icon: url("../assets/icons/filter.svg"); }
+.hl-icon-changed     { --hl-icon: url("../assets/icons/git-branch.svg"); }
+.hl-icon-concurrent  { --hl-icon: url("../assets/icons/layers.svg"); }
+.hl-icon-soft        { --hl-icon: url("../assets/icons/circle-check.svg"); }
+.hl-icon-reporters   { --hl-icon: url("../assets/icons/file-output.svg"); }
+
+/* Drop bullet markers on the highlights list since icons replace them.
+   Material's content rules use a higher-specificity selector so qualify
+   ours with `ul.md-highlights` to win. */
+ul.md-highlights {
+  list-style: none;
+  padding-left: 0;
+  margin-left: 0;
+}
+
+ul.md-highlights > li {
+  margin-bottom: 0.4em;
+  list-style: none;
+}
+
+ul.md-highlights > li::marker {
+  content: "";
+}

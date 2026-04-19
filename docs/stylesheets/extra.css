@@ -38,6 +38,8 @@
 
 .md-badges a {
   margin-right: 0.25rem;
+  text-decoration: none;
+  border-bottom: none;
 }
 
 /* Highlights list icons. The icon class travels with each <li> so

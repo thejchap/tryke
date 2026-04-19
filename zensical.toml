@@ -1,5 +1,5 @@
 [project]
-site_name = "A Rust-based Python test runner with a Jest-style API"
+site_name = "Tryke"
 site_url = "https://tryke.dev/"
 site_description = "A Rust-based Python test runner with a Jest-style API"
 site_author = "Justin Chapman"
@@ -43,6 +43,7 @@ enabled = true
 repo = "fontawesome/brands/github"
 
 [project.theme]
+custom_dir = "overrides"
 logo = "assets/logo.png"
 favicon = "assets/logo.png"
 features = [

@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+
+{% block htmltitle %}
+  {% if page.url == "index.html" and config.site_description %}
+    <title>{{ config.site_name }} - {{ config.site_description }}</title>
+  {% elif page.meta and page.meta.title %}
+    <title>{{ page.meta.title }} - {{ config.site_name }}</title>
+  {% elif page.title and page.url != "index.html" %}
+    <title>{{ page.title | striptags }} - {{ config.site_name }}</title>
+  {% else %}
+    <title>{{ config.site_name }}</title>
+  {% endif %}
+{% endblock %}

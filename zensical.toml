@@ -1,7 +1,7 @@
 [project]
-site_name = "Tryke"
+site_name = "A Rust-based Python test runner with a Jest-style API"
 site_url = "https://tryke.dev/"
-site_description = "A test framework for Python that is modern, fast, and fun"
+site_description = "A Rust-based Python test runner with a Jest-style API"
 site_author = "Justin Chapman"
 copyright = "Copyright &copy; 2025 Justin Chapman"
 repo_url = "https://github.com/thejchap/tryke"

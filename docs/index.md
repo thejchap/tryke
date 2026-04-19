@@ -27,17 +27,17 @@ diagnostics, and a clean decorator-based API.
 ## Highlights
 
 <ul class="md-highlights">
-  <li><span class="hl-icon hl-icon-watch"></span><a href="guides/watch-mode/">Watch mode</a></li>
+  <li><span class="hl-icon hl-icon-watch"></span><a href="guides/watch-mode.html">Watch mode</a></li>
   <li><span class="hl-icon hl-icon-async"></span>Native <code>async</code> support</li>
-  <li><span class="hl-icon hl-icon-fast"></span><a href="concepts/discovery/">Fast</a> test discovery</li>
-  <li><span class="hl-icon hl-icon-insource"></span><a href="guides/writing-tests/#in-source-testing">In-source testing</a></li>
+  <li><span class="hl-icon hl-icon-fast"></span><a href="concepts/discovery.html">Fast</a> test discovery</li>
+  <li><span class="hl-icon hl-icon-insource"></span><a href="guides/writing-tests.html#in-source-testing">In-source testing</a></li>
   <li><span class="hl-icon hl-icon-doctests"></span>Support for <a href="https://docs.python.org/3/library/doctest.html">doctests</a></li>
-  <li><span class="hl-icon hl-icon-clientsrv"></span><a href="concepts/client-server/">Client/server</a> mode for fast editor integrations</li>
+  <li><span class="hl-icon hl-icon-clientsrv"></span><a href="concepts/client-server.html">Client/server</a> mode for fast editor integrations</li>
   <li><span class="hl-icon hl-icon-pretty"></span>Pretty, per-assertion diagnostics</li>
   <li><span class="hl-icon hl-icon-filter"></span>Filtering and marks</li>
-  <li><span class="hl-icon hl-icon-changed"></span><a href="guides/changed-mode/">Changed mode</a> (like <a href="https://github.com/anapaulagomes/pytest-picked">pytest-picked</a>)</li>
+  <li><span class="hl-icon hl-icon-changed"></span><a href="guides/changed-mode.html">Changed mode</a> (like <a href="https://github.com/anapaulagomes/pytest-picked">pytest-picked</a>)</li>
   <li><span class="hl-icon hl-icon-concurrent"></span>Concurrent tests</li>
-  <li><span class="hl-icon hl-icon-soft"></span><a href="concepts/soft-assertions/">Soft assertions</a></li>
+  <li><span class="hl-icon hl-icon-soft"></span><a href="concepts/soft-assertions.html">Soft assertions</a></li>
   <li><span class="hl-icon hl-icon-reporters"></span>JSON, JUnit, Dot, and LLM reporters</li>
 </ul>
 

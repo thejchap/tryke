@@ -156,11 +156,6 @@ module attribute, not an env var, so `subprocess.run([...])` and
 `__TRYKE_TESTING__ == False`. Opt a child in with
 `env={**os.environ, "TRYKE_TESTING": "1"}`.
 
-**v1 limitations** (intentionally narrow): the condition must be exactly
-`__TRYKE_TESTING__` or `tryke_guard.__TRYKE_TESTING__`, and the `if` must
-have no `elif`/`else`. A guard with an alternative branch emits a
-discovery warning rather than silently dropping its tests.
-
 ## Grouping tests with `describe()`
 
 Use `describe()` to group related tests under a label:

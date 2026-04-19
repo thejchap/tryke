@@ -105,7 +105,7 @@ def square(n: int, expected: int):
 
 **Precedence:** a per-case modifier overrides the function-level modifier of the same kind. If a case has `skip="reason"`, it uses that reason regardless of `@test.skip` on the function. Cases without a per-case modifier inherit the function-level modifier.
 
-Per-case modifiers are only supported in the typed `test.case(...)` form. Using `skip`, `xfail`, or `todo` as keys in the kwargs or list forms raises `TypeError` — the framework cannot distinguish modifier intent from test data in those forms.
+Per-case modifiers are only supported in the `test.case(...)` spec form. The legacy kwargs and list overloads of `@test.cases` (visible in the API reference) raise `TypeError` if `skip`, `xfail`, or `todo` appear as keys — the framework cannot distinguish modifier intent from test data in those forms.
 
 **Static discovery:** for per-case modifiers to be recognized at discovery time (before import), the value must be a string literal. Non-literal values (e.g. `skip=some_variable`) are handled at runtime as a fallback.
 
@@ -137,6 +137,6 @@ Non-literal decorator shapes emit a discovery error and the tests are skipped. T
 | `@pytest.mark.parametrize("x,y", [(1, 2), (3, 4)])` | `@test.cases(test.case("a", x=1, y=2), test.case("b", x=3, y=4))` |
 | `@pytest.mark.parametrize("x", [1, 2], ids=["one", "two"])` | `@test.cases(test.case("one", x=1), test.case("two", x=2))` |
 | Case ID: `test_fn[one-two]` | Case ID: `fn[one]`, `fn[two]` |
-| Parameters match by name positionally | Each case is a dict — names are explicit |
+| Parameters match by name positionally | Each case uses explicit named kwargs |
 
 The key difference: Tryke cases are discovered statically (no import), so editor plugins, `--collect-only`, and distributed scheduling all see every case as a first-class test up front.

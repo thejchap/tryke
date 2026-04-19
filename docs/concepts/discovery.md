@@ -2,11 +2,7 @@
 
 Tryke discovers tests without running your code. It uses a Rust-powered Python parser
 ([Ruff](https://github.com/astral-sh/ruff)) to read your source files at startup, build
-an import graph, and identify every test function — all before a Python interpreter is
-ever involved.
-
-This is why Tryke is fast: it reasons about your code the way a compiler does, at
-parse time rather than runtime.
+an import graph, and identify every test function.
 
 ## Recursion into structured blocks
 

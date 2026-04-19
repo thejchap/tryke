@@ -129,14 +129,3 @@ Non-literal decorator shapes emit a discovery error and the tests are skipped. T
 ## Soft assertions and cases
 
 [Soft assertions](soft-assertions.md) apply per-case. Each case runs independently, and a failure inside one case never short-circuits the next — every case runs every assertion and reports every failure.
-
-## Comparison with pytest
-
-| pytest | Tryke |
-|--------|-------|
-| `@pytest.mark.parametrize("x,y", [(1, 2), (3, 4)])` | `@test.cases(test.case("a", x=1, y=2), test.case("b", x=3, y=4))` |
-| `@pytest.mark.parametrize("x", [1, 2], ids=["one", "two"])` | `@test.cases(test.case("one", x=1), test.case("two", x=2))` |
-| Case ID: `test_fn[one-two]` | Case ID: `fn[one]`, `fn[two]` |
-| Parameters match by name positionally | Each case uses explicit named kwargs |
-
-The key difference: Tryke cases are discovered statically (no import), so editor plugins, `--collect-only`, and distributed scheduling all see every case as a first-class test up front.

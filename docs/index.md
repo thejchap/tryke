@@ -1,7 +1,6 @@
 # Tryke
 
-Tryke is a fast Python test runner with zero runtime dependencies, per-assertion
-diagnostics, and a clean decorator-based API.
+Tryke – A Rust-based Python test runner with a Jest-style API.
 
 <p class="md-badges">
   <a href="https://github.com/astral-sh/ruff">

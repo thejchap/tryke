@@ -19,8 +19,8 @@ diagnostics, and a clean decorator-based API.
   <a href="https://github.com/thejchap/tryke/actions/workflows/release.yml">
     <img src="https://github.com/thejchap/tryke/actions/workflows/release.yml/badge.svg" alt="CI" />
   </a>
-  <a href="https://thejchap.github.io/tryke/">
-    <img src="https://img.shields.io/badge/docs-thejchap.github.io%2Ftryke-blue" alt="docs" />
+  <a href="https://tryke.dev/">
+    <img src="https://img.shields.io/badge/docs-tryke.dev-blue" alt="docs" />
   </a>
 </p>
 

@@ -1,6 +1,6 @@
 [project]
 site_name = "Tryke"
-site_url = "https://thejchap.github.io/tryke/"
+site_url = "https://tryke.dev/"
 site_description = "A test framework for Python that is modern, fast, and fun"
 site_author = "Justin Chapman"
 copyright = "Copyright &copy; 2025 Justin Chapman"

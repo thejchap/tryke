@@ -22,7 +22,7 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://github.com/thejchap/tryke"
-Documentation = "https://thejchap.github.io/tryke/"
+Documentation = "https://tryke.dev/"
 Repository = "https://github.com/thejchap/tryke"
 "Bug Tracker" = "https://github.com/thejchap/tryke/issues"
 

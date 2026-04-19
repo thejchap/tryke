@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="https://thejchap.github.io/tryke">
+  <a href="https://tryke.dev">
     <img height="170" alt="tryke-small" src="https://github.com/user-attachments/assets/39a2521a-fe9a-4235-8bb8-97b9e4f68aa7" />
   </a>
 </p>
@@ -21,14 +21,14 @@
   <a href="https://github.com/thejchap/tryke/actions/workflows/release.yml">
     <img src="https://github.com/thejchap/tryke/actions/workflows/release.yml/badge.svg" alt="CI" />
   </a>
-  <a href="https://thejchap.github.io/tryke/">
-    <img src="https://img.shields.io/badge/docs-thejchap.github.io%2Ftryke-blue" alt="docs" />
+  <a href="https://tryke.dev/">
+    <img src="https://img.shields.io/badge/docs-tryke.dev-blue" alt="docs" />
   </a>
 </p>
 
 ## Getting started
 
-For more information, see the [documentation](https://thejchap.github.io/tryke/).
+For more information, see the [documentation](https://tryke.dev/).
 
 Write a test.
 

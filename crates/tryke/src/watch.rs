@@ -1,6 +1,6 @@
 use std::{
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
@@ -8,7 +8,7 @@ use log::debug;
 use tryke_discovery::Discoverer;
 use tryke_reporter::Reporter;
 use tryke_runner::{DistMode, WorkerPool, check_python_version, resolve_python};
-use tryke_types::{DiscoveryWarning, DiscoveryWarningKind, filter::TestFilter};
+use tryke_types::{DiscoveryWarning, DiscoveryWarningKind, HookItem, filter::TestFilter};
 
 use crate::execution::{report_cycle, worker_pool_size};
 
@@ -45,6 +45,35 @@ fn emit_discovery_warnings(reporter: &mut dyn Reporter, discoverer: &Discoverer)
     }
 }
 
+/// Run a single watch cycle. Test failures are non-fatal here: `report_cycle`
+/// returns `Err` purely to signal pass/fail state to `tryke test`, but in watch
+/// mode the whole point is to iterate on failing tests — so we absorb it and
+/// let the watcher keep running.
+async fn run_watch_cycle(
+    reporter: &mut dyn Reporter,
+    tests: Vec<tryke_types::TestItem>,
+    hooks: &[HookItem],
+    pool: &WorkerPool,
+    maxfail: Option<usize>,
+    dist: DistMode,
+    discovery_duration: Option<Duration>,
+) {
+    if let Err(e) = report_cycle(
+        reporter,
+        tests,
+        hooks,
+        pool,
+        maxfail,
+        dist,
+        discovery_duration,
+        None,
+    )
+    .await
+    {
+        debug!("watch: test cycle reported failures: {e}");
+    }
+}
+
 pub async fn run_watch(
     reporter: &mut dyn Reporter,
     root: Option<&Path>,
@@ -70,10 +99,7 @@ pub async fn run_watch(
     let hooks = discoverer.hooks();
     let disc_dur = Some(disc_start.elapsed());
     emit_discovery_warnings(reporter, &discoverer);
-    report_cycle(
-        reporter, tests, &hooks, &pool, maxfail, dist, disc_dur, None,
-    )
-    .await?;
+    run_watch_cycle(reporter, tests, &hooks, &pool, maxfail, dist, disc_dur).await;
 
     let (tx, rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
     let _debouncer = tryke_server::watcher::spawn_watcher(root, excludes, tx)?;
@@ -106,12 +132,54 @@ pub async fn run_watch(
         let hooks = discoverer.hooks();
         let disc_dur = Some(disc_start.elapsed());
         emit_discovery_warnings(reporter, &discoverer);
-        report_cycle(
-            reporter, tests, &hooks, &pool, maxfail, dist, disc_dur, None,
-        )
-        .await?;
+        run_watch_cycle(reporter, tests, &hooks, &pool, maxfail, dist, disc_dur).await;
     }
 
     pool.shutdown();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use tryke_reporter::TextReporter;
+
+    use super::*;
+    use crate::discovery::discover_tests;
+
+    fn test_python_bin() -> String {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("workspace root");
+        tryke_runner::resolve_python(&root)
+    }
+
+    #[tokio::test]
+    async fn run_watch_cycle_absorbs_test_failures() {
+        let python_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../python")
+            .canonicalize()
+            .expect("python/ dir must exist");
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        std::fs::write(
+            dir.path().join("test_fail.py"),
+            "from tryke import test, expect\n\n@test\ndef test_bad():\n    expect(1 + 1).to_equal(3)\n",
+        )
+        .expect("write test file");
+        let tests = discover_tests(dir.path(), false, None, &[]).tests;
+        let mut reporter = TextReporter::with_writer(Vec::new());
+        let pool = WorkerPool::with_python_path(
+            1,
+            &test_python_bin(),
+            dir.path(),
+            &[dir.path().to_path_buf(), python_dir],
+        );
+        // Returns () — the important behavior is that it does NOT propagate the
+        // underlying `report_cycle` Err that `tryke test` relies on for exit code.
+        run_watch_cycle(&mut reporter, tests, &[], &pool, None, DistMode::Test, None).await;
+        pool.shutdown();
+    }
 }

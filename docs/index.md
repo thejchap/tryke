@@ -1,6 +1,6 @@
 # Tryke
 
-Tryke – A Rust-based Python test runner with a Jest-style API.
+A Rust-based Python test runner with a Jest-style API.
 
 <p class="md-badges">
   <a href="https://github.com/astral-sh/ruff">

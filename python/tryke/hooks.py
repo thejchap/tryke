@@ -187,6 +187,7 @@ class _AsyncGenEntry(NamedTuple):
     agen: AsyncGenerator[Any, None]
     loop: asyncio.AbstractEventLoop
     is_scope: bool
+    owns_loop: bool
 
 
 class DependencyResolver:
@@ -203,6 +204,41 @@ class DependencyResolver:
         self._active_generators: list[_SyncGenEntry] = []
         self._active_async_generators: list[_AsyncGenEntry] = []
         self._resolving: set[int] = set()
+        # Shared loop for async fixtures + async test bodies. Lazily
+        # created on first async need so pure-sync modules pay nothing.
+        # Sharing one loop across the resolver's lifetime is what makes
+        # `async with`-style fixtures compose with async tests: without
+        # it, a fixture created on loop A returns loop-bound objects
+        # (Futures, HomeAssistant instances, aiohttp sessions, ...) that
+        # the test body — running on a freshly-minted loop B — cannot
+        # await. See the homeassistant/core migration for a real-world
+        # trigger.
+        self._shared_loop: asyncio.AbstractEventLoop | None = None
+
+    @property
+    def shared_loop(self) -> asyncio.AbstractEventLoop:
+        """Return the resolver's shared event loop, creating it on demand.
+
+        All async work (fixture setup, async test bodies, async fixture
+        teardown) that goes through this resolver runs on the returned
+        loop. The loop lives until :meth:`close_shared_loop` is called,
+        typically from ``HookExecutor.finalize``.
+        """
+        if self._shared_loop is None or self._shared_loop.is_closed():
+            self._shared_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._shared_loop)
+        return self._shared_loop
+
+    def close_shared_loop(self) -> None:
+        """Close the shared event loop if one was lazily created."""
+        loop = self._shared_loop
+        self._shared_loop = None
+        if loop is None:
+            return
+        with contextlib.suppress(Exception):
+            asyncio.set_event_loop(None)
+        with contextlib.suppress(Exception):
+            loop.close()
 
     def resolve(self, fn: _FixtureFn) -> dict[str, Any]:
         """Inspect *fn*'s signature and resolve all ``Depends()`` defaults.
@@ -245,13 +281,13 @@ class DependencyResolver:
                 self._active_generators.append(_SyncGenEntry(fn, gen, is_scope))
             elif inspect.isasyncgenfunction(fn):
                 agen = fn(**kwargs)
-                loop = asyncio.new_event_loop()
+                loop = self.shared_loop
                 value = loop.run_until_complete(agen.__anext__())
                 self._active_async_generators.append(
-                    _AsyncGenEntry(fn, agen, loop, is_scope)
+                    _AsyncGenEntry(fn, agen, loop, is_scope, owns_loop=False)
                 )
             elif inspect.iscoroutinefunction(fn):
-                value = asyncio.run(fn(**kwargs))
+                value = self.shared_loop.run_until_complete(fn(**kwargs))
             else:
                 value = fn(**kwargs)
 
@@ -306,8 +342,9 @@ class DependencyResolver:
             finally:
                 with contextlib.suppress(Exception):
                     entry.loop.run_until_complete(entry.agen.aclose())
-                with contextlib.suppress(Exception):
-                    entry.loop.close()
+                if entry.owns_loop:
+                    with contextlib.suppress(Exception):
+                        entry.loop.close()
                 self._cache.pop(entry.fn, None)
                 if entry.is_scope:
                     self._scope_fixtures.discard(entry.fn)
@@ -457,7 +494,12 @@ class HookExecutor:
                     raise TypeError(msg)
                 test_kwargs = {**test_kwargs, **case_kwargs}
             if inspect.iscoroutinefunction(test_fn):
-                asyncio.run(test_fn(*case_args, **test_kwargs))
+                # Drive the test on the resolver's shared loop so the
+                # test body awaits on the same loop that ran any async
+                # fixture setup.
+                self._resolver.shared_loop.run_until_complete(
+                    test_fn(*case_args, **test_kwargs)
+                )
             else:
                 test_fn(*case_args, **test_kwargs)
         finally:
@@ -470,3 +512,4 @@ class HookExecutor:
         """Run per-scope teardown. Called by the worker after the last test."""
         self._resolver.teardown_scope_generators()
         self._resolver.clear_all()
+        self._resolver.close_shared_loop()

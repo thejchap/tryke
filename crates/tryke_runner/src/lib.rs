@@ -58,8 +58,14 @@ fn parse_min_version(specifier: &str) -> anyhow::Result<(u32, u32)> {
 }
 
 fn parse_version(s: &str) -> anyhow::Result<(u32, u32)> {
-    let (major, minor) = s
-        .split_once('.')
+    // Accept X.Y and X.Y.Z... — only the first two components are
+    // significant for Python's requires-python floor.
+    let mut parts = s.splitn(3, '.');
+    let major = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("invalid version: {s}"))?;
+    let minor = parts
+        .next()
         .ok_or_else(|| anyhow::anyhow!("invalid version: {s}"))?;
     Ok((major.parse()?, minor.parse()?))
 }
@@ -82,6 +88,14 @@ mod tests {
     fn parse_version_valid() {
         assert_eq!(parse_version("3.12").unwrap(), (3, 12));
         assert_eq!(parse_version("3.9").unwrap(), (3, 9));
+    }
+
+    #[test]
+    fn parse_version_accepts_patch_component() {
+        // PEP 440 allows requires-python with patch-level versions.
+        // Home Assistant declares ">=3.14.2" — we only care about major.minor.
+        assert_eq!(parse_version("3.14.2").unwrap(), (3, 14));
+        assert_eq!(parse_min_version(">=3.14.2").unwrap(), (3, 14));
     }
 
     #[test]

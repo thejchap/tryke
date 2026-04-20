@@ -50,6 +50,55 @@ with describe("expectations"):
         expect(None).to_be_none()
         expect(1).not_.to_be_none()
 
+    @test(name="to_be_instance_of")
+    def test_to_be_instance_of() -> None:
+        expect([1, 2, 3]).to_be_instance_of(list)
+        expect("hello").to_be_instance_of(str)
+        expect("hi").to_be_instance_of((bytes, str))
+        expect(42).not_.to_be_instance_of(str)
+        expect(1.5).not_.to_be_instance_of((list, dict))
+
+    @test(name="to_be_instance_of matches subclasses")
+    def test_to_be_instance_of_subclass() -> None:
+        class Base:
+            pass
+
+        class Derived(Base):
+            pass
+
+        expect(Derived()).to_be_instance_of(Base)
+        expect(Base()).not_.to_be_instance_of(Derived)
+
+    @test(name="to_be_instance_of reports class names on failure")
+    def test_to_be_instance_of_error_fields() -> None:
+        ctx = SoftContext()
+        _set_soft_context(ctx)
+        try:
+            expect(42).to_be_instance_of(str).fatal()
+        except ExpectationError as exc:
+            _set_soft_context(None)
+            expect(exc.expected).to_equal("instance of str")
+            expect(exc.received).to_equal("instance of int")
+        else:
+            _set_soft_context(None)
+            msg = "ExpectationError was not raised"
+            raise AssertionError(msg)
+
+    @test(name="to_be_instance_of accepts a tuple of classes")
+    def test_to_be_instance_of_tuple_error_fields() -> None:
+        ctx = SoftContext()
+        _set_soft_context(ctx)
+        try:
+            expect(1.5).to_be_instance_of((list, dict)).fatal()
+        except ExpectationError as exc:
+            _set_soft_context(None)
+            expect(exc.expected).to_equal("instance of list | dict")
+            expect(exc.received).to_equal("instance of float")
+        else:
+            _set_soft_context(None)
+            msg = "ExpectationError was not raised"
+            raise AssertionError(msg)
+
     @test(name="to_be_greater_than")
     def test_to_be_greater_than() -> None:
         expect(5).to_be_greater_than(3)

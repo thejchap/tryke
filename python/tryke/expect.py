@@ -993,6 +993,39 @@ class Expectation[T]:
             received=repr(self._value),
         )
 
+    def to_be_instance_of(self, cls: type | tuple[type, ...]) -> MatchResult:
+        """Assert the value is an instance of `cls`.
+
+        Accepts either a single class or a tuple of classes, mirroring
+        the built-in [`isinstance`][].
+
+        Args:
+            cls: The class (or tuple of classes) to check against.
+
+        Example:
+            ```pycon
+            >>> from tryke import expect
+            >>> expect([1, 2, 3]).to_be_instance_of(list)
+            MatchResult(ok)
+            >>> expect("hi").to_be_instance_of((bytes, str))
+            MatchResult(ok)
+            >>> expect(42).not_.to_be_instance_of(str)
+            MatchResult(ok)
+
+            ```
+        """
+        expected_name = (
+            " | ".join(c.__name__ for c in cls)
+            if isinstance(cls, tuple)
+            else cls.__name__
+        )
+        return self._assert(
+            isinstance(self._value, cls),
+            f"{self._value!r} to be instance of {expected_name}",
+            expected=f"instance of {expected_name}",
+            received=f"instance of {type(self._value).__name__}",
+        )
+
     def to_be_greater_than[C: _SupportsGT](self: Expectation[C], n: C) -> MatchResult:
         """Assert the value is greater than `n`.
 

@@ -797,6 +797,10 @@ class SoftFailure(NamedTuple):
 class SoftContext:
     def __init__(self) -> None:
         self.failures: list[SoftFailure] = []
+        # Line numbers of every expect() call that actually executed, in
+        # order. The reporter uses this to distinguish "ran and passed"
+        # from "never ran because an earlier statement raised".
+        self.executed_lines: list[int] = []
 
 
 class _SoftContextHolder:
@@ -866,18 +870,23 @@ class Expectation[T]:
         received: str,
     ) -> MatchResult:
         ok = (not passed) if self._negated else passed
-        if not ok:
-            prefix = "expected not " if self._negated else "expected "
-            actual_expected = ("not " + expected) if self._negated else expected
-            err = ExpectationError(
-                prefix + message, expected=actual_expected, received=received
-            )
-            if _soft_ctx.value is not None:
-                frame = _caller_frame()
-                _soft_ctx.value.failures.append(SoftFailure(err, frame))
-                return MatchResult(err)
-            raise err
-        return MatchResult(None)
+        ctx = _soft_ctx.value
+        # Resolve the caller frame once so we can record the line for the
+        # executed-lines tracker and reuse it in the failure path.
+        frame = _caller_frame() if ctx is not None else None
+        if ctx is not None and frame is not None and frame.lineno is not None:
+            ctx.executed_lines.append(frame.lineno)
+        if ok:
+            return MatchResult(None)
+        prefix = "expected not " if self._negated else "expected "
+        actual_expected = ("not " + expected) if self._negated else expected
+        err = ExpectationError(
+            prefix + message, expected=actual_expected, received=received
+        )
+        if ctx is not None:
+            ctx.failures.append(SoftFailure(err, frame))
+            return MatchResult(err)
+        raise err
 
     def to_equal(self, other: T) -> MatchResult:
         """Deep equality check (`==`).

@@ -118,6 +118,11 @@ pub enum TestOutcome {
         #[serde(default)]
         traceback: Option<String>,
         assertions: Vec<Assertion>,
+        /// Line numbers of every `expect()` call that actually executed,
+        /// in order. Reporters use this to distinguish "ran and passed"
+        /// from "never ran because an earlier statement raised".
+        #[serde(default)]
+        executed_lines: Vec<u32>,
     },
     Skipped {
         reason: Option<String>,

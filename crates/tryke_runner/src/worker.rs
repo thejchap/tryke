@@ -325,6 +325,7 @@ fn convert_result(test: TestItem, wire: RunTestResultWire) -> TestResult {
             message,
             traceback,
             assertions,
+            executed_lines,
             stdout,
             stderr,
         } => {
@@ -350,6 +351,7 @@ fn convert_result(test: TestItem, wire: RunTestResultWire) -> TestResult {
                     message,
                     traceback,
                     assertions,
+                    executed_lines,
                 },
                 duration: Duration::from_millis(duration_ms),
                 stdout,
@@ -447,6 +449,7 @@ mod tests {
             message: "expected 1 got 2".into(),
             traceback: None,
             assertions: vec![],
+            executed_lines: vec![],
             stdout: String::new(),
             stderr: String::new(),
         };

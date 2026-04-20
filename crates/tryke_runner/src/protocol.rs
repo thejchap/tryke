@@ -137,6 +137,8 @@ pub enum RunTestResultWire {
         traceback: Option<String>,
         #[serde(default)]
         assertions: Vec<AssertionWire>,
+        #[serde(default)]
+        executed_lines: Vec<u32>,
         stdout: String,
         stderr: String,
     },

@@ -69,6 +69,7 @@ impl<W: io::Write> Reporter for LlmReporter<W> {
                 message,
                 traceback,
                 assertions,
+                ..
             } => {
                 let _ = write!(self.writer, "FAIL {display}");
                 write_location(&mut self.writer, result);
@@ -246,6 +247,7 @@ mod tests {
                 message: "bad".into(),
                 traceback: None,
                 assertions: vec![],
+                executed_lines: vec![],
             },
             duration: Duration::from_millis(5),
             stdout: String::new(),
@@ -274,6 +276,7 @@ mod tests {
                     received: "3".into(),
                     expected_arg_span: Some((19, 1)),
                 }],
+                executed_lines: vec![],
             },
             duration: Duration::from_millis(5),
             stdout: String::new(),
@@ -296,6 +299,7 @@ mod tests {
                 message: "division by zero".into(),
                 traceback: Some(traceback.into()),
                 assertions: vec![],
+                executed_lines: vec![],
             },
             duration: Duration::from_millis(5),
             stdout: String::new(),
@@ -318,6 +322,7 @@ mod tests {
                 message: "fail".into(),
                 traceback: None,
                 assertions: vec![],
+                executed_lines: vec![],
             },
             duration: Duration::from_millis(1),
             stdout: "debug output here".into(),
@@ -402,6 +407,7 @@ mod tests {
                 message: "bad".into(),
                 traceback: None,
                 assertions: vec![],
+                executed_lines: vec![],
             },
             duration: Duration::from_millis(1),
             stdout: String::new(),
@@ -460,6 +466,7 @@ mod tests {
                 message: "oops".into(),
                 traceback: None,
                 assertions: vec![],
+                executed_lines: vec![],
             },
             duration: Duration::from_millis(1),
             stdout: String::new(),
@@ -493,6 +500,7 @@ mod tests {
                 message: "bad".into(),
                 traceback: None,
                 assertions: vec![],
+                executed_lines: vec![],
             },
             duration: Duration::from_millis(5),
             stdout: String::new(),

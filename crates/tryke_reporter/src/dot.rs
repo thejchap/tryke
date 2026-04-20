@@ -111,6 +111,7 @@ mod tests {
                 message: "bad".into(),
                 traceback: None,
                 assertions: vec![],
+                executed_lines: vec![],
             },
             duration: Duration::from_millis(1),
             stdout: String::new(),

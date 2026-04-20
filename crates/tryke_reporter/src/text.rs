@@ -199,6 +199,7 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                 message,
                 traceback,
                 assertions,
+                executed_lines,
             } => {
                 let _ = writeln!(
                     self.writer,
@@ -215,10 +216,16 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                 if matches!(self.verbosity, Verbosity::Verbose)
                     && !result.test.expected_assertions.is_empty()
                 {
-                    // Interleave verbose assertion lines with inline diagnostics
+                    // Interleave verbose assertion lines with inline diagnostics.
+                    // An expectation renders as ✗ if it's in failed_by_line,
+                    // ✓ if the worker reports it as executed, and is omitted
+                    // entirely if it was never reached (e.g. an earlier
+                    // statement raised before we got to it).
                     let assert_indent = "  ".repeat(test_groups.len() + 2);
                     let failed_by_line: HashMap<usize, &_> =
                         assertions.iter().map(|a| (a.line, a)).collect();
+                    let executed: std::collections::HashSet<usize> =
+                        executed_lines.iter().map(|l| *l as usize).collect();
                     for ea in &result.test.expected_assertions {
                         let not_part = if ea.negated { "not_." } else { "" };
                         let args_str = ea.args.join(", ");
@@ -227,7 +234,8 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                             ea.subject, not_part, ea.matcher, args_str
                         );
                         let text = ea.label.as_deref().unwrap_or(&full);
-                        if let Some(fa) = failed_by_line.get(&(ea.line as usize)) {
+                        let ea_line = ea.line as usize;
+                        if let Some(fa) = failed_by_line.get(&ea_line) {
                             let _ = writeln!(
                                 self.writer,
                                 "{assert_indent}{} {}",
@@ -239,7 +247,7 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                             for line in buf.lines() {
                                 let _ = writeln!(self.writer, "{group_indent}  {line}");
                             }
-                        } else {
+                        } else if executed.contains(&ea_line) {
                             let _ = writeln!(
                                 self.writer,
                                 "{assert_indent}{} {}",
@@ -255,6 +263,16 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                             assertions.len(),
                             result.test.expected_assertions.len()
                         );
+                    }
+                    // If the test was killed by something other than an
+                    // expect() failure (e.g. `raise Exception`), the
+                    // per-assertion list alone is misleading. Render the
+                    // message + traceback after it so the user sees what
+                    // actually aborted the test.
+                    if assertions.is_empty() && !message.is_empty() {
+                        let mut buf = String::new();
+                        render_failure_message(message, traceback.as_deref(), true, &mut buf);
+                        let _ = write!(self.writer, "{buf}");
                     }
                 } else if !assertions.is_empty() {
                     let mut buf = String::new();
@@ -507,6 +525,7 @@ mod tests {
                 message: "bad".into(),
                 traceback: None,
                 assertions: vec![],
+                executed_lines: vec![],
             },
             duration: Duration::from_millis(5),
             stdout: String::new(),
@@ -656,6 +675,7 @@ mod tests {
                     received: "3".into(),
                     expected_arg_span: None,
                 }],
+                executed_lines: vec![],
             },
             duration: Duration::from_millis(5),
             stdout: String::new(),
@@ -681,6 +701,7 @@ mod tests {
                 message: "bad".into(),
                 traceback: None,
                 assertions: vec![],
+                executed_lines: vec![],
             },
             duration: Duration::from_millis(5),
             stdout: String::new(),
@@ -860,6 +881,7 @@ mod tests {
                 message: "oops".into(),
                 traceback: None,
                 assertions: vec![],
+                executed_lines: vec![],
             },
             duration: Duration::from_millis(1),
             stdout: String::new(),
@@ -1006,6 +1028,7 @@ mod tests {
                     received: "2".into(),
                     expected_arg_span: Some((19, 1)),
                 }],
+                executed_lines: vec![5],
             },
             duration: Duration::from_millis(1),
             stdout: String::new(),
@@ -1056,6 +1079,7 @@ mod tests {
                     received: "3".into(),
                     expected_arg_span: Some((19, 1)),
                 }],
+                executed_lines: vec![3, 4],
             },
             duration: Duration::from_millis(1),
             stdout: String::new(),
@@ -1066,6 +1090,57 @@ mod tests {
         let line_b = out.lines().find(|l| l.contains("expect(b)")).unwrap();
         assert!(line_a.contains("✓"), "expect(a) line should have pass icon");
         assert!(line_b.contains("✗"), "expect(b) line should have fail icon");
+    }
+
+    #[test]
+    fn verbose_hides_unexecuted_expectations_and_shows_traceback() {
+        // Reproduces the bug where a `raise` before any expect() call
+        // would render all expected assertions as ✓ (because nothing
+        // failed) and suppress the exception traceback entirely.
+        let mut r = TextReporter::with_writer_and_verbosity(Vec::new(), Verbosity::Verbose);
+        r.on_test_complete(&TestResult {
+            test: TestItem {
+                name: "test_raise".into(),
+                module_path: "tests.m".into(),
+                expected_assertions: vec![
+                    tryke_types::ExpectedAssertion {
+                        subject: "1".into(),
+                        matcher: "to_equal".into(),
+                        negated: false,
+                        args: vec!["1".into()],
+                        line: 3,
+                        label: None,
+                    },
+                    tryke_types::ExpectedAssertion {
+                        subject: "\"hello\"".into(),
+                        matcher: "to_equal".into(),
+                        negated: false,
+                        args: vec!["\"hello\"".into()],
+                        line: 4,
+                        label: None,
+                    },
+                ],
+                ..Default::default()
+            },
+            outcome: TestOutcome::Failed {
+                message: "Exception: ".into(),
+                traceback: Some("Traceback (most recent call last):\n  File \"x.py\", line 2\n    raise Exception\nException".into()),
+                assertions: vec![],
+                executed_lines: vec![],
+            },
+            duration: Duration::from_millis(1),
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+        let out = String::from_utf8_lossy(&r.into_writer()).into_owned();
+        assert!(
+            !out.contains("✓"),
+            "unexecuted expectations must not render as passing: {out}"
+        );
+        assert!(
+            out.contains("Exception") && out.contains("raise Exception"),
+            "exception traceback should be shown after the per-assertion list: {out}"
+        );
     }
 
     #[test]

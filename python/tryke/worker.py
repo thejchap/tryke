@@ -127,6 +127,7 @@ class _FailedResult(TypedDict):
     message: str
     traceback: str | None
     assertions: list[_AssertionWire]
+    executed_lines: list[int]
     stdout: str
     stderr: str
 
@@ -198,6 +199,8 @@ def _failed(  # noqa: PLR0913
     assertions: list[_AssertionWire],
     stdout: str,
     stderr: str,
+    *,
+    executed_lines: list[int] | None = None,
 ) -> _FailedResult:
     return {
         "outcome": "failed",
@@ -205,6 +208,7 @@ def _failed(  # noqa: PLR0913
         "message": message,
         "traceback": tb,
         "assertions": assertions,
+        "executed_lines": executed_lines if executed_lines is not None else [],
         "stdout": stdout,
         "stderr": stderr,
     }
@@ -697,6 +701,7 @@ class Worker:
                         _extract_soft_failures(ctx.failures),
                         out,
                         err,
+                        executed_lines=list(ctx.executed_lines),
                     )
                 if is_xfail:
                     return _xpassed(ms, out, err)
@@ -733,6 +738,7 @@ class Worker:
                     assertions,
                     out,
                     err,
+                    executed_lines=list(ctx.executed_lines),
                 )
 
             except AssertionError as exc:
@@ -753,6 +759,7 @@ class Worker:
                     _extract_assertions(exc),
                     out,
                     err,
+                    executed_lines=list(ctx.executed_lines),
                 )
 
             except Exception as exc:  # noqa: BLE001
@@ -773,6 +780,7 @@ class Worker:
                     [],
                     out,
                     err,
+                    executed_lines=list(ctx.executed_lines),
                 )
 
     def _run_doctest(

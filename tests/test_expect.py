@@ -156,6 +156,21 @@ with describe("soft assertions"):
             _set_soft_context(None)
         expect(len(ctx.failures)).to_equal(0)
 
+    @test(name="executed_lines tracks every expect() that ran")
+    def test_executed_lines_tracks_all_runs() -> None:
+        ctx = SoftContext()
+        _set_soft_context(ctx)
+        try:
+            expect(1).to_equal(1)  # pass
+            expect(2).to_equal(3)  # fail
+            expect(4).to_equal(4)  # pass
+        finally:
+            _set_soft_context(None)
+        expect(len(ctx.executed_lines)).to_equal(3)
+        # Lines recorded in encounter order.
+        expect(ctx.executed_lines[0]).to_be_less_than(ctx.executed_lines[1])
+        expect(ctx.executed_lines[1]).to_be_less_than(ctx.executed_lines[2])
+
     @test(name="fatal() on failing assertion raises")
     def test_fatal_on_failing_assertion_raises() -> None:
         ctx = SoftContext()

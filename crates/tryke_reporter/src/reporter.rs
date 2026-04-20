@@ -87,6 +87,7 @@ mod tests {
                 message: "expected 1, got 2".into(),
                 traceback: None,
                 assertions: vec![],
+                executed_lines: vec![],
             },
             duration: Duration::from_millis(5),
             stdout: String::new(),

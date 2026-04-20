@@ -55,10 +55,13 @@ with describe("expectations"):
         expect([1, 2, 3]).to_be_instance_of(list)
         expect("hello").to_be_instance_of(str)
         expect("hi").to_be_instance_of((bytes, str))
-        expect(42).not_.to_be_instance_of(str)
+        # `bool` is a subclass of `int`, so `type[bool]` is assignable
+        # to `type[int]` and this stays type-clean while still failing
+        # at runtime (42 is an int, not a bool).
+        expect(42).not_.to_be_instance_of(bool)
         expect(1.5).not_.to_be_instance_of((list, dict))
 
-    @test(name="to_be_instance_of matches subclasses")
+    @test(name="to_be_instance_of narrows subclasses")
     def test_to_be_instance_of_subclass() -> None:
         class Base:
             pass
@@ -66,18 +69,23 @@ with describe("expectations"):
         class Derived(Base):
             pass
 
-        expect(Derived()).to_be_instance_of(Base)
-        expect(Base()).not_.to_be_instance_of(Derived)
+        # Downcast: the static type is Base, so asking "is it a Derived?"
+        # is a real runtime question and `type[Derived]` is assignable to
+        # the expected `type[Base]` via covariance.
+        derived_as_base: Base = Derived()
+        expect(derived_as_base).to_be_instance_of(Derived)
+        plain_base: Base = Base()
+        expect(plain_base).not_.to_be_instance_of(Derived)
 
     @test(name="to_be_instance_of reports class names on failure")
     def test_to_be_instance_of_error_fields() -> None:
         ctx = SoftContext()
         _set_soft_context(ctx)
         try:
-            expect(42).to_be_instance_of(str).fatal()
+            expect(42).to_be_instance_of(bool).fatal()
         except ExpectationError as exc:
             _set_soft_context(None)
-            expect(exc.expected).to_equal("instance of str")
+            expect(exc.expected).to_equal("instance of bool")
             expect(exc.received).to_equal("instance of int")
         else:
             _set_soft_context(None)

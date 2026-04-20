@@ -340,15 +340,17 @@ each conversion small enough to review.
 
 For each file:
 
-- Replace `def test_foo(...)` with `@test` + `def foo(...)`.
+- Replace non-parametrized `def test_foo(...)` with `@test` + `def foo(...)`.
 - Replace `assert` with `expect(...).to_...()` per the assertions table.
 - Replace `pytest.raises(Exc, match=...)` with
   `expect(lambda: ...).to_raise(Exc, match=...)` — **use the `match=` kwarg
   verbatim**, do not rewrite the regex by eye.
 - Replace `@pytest.mark.parametrize` with `@test.cases(test.case("label", ...))`.
-  Labels must be string literals (static analysis constraint — see
-  <https://tryke.dev/concepts/cases/>). Each case kwarg must match the function
-  signature.
+  For parametrized tests, use `@test.cases(...)` **instead of** `@test` — the
+  two decorators are mutually exclusive on the same function and discovery
+  raises an error if both are present. Labels must be string literals (static
+  analysis constraint — see <https://tryke.dev/concepts/cases/>). Each case
+  kwarg must match the function signature.
 - Replace `@pytest.mark.skip` / `skipif` / `xfail` with `@test.skip` /
   `@test.skip_if` / `@test.xfail`.
 - Replace `@pytest.mark.asyncio` with plain `async def` under `@test`.
@@ -411,8 +413,19 @@ changes). Record the final count in `.migration/NOTES.md`.
 ## Phase 4 — Results parity gate
 
 1. `tryke test --reporter junit > .migration/tryke-results.xml`
-2. Compare per-test outcomes against `.migration/pytest-results.xml`:
-   same test name → same pass / fail / skip / xfail status.
+2. Compare per-test outcomes against `.migration/pytest-results.xml`. The
+   JUnit `<testcase>` names do **not** match byte-for-byte — Phase 2 stripped
+   the `test_` prefix and Phase 3 may have added `describe()` group prefixes.
+   Apply the same normalization you used to pass Gate 3 before comparing:
+   - Strip the leading `test_` from pytest names
+     (`test_file.py::test_add` → `test_file.py::add`).
+   - For any test you moved under a `with describe("group"):` block, prepend
+     `group::` on the pytest side (or strip it on the Tryke side) so the
+     IDs line up.
+   - Parametrize labels (`[case_label]`) already match between systems — do
+     not rewrite them.
+
+   Then for each normalized name, compare pass / fail / skip / xfail status.
 3. For each divergence:
    - Rerun the single test with the LLM-friendly reporter:
      `tryke test -k <name> --reporter llm`

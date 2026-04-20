@@ -2,6 +2,8 @@
 
 An honest look at what Tryke does well, where pytest wins, and when each tool is the right choice.
 
+Already on pytest and wondering how to switch? The [migration guide](migration.md) has a side-by-side cheat sheet and a copy-paste AI prompt for a phased, verified migration.
+
 ## What makes Tryke different
 
 ### Rust-powered speed

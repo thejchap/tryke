@@ -63,3 +63,7 @@ pip install --upgrade tryke
 ## Using Tryke in your editor
 
 See the [editor integration guide](editor-integration.md)
+
+## Migrating from pytest
+
+If you are moving an existing pytest suite to Tryke, see the [migration guide](../migration.md). It includes a side-by-side cheat sheet and a copy-paste AI prompt that walks an assistant through a phased migration with discovery and results-parity gates.

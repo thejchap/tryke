@@ -70,3 +70,7 @@ uvx tryke test
 ## Installation
 
 See the [installation](guides/installation.md) documentation.
+
+## Coming from pytest?
+
+See the [migration guide](migration.md) for a side-by-side cheat sheet and a copy-paste prompt that walks an AI assistant through a phased, verified pytest → Tryke migration.

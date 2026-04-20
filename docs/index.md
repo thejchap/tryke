@@ -38,7 +38,7 @@ A Rust-based Python test runner with a Jest-style API.
   <li><span class="hl-icon hl-icon-filter"></span>Filtering and marks</li>
   <li><span class="hl-icon hl-icon-changed"></span><a href="guides/changed-mode.html">Changed mode</a> (like <a href="https://github.com/anapaulagomes/pytest-picked">pytest-picked</a>)</li>
   <li><span class="hl-icon hl-icon-concurrent"></span>Concurrent tests</li>
-  <li><span class="hl-icon hl-icon-soft"></span><a href="concepts/soft-assertions.html">Soft assertions</a></li>
+  <li><span class="hl-icon hl-icon-soft"></span><a href="concepts/soft-assertions.html">Soft assertions</a> (like <a href="https://github.com/okken/pytest-check">pytest-check</a>)</li>
   <li><span class="hl-icon hl-icon-reporters"></span>JSON, JUnit, Dot, and LLM reporters</li>
 </ul>
 

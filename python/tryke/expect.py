@@ -993,6 +993,51 @@ class Expectation[T]:
             received=repr(self._value),
         )
 
+    @overload
+    def to_be_instance_of[C](self: Expectation[C], cls: type[C]) -> MatchResult: ...
+    @overload
+    def to_be_instance_of(self, cls: tuple[type, ...]) -> MatchResult: ...
+    def to_be_instance_of(self, cls: type | tuple[type, ...]) -> MatchResult:
+        """Assert the value is an instance of `cls`.
+
+        Accepts either a single class or a tuple of classes, mirroring
+        the built-in [`isinstance`][]. The single-class form is generic
+        over the expectation's value type, so type checkers flag obvious
+        mismatches like `expect(42).to_be_instance_of(str)` statically
+        while still allowing downcasts (for example,
+        `expect(animal).to_be_instance_of(Dog)` when `animal: Animal`).
+        The tuple form falls back to `tuple[type, ...]` because
+        requiring every element to match the value's type would reject
+        legitimate "any of these" checks such as
+        `expect("hi").to_be_instance_of((bytes, str))`.
+
+        Args:
+            cls: The class (or tuple of classes) to check against.
+
+        Example:
+            ```pycon
+            >>> from tryke import expect
+            >>> expect([1, 2, 3]).to_be_instance_of(list)
+            MatchResult(ok)
+            >>> expect("hi").to_be_instance_of((bytes, str))
+            MatchResult(ok)
+            >>> expect(42).not_.to_be_instance_of(bool)
+            MatchResult(ok)
+
+            ```
+        """
+        expected_name = (
+            " | ".join(c.__name__ for c in cls)
+            if isinstance(cls, tuple)
+            else cls.__name__
+        )
+        return self._assert(
+            isinstance(self._value, cls),
+            f"{self._value!r} to be instance of {expected_name}",
+            expected=f"instance of {expected_name}",
+            received=f"instance of {type(self._value).__name__}",
+        )
+
     def to_be_greater_than[C: _SupportsGT](self: Expectation[C], n: C) -> MatchResult:
         """Assert the value is greater than `n`.
 

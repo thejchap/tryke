@@ -50,6 +50,63 @@ with describe("expectations"):
         expect(None).to_be_none()
         expect(1).not_.to_be_none()
 
+    @test(name="to_be_instance_of")
+    def test_to_be_instance_of() -> None:
+        expect([1, 2, 3]).to_be_instance_of(list)
+        expect("hello").to_be_instance_of(str)
+        expect("hi").to_be_instance_of((bytes, str))
+        # `bool` is a subclass of `int`, so `type[bool]` is assignable
+        # to `type[int]` and this stays type-clean while still failing
+        # at runtime (42 is an int, not a bool).
+        expect(42).not_.to_be_instance_of(bool)
+        expect(1.5).not_.to_be_instance_of((list, dict))
+
+    @test(name="to_be_instance_of narrows subclasses")
+    def test_to_be_instance_of_subclass() -> None:
+        class Base:
+            pass
+
+        class Derived(Base):
+            pass
+
+        # Downcast: the static type is Base, so asking "is it a Derived?"
+        # is a real runtime question and `type[Derived]` is assignable to
+        # the expected `type[Base]` via covariance.
+        derived_as_base: Base = Derived()
+        expect(derived_as_base).to_be_instance_of(Derived)
+        plain_base: Base = Base()
+        expect(plain_base).not_.to_be_instance_of(Derived)
+
+    @test(name="to_be_instance_of reports class names on failure")
+    def test_to_be_instance_of_error_fields() -> None:
+        ctx = SoftContext()
+        _set_soft_context(ctx)
+        try:
+            expect(42).to_be_instance_of(bool).fatal()
+        except ExpectationError as exc:
+            _set_soft_context(None)
+            expect(exc.expected).to_equal("instance of bool")
+            expect(exc.received).to_equal("instance of int")
+        else:
+            _set_soft_context(None)
+            msg = "ExpectationError was not raised"
+            raise AssertionError(msg)
+
+    @test(name="to_be_instance_of accepts a tuple of classes")
+    def test_to_be_instance_of_tuple_error_fields() -> None:
+        ctx = SoftContext()
+        _set_soft_context(ctx)
+        try:
+            expect(1.5).to_be_instance_of((list, dict)).fatal()
+        except ExpectationError as exc:
+            _set_soft_context(None)
+            expect(exc.expected).to_equal("instance of list | dict")
+            expect(exc.received).to_equal("instance of float")
+        else:
+            _set_soft_context(None)
+            msg = "ExpectationError was not raised"
+            raise AssertionError(msg)
+
     @test(name="to_be_greater_than")
     def test_to_be_greater_than() -> None:
         expect(5).to_be_greater_than(3)

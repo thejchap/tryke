@@ -208,11 +208,8 @@ class DependencyResolver:
         # created on first async need so pure-sync modules pay nothing.
         # Sharing one loop across the resolver's lifetime is what makes
         # `async with`-style fixtures compose with async tests: without
-        # it, a fixture created on loop A returns loop-bound objects
-        # (Futures, HomeAssistant instances, aiohttp sessions, ...) that
+        # it, a fixture created on loop A returns loop-bound objects that
         # the test body — running on a freshly-minted loop B — cannot
-        # await. See the homeassistant/core migration for a real-world
-        # trigger.
         self._shared_loop: asyncio.AbstractEventLoop | None = None
 
     @property

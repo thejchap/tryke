@@ -709,16 +709,6 @@ with describe("async fixtures in HookExecutor"):
 
     @test(name="async fixture and async test share one event loop")
     def test_async_fixture_and_test_share_loop() -> None:
-        """Regression: loop-bound objects created by an async fixture
-        must be awaitable from the async test body.
-
-        Before the shared-loop fix, the async-gen fixture ran on a loop
-        created by DependencyResolver, while the async test ran on
-        asyncio.run()'s fresh loop. Any Future / Task created during
-        fixture setup was attached to the fixture's loop and raised
-        'attached to a different loop' when the test body awaited it.
-        This mirrors what Home Assistant's hass fixture exposes.
-        """
 
         @fixture
         async def loop_bound_resource() -> AsyncGenerator[asyncio.Future[int], None]:

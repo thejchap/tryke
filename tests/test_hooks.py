@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, assert_type
 
 import tryke
@@ -705,6 +706,31 @@ with describe("async fixtures in HookExecutor"):
             RuntimeError
         )
         expect(log).to_contain("teardown")
+
+    @test(name="async fixture and async test share one event loop")
+    def test_async_fixture_and_test_share_loop() -> None:
+
+        @fixture
+        async def loop_bound_resource() -> AsyncGenerator[asyncio.Future[int], None]:
+            # Future is bound to whatever loop is running right now.
+            fut: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+            fut.set_result(7)
+            yield fut
+
+        received: dict[str, int] = {}
+
+        async def my_test(
+            fut: asyncio.Future[int] = Depends(loop_bound_resource),
+        ) -> None:
+            # If the test's loop differs from the fixture's loop, this
+            # raises "got Future <...> attached to a different loop".
+            received["value"] = await fut
+
+        executor = HookExecutor()
+        executor.register_fixture(loop_bound_resource, groups=[])
+        executor.run_test(my_test, groups=[])
+        executor.finalize()
+        expect(received["value"]).to_equal(7)
 
     @test(name="async generator aclose is called on teardown")
     def test_async_gen_aclose_called() -> None:

@@ -111,6 +111,12 @@ merge_init_into_class = true
 show_signature_annotations = true
 separate_signature = true
 
+# Zensical replaces its default `markdown_extensions` wholesale when
+# any `[project.markdown_extensions.*]` block is declared — it does not
+# merge. Enable `admonition` explicitly so `!!! tip` / `!!! note` blocks
+# render as callouts instead of literal text.
+[project.markdown_extensions.admonition]
+
 [project.markdown_extensions.pymdownx.highlight]
 anchor_linenums = true
 line_spans = "__span"

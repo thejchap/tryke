@@ -84,9 +84,9 @@ uvx tryke test
 
 ## Coming from pytest?
 
-The [migration guide](https://tryke.dev/migration/) has a side-by-side cheat
+The [migration guide](https://tryke.dev/migration.html) has a side-by-side cheat
 sheet and — faster — a
-[copy-paste LLM prompt](https://tryke.dev/migration/#migration-prompt) that
+[copy-paste LLM prompt](https://tryke.dev/migration.html#migration-prompt) that
 walks an AI coding assistant through a phased, gated pytest &rarr; Tryke
 migration with discovery- and results-parity checks built in.
 

@@ -300,7 +300,7 @@ Copy everything inside the fence and hand it to your assistant.
 You are migrating a Python repository from **pytest** to **Tryke**
 (<https://tryke.dev>). Tryke is a Rust-based test runner with a Jest-style API
 (`@test`, `expect(...).to_equal(...)`, `@fixture` + `Depends()`, `@test.cases`).
-The migration cheat sheet is at <https://tryke.dev/migration/>.
+The migration cheat sheet is at <https://tryke.dev/migration.html>.
 
 Work in the phases below. **Do not advance to the next phase until the stated
 verification gate passes.** Stop and ask me if a gate fails and you cannot
@@ -332,10 +332,10 @@ On a clean checkout, before any code changes:
 ## Phase 1 — Install and configure Tryke
 
 1. Add `tryke` as a dev dependency (`uv add --dev tryke` or the
-   project's equivalent). See <https://tryke.dev/guides/installation/>.
+   project's equivalent). See <https://tryke.dev/guides/installation.html>.
 2. Add a `[tool.tryke]` section to `pyproject.toml` mirroring the
    pytest `testpaths` / `norecursedirs` values. See
-   <https://tryke.dev/guides/configuration/>.
+   <https://tryke.dev/guides/configuration.html>.
 3. Run `tryke --help` and `tryke test --help` to confirm the binary works.
 
 **Gate 1:** `tryke test --collect-only` runs without crashing (it is fine if
@@ -344,7 +344,7 @@ it finds **zero** tests at this point — no files have been converted yet).
 ## Phase 2 — Mechanical conversion
 
 Convert test files using the cheat sheet at
-<https://tryke.dev/migration/>. Do one package / directory at a time and keep
+<https://tryke.dev/migration.html>. Do one package / directory at a time and keep
 each conversion small enough to review.
 
 For each file:
@@ -358,7 +358,7 @@ For each file:
   For parametrized tests, use `@test.cases(...)` **instead of** `@test` — the
   two decorators are mutually exclusive on the same function and discovery
   raises an error if both are present. Labels must be string literals (static
-  analysis constraint — see <https://tryke.dev/concepts/cases/>). Each case
+  analysis constraint — see <https://tryke.dev/concepts/cases.html>). Each case
   kwarg must match the function signature.
 - Replace `@pytest.mark.skip` / `skipif` / `xfail` with `@test.skip` /
   `@test.skip_if` / `@test.xfail`.
@@ -369,7 +369,7 @@ For each file:
   the `conftest.py` entry** rather than leaving both.
 
 Tryke discovery is **static** (Ruff-based AST parse). See
-<https://tryke.dev/concepts/discovery/>. This has two consequences:
+<https://tryke.dev/concepts/discovery.html>. This has two consequences:
 
 - `importlib.import_module()` / `__import__()` at module scope will mark the
   file always-dirty and defeat `--changed` mode. Replace with static imports
@@ -380,7 +380,7 @@ Tryke discovery is **static** (Ruff-based AST parse). See
 
 **Soft assertions — read this carefully.** Tryke assertions are soft by
 default: every `expect()` in a test runs even if an earlier one fails. See
-<https://tryke.dev/concepts/soft-assertions/>. **Do not** reflexively add
+<https://tryke.dev/concepts/soft-assertions.html>. **Do not** reflexively add
 `.fatal()` to every assertion to mimic pytest. Only add `.fatal()` when a
 later assertion genuinely depends on the earlier one (e.g. you checked
 `response.status == 200` and the next assertions dereference the body).
@@ -438,7 +438,7 @@ changes). Record the final count in `.migration/NOTES.md`.
 3. For each divergence:
    - Rerun the single test with the LLM-friendly reporter:
      `tryke test -k <name> --reporter llm`
-     (see <https://tryke.dev/guides/reporters/>). Feed that output back
+     (see <https://tryke.dev/guides/reporters.html>). Feed that output back
      through this prompt to diagnose.
    - Common causes, in order of likelihood:
      - Wrong assertion matcher (`to_be` vs `to_equal`, `to_contain` vs

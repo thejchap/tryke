@@ -2,9 +2,7 @@
 
 Provides a single `@fixture` decorator with `per="test"` (default) or
 `per="scope"` granularity. A fixture runs setup before each covered test
-(or once per lexical scope) and — if it ``yield``s — teardown after. This
-replaces the older six-decorator pytest-style surface
-(`before_each`/`after_each`/`before_all`/`after_all`/`wrap_each`/`wrap_all`).
+(or once per lexical scope) and — if it ``yield``s — teardown after.
 
 ``Depends()`` wires typed dependency injection between fixtures and
 tests, FastAPI-style.

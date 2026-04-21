@@ -21,9 +21,11 @@ Compact single-character output — one character per test. Useful for large sui
 
 - `.` pass
 - `F` fail
+- `E` error
 - `s` skip
-- `t` todo
+- `T` todo
 - `x` xfail
+- `X` xpassed (an `xfail` test that passed unexpectedly)
 
 ```bash
 tryke test --reporter dot

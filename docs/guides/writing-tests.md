@@ -82,6 +82,7 @@ Available matchers:
 | `to_be_truthy()` | `bool(x) is True` |
 | `to_be_falsy()` | `bool(x) is False` |
 | `to_be_none()` | `x is None` |
+| `to_be_instance_of(cls)` | `isinstance(x, cls)` (accepts a tuple of types) |
 | `to_be_greater_than(y)` | `x > y` |
 | `to_be_less_than(y)` | `x < y` |
 | `to_be_greater_than_or_equal(y)` | `x >= y` |

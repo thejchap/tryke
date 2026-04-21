@@ -28,21 +28,21 @@ A Rust-based Python test runner with a Jest-style API.
 ## Highlights
 
 <ul class="md-highlights">
+  <li><span class="hl-icon hl-icon-fast"></span><a href="concepts/discovery.html">Fast</a> Rust-powered test discovery</li>
+  <li><span class="hl-icon hl-icon-concurrent"></span>Concurrent tests by default</li>
+  <li><span class="hl-icon hl-icon-pretty"></span>Pretty, per-assertion diagnostics</li>
+  <li><span class="hl-icon hl-icon-soft"></span><a href="concepts/soft-assertions.html">Soft assertions</a> (like <a href="https://github.com/okken/pytest-check">pytest-check</a>)</li>
+  <li><span class="hl-icon hl-icon-async"></span>Native <code>async</code> support — no plugin</li>
+  <li><span class="hl-icon hl-icon-watch"></span><a href="guides/watch-mode.html">Watch mode</a></li>
+  <li><span class="hl-icon hl-icon-changed"></span><a href="guides/changed-mode.html">Changed mode</a> (like <a href="https://github.com/anapaulagomes/pytest-picked">pytest-picked</a>)</li>
+  <li><span class="hl-icon hl-icon-clientsrv"></span><a href="concepts/client-server.html">Client/server</a> mode for fast editor integrations</li>
   <li><span class="hl-icon hl-icon-fixtures"></span><a href="guides/writing-tests.html#fixtures">Fixtures</a> with setup / teardown and typed <code>Depends()</code> injection</li>
   <li><span class="hl-icon hl-icon-cases"></span><a href="concepts/cases.html">Parametrized tests</a> via <code>@test.cases</code></li>
   <li><span class="hl-icon hl-icon-describe"></span><a href="guides/writing-tests.html#grouping-tests-with-describe">Grouping</a> with <code>describe()</code> blocks</li>
   <li><span class="hl-icon hl-icon-marks"></span><code>skip</code>, <code>skip_if</code>, <code>xfail</code>, and <code>todo</code> markers</li>
-  <li><span class="hl-icon hl-icon-watch"></span><a href="guides/watch-mode.html">Watch mode</a></li>
-  <li><span class="hl-icon hl-icon-async"></span>Native <code>async</code> support</li>
-  <li><span class="hl-icon hl-icon-fast"></span><a href="concepts/discovery.html">Fast</a> test discovery</li>
   <li><span class="hl-icon hl-icon-insource"></span><a href="guides/writing-tests.html#in-source-testing">In-source testing</a></li>
   <li><span class="hl-icon hl-icon-doctests"></span>Support for <a href="https://docs.python.org/3/library/doctest.html">doctests</a></li>
-  <li><span class="hl-icon hl-icon-clientsrv"></span><a href="concepts/client-server.html">Client/server</a> mode for fast editor integrations</li>
-  <li><span class="hl-icon hl-icon-pretty"></span>Pretty, per-assertion diagnostics</li>
   <li><span class="hl-icon hl-icon-filter"></span>Filtering and marks</li>
-  <li><span class="hl-icon hl-icon-changed"></span><a href="guides/changed-mode.html">Changed mode</a> (like <a href="https://github.com/anapaulagomes/pytest-picked">pytest-picked</a>)</li>
-  <li><span class="hl-icon hl-icon-concurrent"></span>Concurrent tests</li>
-  <li><span class="hl-icon hl-icon-soft"></span><a href="concepts/soft-assertions.html">Soft assertions</a> (like <a href="https://github.com/okken/pytest-check">pytest-check</a>)</li>
   <li><span class="hl-icon hl-icon-reporters"></span>JSON, JUnit, Dot, and LLM reporters</li>
 </ul>
 

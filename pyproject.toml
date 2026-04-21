@@ -28,10 +28,10 @@ Repository = "https://github.com/thejchap/tryke"
 "Bug Tracker" = "https://github.com/thejchap/tryke/issues"
 
 [tool.ty.src]
-exclude = ["benchmarks/suites", "docs/assets"] # TODO
+exclude = ["benchmarks/suites"] # TODO
 
 [tool.ruff]
-exclude = ["benchmarks/suites", "docs/assets"]
+exclude = ["benchmarks/suites"]
 # Treat `python/` as a source root so files like `python/tryke_guard.py`
 # are recognised as top-level modules instead of implicit namespace
 # packages (INP001). Mirrors maturin's `python-source = "python"`.
@@ -54,7 +54,7 @@ ignore = ["D", "COM812"]
 "tests/test_in_source_guard.py" = ["S603"]
 
 [tool.tryke]
-exclude = ["benchmarks/suites", "demo", "docs/assets"]
+exclude = ["benchmarks/suites", "demo"]
 
 [tool.maturin]
 bindings = "bin"

@@ -11,3 +11,43 @@
     <title>{{ config.site_name }}</title>
   {% endif %}
 {% endblock %}
+
+{#
+  Social link previews (Slack / LinkedIn / Twitter / Discord / etc.).
+  We synthesize per-page OG + Twitter metadata from existing front-matter
+  so there's no duplication between zensical.toml and page YAML.
+#}
+{% block extrahead %}
+  {% if page.url == "index.html" %}
+    {% set og_title = config.site_name ~ " - " ~ config.site_description %}
+  {% elif page.meta and page.meta.title %}
+    {% set og_title = page.meta.title ~ " - " ~ config.site_name %}
+  {% elif page.title and page.url != "index.html" %}
+    {% set og_title = (page.title | striptags) ~ " - " ~ config.site_name %}
+  {% else %}
+    {% set og_title = config.site_name %}
+  {% endif %}
+  {% if page.meta and page.meta.description %}
+    {% set og_desc = page.meta.description %}
+  {% else %}
+    {% set og_desc = config.site_description %}
+  {% endif %}
+  {% set og_url = page.canonical_url or config.site_url %}
+  {% set og_image = config.extra.social_image | d(config.site_url ~ "assets/social.png", true) %}
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="{{ config.site_name }}">
+  <meta property="og:title" content="{{ og_title }}">
+  <meta property="og:description" content="{{ og_desc }}">
+  <meta property="og:url" content="{{ og_url }}">
+  <meta property="og:image" content="{{ og_image }}">
+  <meta property="og:image:alt" content="{{ config.site_name }} - {{ config.site_description }}">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{ og_title }}">
+  <meta name="twitter:description" content="{{ og_desc }}">
+  <meta name="twitter:image" content="{{ og_image }}">
+  <meta name="twitter:image:alt" content="{{ config.site_name }} - {{ config.site_description }}">
+{% endblock %}

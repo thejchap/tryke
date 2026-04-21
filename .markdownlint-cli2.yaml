@@ -1,5 +1,10 @@
 config:
   MD013: false
+  # Fenced code blocks throughout the docs. Admonition bodies (``!!! tip``)
+  # use 4-space indents that would otherwise register as implicit indented
+  # code blocks and flip this rule into "mixed" mode.
+  MD046:
+    style: fenced
   MD033:
     allowed_elements:
       - a

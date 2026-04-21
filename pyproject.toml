@@ -15,6 +15,7 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3.15",
   "Programming Language :: Rust",
   "Topic :: Software Development :: Testing",
   "Typing :: Typed",
@@ -27,10 +28,10 @@ Repository = "https://github.com/thejchap/tryke"
 "Bug Tracker" = "https://github.com/thejchap/tryke/issues"
 
 [tool.ty.src]
-exclude = ["benchmarks/suites"] # TODO
+exclude = ["benchmarks/suites", "docs/assets"] # TODO
 
 [tool.ruff]
-exclude = ["benchmarks/suites"]
+exclude = ["benchmarks/suites", "docs/assets"]
 # Treat `python/` as a source root so files like `python/tryke_guard.py`
 # are recognised as top-level modules instead of implicit namespace
 # packages (INP001). Mirrors maturin's `python-source = "python"`.
@@ -53,7 +54,7 @@ ignore = ["D", "COM812"]
 "tests/test_in_source_guard.py" = ["S603"]
 
 [tool.tryke]
-exclude = ["benchmarks/suites", "demo"]
+exclude = ["benchmarks/suites", "demo", "docs/assets"]
 
 [tool.maturin]
 bindings = "bin"

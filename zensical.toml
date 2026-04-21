@@ -87,6 +87,13 @@ toggle.name = "Switch to system preference"
 primary = "teal"
 accent = "teal"
 
+# Absolute URL to the 1200x630 card rendered when the site is pasted into
+# Slack / LinkedIn / Twitter / Discord. Regenerate with
+# `uvx --from pillow python docs/assets/generate_social.py` when the logo
+# or copy changes. Consumed by overrides/main.html.
+[project.extra]
+social_image = "https://tryke.dev/assets/social.png"
+
 [[project.extra.social]]
 icon = "fontawesome/brands/github"
 link = "https://github.com/thejchap"

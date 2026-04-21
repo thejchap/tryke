@@ -51,21 +51,67 @@ A Rust-based Python test runner with a Jest-style API.
 Write a test.
 
 ```python
-from tryke import expect, test, describe
+from tryke import Depends, describe, expect, fixture, test
 
 
-def add(a: int, b: int) -> int:
-    return a + b
+class Users:
+    def __init__(self) -> None:
+        self._rows: dict[int, str] = {}
+
+    def create(self, name: str) -> int:
+        user_id = len(self._rows) + 1
+        self._rows[user_id] = name
+        return user_id
+
+    def get(self, user_id: int) -> str:
+        return self._rows[user_id]
 
 
-with describe("add"):
+# Fixtures combine setup + teardown in one function. `yield` splits them;
+# `per="scope"` caches the value for every test in the lexical scope.
+@fixture(per="scope")
+def users():
+    db = Users()
+    yield db
+    db._rows.clear()  # Teardown: runs once after the whole describe block.
 
-    @test("1 + 1")
-    def basic():
-        expect(1 + 1).to_equal(2)
+
+with describe("users"):
+
+    # Dependencies are explicit and typed — `Depends(users)` resolves to
+    # the `Users` return type above, no magic name-matching required.
+    @test
+    def create_and_get(db: Users = Depends(users)):
+        user_id = db.create("alice")
+        # Assertions are soft by default: all three run even if one fails,
+        # so you get the full diagnostic in a single run.
+        expect(user_id).to_equal(1)
+        expect(db.get(user_id)).to_equal("alice")
+        expect(lambda: db.get(999)).to_raise(KeyError)
+
+    # Parametrize with `@test.cases` — each case is its own test ID,
+    # labels are arbitrary strings, kwargs are statically type-checked.
+    @test.cases(
+        test.case("lowercase", name="alice"),
+        test.case("with spaces", name="Alice Liddell"),
+        test.case("unicode", name="Алиса"),
+    )
+    def round_trips_names(name: str, db: Users = Depends(users)):
+        expect(db.get(db.create(name))).to_equal(name)
+
+    # Native async — no `pytest-asyncio` plugin needed.
+    @test
+    async def async_create(db: Users = Depends(users)):
+        expect(db.create("bob")).to_be_greater_than(0)
+
+    # Skip / xfail / todo markers ship in the box.
+    @test.xfail("reserved-name handling not implemented yet")
+    def rejects_reserved_names(db: Users = Depends(users)):
+        expect(lambda: db.create("admin")).to_raise(ValueError)
 ```
 
-Run your tests.
+Run your tests — `tryke watch` for an always-on loop, `tryke test --changed`
+for just what your working tree touched, or plain:
 
 ```bash
 uvx tryke test

@@ -2,6 +2,15 @@
 
 A side-by-side guide for moving from pytest to Tryke.
 
+!!! tip "Let an LLM do the migration for you"
+    The fastest way to migrate is to hand the job to your AI coding assistant
+    (Claude Code, Cursor, Codex, Aider, etc.). We maintain a battle-tested
+    prompt that walks the assistant through a **phased, gated** migration with
+    explicit discovery- and results-parity checks so nothing is silently
+    dropped or inverted — it pairs with `tryke test --reporter llm` for
+    concise, structured failure diagnostics tuned to LLM context windows.
+    **[Jump to the migration prompt &rarr;](#migration-prompt)**
+
 ## Cheat sheet
 
 ### Test functions

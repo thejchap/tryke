@@ -67,6 +67,10 @@
 .hl-icon-concurrent  { --hl-icon: url("../assets/icons/layers.svg"); }
 .hl-icon-soft        { --hl-icon: url("../assets/icons/circle-check.svg"); }
 .hl-icon-reporters   { --hl-icon: url("../assets/icons/file-output.svg"); }
+.hl-icon-fixtures    { --hl-icon: url("../assets/icons/syringe.svg"); }
+.hl-icon-cases       { --hl-icon: url("../assets/icons/table.svg"); }
+.hl-icon-marks       { --hl-icon: url("../assets/icons/tag.svg"); }
+.hl-icon-describe    { --hl-icon: url("../assets/icons/folder-tree.svg"); }
 
 /* Drop bullet markers on the highlights list since icons replace them.
    Material's content rules use a higher-specificity selector so qualify

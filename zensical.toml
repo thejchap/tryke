@@ -87,6 +87,11 @@ toggle.name = "Switch to system preference"
 primary = "teal"
 accent = "teal"
 
+# Absolute URL to the thumbnail rendered when the site is pasted into
+# Slack / LinkedIn / Twitter / Discord. Consumed by overrides/main.html.
+[project.extra]
+social_image = "https://tryke.dev/assets/logo.png"
+
 [[project.extra.social]]
 icon = "fontawesome/brands/github"
 link = "https://github.com/thejchap"

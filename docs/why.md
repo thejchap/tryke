@@ -2,7 +2,12 @@
 
 An honest look at what Tryke does well, where pytest wins, and when each tool is the right choice.
 
-Already on pytest and wondering how to switch? The [migration guide](migration.md) has a side-by-side cheat sheet and a copy-paste AI prompt for a phased, verified migration.
+Already on pytest and wondering how to switch? The fastest path is our
+[copy-paste LLM migration prompt](migration.md#migration-prompt) — hand it to
+Claude Code, Cursor, or any AI assistant in your repo and it will run a
+phased, gated pytest &rarr; Tryke migration with discovery- and results-parity
+checks. The [migration guide](migration.md) also has a side-by-side cheat
+sheet if you prefer to convert by hand.
 
 ## What makes Tryke different
 
@@ -64,8 +69,8 @@ Tryke also supports project-level discovery excludes through `[tool.tryke]` in `
 | **Async** | Built-in | Plugin (pytest-asyncio) |
 | **Reporters** | text, json, dot, junit, llm | Verbose, short + plugins |
 | **Plugin ecosystem** | — | Extensive (1000+) |
-| **Fixtures** | Not yet | Powerful, composable |
-| **Parametrize** | Not yet | Built-in |
+| **Fixtures** | Built-in (`@fixture` + typed `Depends()`) | Powerful, composable |
+| **Parametrize** | Built-in (`@test.cases`) | Built-in |
 | **Community** | New | Large, established |
 | **Documentation** | Growing | Extensive |
 | **IDE support** | VS Code, Neovim | All major IDEs |
@@ -91,8 +96,5 @@ Tryke also supports project-level discovery excludes through `[tool.tryke]` in `
 
 What's coming to Tryke:
 
-- **Fixtures / dependency injection** — a lightweight fixture system
-- **Parametrize** — built-in test parameterization
-- **Doctests** — run examples from docstrings as tests
 - **Plugin API** — extensibility hooks for custom reporters and discovery
 - **Coverage integration** — built-in coverage reporting

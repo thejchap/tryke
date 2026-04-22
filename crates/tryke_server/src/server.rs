@@ -45,6 +45,10 @@ impl Server {
         let pool = Arc::new(WorkerPool::new(size, &python, &self.root));
         pool.warm().await;
 
+        // Held across the full duration of a single `run` so concurrent
+        // clients don't interleave test execution on the shared pool.
+        let run_lock = Arc::new(Mutex::new(()));
+
         let (bcast_tx, _) = broadcast::channel::<Bytes>(256);
         let disc = Arc::new(Mutex::new(Discoverer::new_with_excludes(
             &self.root,
@@ -105,10 +109,18 @@ impl Server {
             let bcast_tx_conn = bcast_tx.clone();
             let disc_conn = Arc::clone(&disc);
             let pool_conn = Arc::clone(&pool);
+            let run_lock_conn = Arc::clone(&run_lock);
             tokio::spawn(async move {
-                ConnectionHandler::new(stream, disc_conn, bcast_rx, bcast_tx_conn, pool_conn)
-                    .run()
-                    .await;
+                ConnectionHandler::new(
+                    stream,
+                    disc_conn,
+                    bcast_rx,
+                    bcast_tx_conn,
+                    pool_conn,
+                    run_lock_conn,
+                )
+                .run()
+                .await;
             });
         }
     }

@@ -180,7 +180,7 @@ mod tests {
         let mut c1 = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
         let mut c2 = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
 
-        let run_req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"run\",\"params\":{\"root\":\"/ignored\",\"tests\":null}}\n";
+        let run_req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"run\",\"params\":{\"root\":\"/ignored\",\"tests\":null,\"run_id\":\"r1\"}}\n";
         c1.write_all(run_req.as_bytes()).await.unwrap();
 
         let mut r2 = BufReader::new(&mut c2);

@@ -1,14 +1,22 @@
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, ErrorKind, Write},
     net::TcpStream,
     path::Path,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use tryke_reporter::Reporter;
 use tryke_types::{RunSummary, TestItem, TestResult};
 
 const RPC_REQUEST_ID: i64 = 1;
+
+/// Max time we keep reading notifications after the RPC response arrives,
+/// waiting for the matching `run_complete`. The notification writer task and
+/// the RPC response writer race for the connection's write lock, so late
+/// `test_complete` / `run_complete` messages can arrive after the response.
+/// If `run_complete` never shows up (e.g. broadcast channel lagged), the
+/// drain simply terminates with the summary from the RPC response.
+const POST_RESPONSE_DRAIN: Duration = Duration::from_secs(2);
 
 pub struct Client {
     port: u16,
@@ -57,76 +65,102 @@ impl Client {
         writer.write_all(b"\n")?;
         writer.flush()?;
 
-        let mut line = String::new();
-        let mut summary: Option<RunSummary> = None;
-        loop {
-            line.clear();
-            if reader.read_line(&mut line)? == 0 {
-                break;
-            }
-            let val: serde_json::Value = match serde_json::from_str(line.trim()) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
+        let summary = read_until_summary(&mut reader, &run_id, reporter)?;
+        reporter.on_run_complete(&summary);
+        if summary.failed > 0 || summary.errors > 0 {
+            return Err(anyhow::anyhow!(
+                "{} failed, {} error(s)",
+                summary.failed,
+                summary.errors
+            ));
+        }
+        Ok(())
+    }
+}
 
-            // Our RPC response: authoritative signal that the run is done.
-            // Detected by matching our request id — the server cannot lose
-            // this the way it can silently drop broadcast notifications under
-            // `Lagged`, so we break on the response rather than on the
-            // `run_complete` notification.
-            if val.get("method").is_none()
-                && val["id"].as_i64() == Some(RPC_REQUEST_ID)
-                && let Ok(s) =
-                    serde_json::from_value::<RunSummary>(val["result"]["summary"].clone())
+/// Read newline-delimited messages until we have the authoritative summary
+/// from the RPC response, then keep draining notifications for our `run_id`
+/// until `run_complete` arrives or `POST_RESPONSE_DRAIN` elapses. The drain
+/// phase exists because the server writes the response and the broadcast
+/// notifications from separate tasks, so late notifications can land on the
+/// socket after the response.
+fn read_until_summary(
+    reader: &mut BufReader<TcpStream>,
+    run_id: &str,
+    reporter: &mut dyn Reporter,
+) -> anyhow::Result<RunSummary> {
+    let mut line = String::new();
+    let mut summary: Option<RunSummary> = None;
+    let mut draining = false;
+
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(e)
+                if draining && matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
             {
-                summary = Some(s);
                 break;
             }
+            Err(e) => return Err(e.into()),
+        }
+        let val: serde_json::Value = match serde_json::from_str(line.trim()) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
 
-            // Notifications for runs we didn't initiate arrive on the same
-            // broadcast channel (e.g. another client's run, or a watcher
-            // rediscovery). Filter them out so the reporter only sees this
-            // client's events.
-            let notif_run_id = val["params"]["run_id"].as_str();
-            if notif_run_id.is_some() && notif_run_id != Some(run_id.as_str()) {
-                continue;
+        if val.get("method").is_none() && val["id"].as_i64() == Some(RPC_REQUEST_ID) {
+            if let Some(err) = val.get("error") {
+                let code = err["code"].as_i64().unwrap_or(0);
+                let message = err["message"].as_str().unwrap_or("<missing>");
+                return Err(anyhow::anyhow!("server error {code}: {message}"));
             }
-
-            match val["method"].as_str() {
-                Some("run_start") => {
-                    if let Ok(tests) =
-                        serde_json::from_value::<Vec<TestItem>>(val["params"]["tests"].clone())
-                    {
-                        reporter.on_run_start(&tests);
-                    }
-                }
-                Some("test_complete") => {
-                    if let Ok(result) =
-                        serde_json::from_value::<TestResult>(val["params"]["result"].clone())
-                    {
-                        reporter.on_test_complete(&result);
-                    }
-                }
-                _ => {}
-            }
+            let Ok(s) = serde_json::from_value::<RunSummary>(val["result"]["summary"].clone())
+            else {
+                return Err(anyhow::anyhow!(
+                    "server returned a response with no summary for our run"
+                ));
+            };
+            summary = Some(s);
+            reader
+                .get_ref()
+                .set_read_timeout(Some(POST_RESPONSE_DRAIN))
+                .ok();
+            draining = true;
+            continue;
         }
 
-        if let Some(s) = summary {
-            reporter.on_run_complete(&s);
-            if s.failed > 0 || s.errors > 0 {
-                return Err(anyhow::anyhow!(
-                    "{} failed, {} error(s)",
-                    s.failed,
-                    s.errors
-                ));
+        // Notifications for runs we didn't initiate arrive on the same
+        // broadcast channel (e.g. another client's run, or a watcher
+        // rediscovery). Filter them so the reporter only sees our events.
+        let notif_run_id = val["params"]["run_id"].as_str();
+        if notif_run_id.is_some() && notif_run_id != Some(run_id) {
+            continue;
+        }
+
+        match val["method"].as_str() {
+            Some("run_start") => {
+                if let Ok(tests) =
+                    serde_json::from_value::<Vec<TestItem>>(val["params"]["tests"].clone())
+                {
+                    reporter.on_run_start(&tests);
+                }
             }
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!(
-                "server closed connection before returning a run summary"
-            ))
+            Some("test_complete") => {
+                if let Ok(result) =
+                    serde_json::from_value::<TestResult>(val["params"]["result"].clone())
+                {
+                    reporter.on_test_complete(&result);
+                }
+            }
+            Some("run_complete") if draining => break,
+            _ => {}
         }
     }
+
+    summary
+        .ok_or_else(|| anyhow::anyhow!("server closed connection before returning a run summary"))
 }
 
 fn generate_run_id() -> String {
@@ -216,15 +250,34 @@ mod tests {
             .to_string()
     }
 
+    fn run_complete_notif() -> String {
+        format!(
+            r#"{{"jsonrpc":"2.0","method":"run_complete","params":{{"run_id":"{{RID}}","summary":{EMPTY_SUMMARY}}}}}"#
+        )
+    }
+
     fn rpc_response() -> String {
         format!(
             r#"{{"jsonrpc":"2.0","id":1,"result":{{"run_id":"{{RID}}","summary":{EMPTY_SUMMARY}}}}}"#
         )
     }
 
+    fn rpc_error_response(code: i32, message: &str) -> String {
+        format!(r#"{{"jsonrpc":"2.0","id":1,"error":{{"code":{code},"message":"{message}"}}}}"#)
+    }
+
+    fn test_complete_for(run_id: &str, name: &str) -> String {
+        format!(
+            r#"{{"jsonrpc":"2.0","method":"test_complete","params":{{"run_id":"{run_id}","result":{{"test":{{"name":"{name}","module_path":"x","file_path":null,"line_number":null,"display_name":null,"expected_assertions":[]}},"outcome":{{"status":"passed"}},"duration":{{"secs":0,"nanos":0}},"stdout":"","stderr":""}}}}}}"#
+        )
+    }
+
     #[test]
     fn client_dispatches_reporter_events() {
-        let port = start_mock_server(vec![run_start_notif(), rpc_response()], true);
+        let port = start_mock_server(
+            vec![run_start_notif(), rpc_response(), run_complete_notif()],
+            true,
+        );
 
         let dir = tempfile::tempdir().unwrap();
         let mut reporter = RecordingReporter::new();
@@ -252,15 +305,14 @@ mod tests {
         // Emit notifications tagged with a different run_id before our own
         // run_start+response. The reporter must not see any of them.
         let foreign_run_start = r#"{"jsonrpc":"2.0","method":"run_start","params":{"run_id":"other","tests":[{"name":"foreign","module_path":"x"}]}}"#;
-        let foreign_test_complete =
-            r#"{"jsonrpc":"2.0","method":"test_complete","params":{"run_id":"other","result":{"test":{"name":"foreign","module_path":"x"},"outcome":"Passed","duration":{"secs":0,"nanos":0},"stdout":"","stderr":""}}}"#
-                .to_string();
+        let foreign_test_complete = test_complete_for("other", "foreign");
         let port = start_mock_server(
             vec![
                 foreign_run_start.to_string(),
                 foreign_test_complete,
                 run_start_notif(),
                 rpc_response(),
+                run_complete_notif(),
             ],
             true,
         );
@@ -283,11 +335,21 @@ mod tests {
     }
 
     #[test]
-    fn client_breaks_on_rpc_response_even_without_run_complete() {
-        // The server no longer depends on `run_complete` for termination.
-        // If the broadcast channel lags and the run_complete notification is
-        // dropped, the RPC response is still the authoritative terminator.
-        let port = start_mock_server(vec![run_start_notif(), rpc_response()], true);
+    fn client_dispatches_notifications_that_arrive_after_rpc_response() {
+        // The server writes the RPC response and the broadcast notifications
+        // from different tasks, so a `test_complete` or `run_complete` can
+        // land on the socket after the response. The client must keep
+        // draining notifications (until run_complete or a short timeout) so
+        // the reporter sees the full event stream.
+        let port = start_mock_server(
+            vec![
+                run_start_notif(),
+                rpc_response(),
+                test_complete_for("{RID}", "late_test"),
+                run_complete_notif(),
+            ],
+            true,
+        );
 
         let dir = tempfile::tempdir().unwrap();
         let mut reporter = RecordingReporter::new();
@@ -295,7 +357,50 @@ mod tests {
             .run(dir.path(), &mut reporter)
             .unwrap();
 
+        assert_eq!(
+            reporter.results.len(),
+            1,
+            "late test_complete must reach the reporter via the drain phase"
+        );
         assert!(reporter.summary.is_some());
+    }
+
+    #[test]
+    fn client_breaks_on_rpc_response_even_without_run_complete() {
+        // When `run_complete` is lost to broadcast lag the client must still
+        // terminate (via the drain timeout) and report the summary from the
+        // authoritative RPC response.
+        let port = start_mock_server(vec![run_start_notif(), rpc_response()], true);
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut reporter = RecordingReporter::new();
+        let start = std::time::Instant::now();
+        Client::new(port, None, vec![], None)
+            .run(dir.path(), &mut reporter)
+            .unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(reporter.summary.is_some());
+        assert!(
+            elapsed < POST_RESPONSE_DRAIN + Duration::from_secs(1),
+            "drain took too long: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn client_surfaces_rpc_error_response() {
+        // If the server rejects our request (e.g. missing run_id, though
+        // the CLI client always sends one), the error response must turn
+        // into an Err instead of hanging the reader.
+        let port = start_mock_server(vec![rpc_error_response(-32602, "bad params")], false);
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut reporter = RecordingReporter::new();
+        let result = Client::new(port, None, vec![], None).run(dir.path(), &mut reporter);
+        let err = result.expect_err("expected Err");
+        let msg = err.to_string();
+        assert!(msg.contains("-32602"), "missing code in: {msg}");
+        assert!(msg.contains("bad params"), "missing message in: {msg}");
     }
 
     #[test]

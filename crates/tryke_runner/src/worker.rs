@@ -145,8 +145,9 @@ impl WorkerProcess {
         Ok(())
     }
 
-    /// Tell the Python worker to run scope-level teardown (`after_all`, `wrap_all`)
-    /// for a module. Must be called after all tests from that module have run.
+    /// Tell the Python worker to run scope-level teardown for `per="scope"`
+    /// fixtures in a module. Must be called after all tests from that module
+    /// have run.
     #[expect(clippy::missing_errors_doc)]
     pub async fn finalize_hooks(&mut self, module: String) -> Result<()> {
         let value = serde_json::to_value(FinalizeHooksParams { module })?;

@@ -535,7 +535,7 @@ class Worker:
         _log.debug("register_hooks: module=%s hook_count=%d", module_name, len(hooks))
 
     def _finalize_hooks(self, module_name: str) -> None:
-        """Run scope-level teardown (after_all, wrap_all) for a module."""
+        """Run scope-level teardown for a module's `per="scope"` fixtures."""
         executor = self._executors.get(module_name)
         if executor is not None:
             executor.finalize()

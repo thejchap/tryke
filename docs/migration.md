@@ -162,16 +162,18 @@ async def async_operation():
 
 ### Running changed tests
 
-**pytest** (requires plugin):
+**pytest** (requires a plugin like `pytest-picked` or `pytest-testmon`):
 
 ```bash
-pytest --lf  # last failed
+pytest --picked          # from pytest-picked: tests in git-changed files
+pytest --testmon         # from pytest-testmon: tests affected at runtime
 ```
 
-**Tryke** (built-in):
+**Tryke** (built-in, uses a static import graph):
 
 ```bash
-tryke test --changed  # tests affected by git changes
+tryke test --changed        # tests affected by git-changed files
+tryke test --changed-first  # changed tests first, then the rest
 ```
 
 ## What's different

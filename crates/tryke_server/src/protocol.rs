@@ -23,6 +23,12 @@ pub struct RunParams {
     pub filter: Option<String>,
     pub paths: Option<Vec<String>>,
     pub markers: Option<String>,
+    /// Client-generated opaque identifier that the server echoes back in the
+    /// `run` RPC response and every `run_start` / `test_complete` /
+    /// `run_complete` notification. Clients use this to demultiplex
+    /// notifications when multiple runs share the broadcast channel. If
+    /// absent, the server generates one.
+    pub run_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,16 +65,25 @@ pub struct DiscoverCompleteParams {
 
 #[derive(Debug, Serialize)]
 pub struct RunStartParams {
+    pub run_id: String,
     pub tests: Vec<TestItem>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct TestCompleteParams {
+    pub run_id: String,
     pub result: TestResult,
 }
 
 #[derive(Debug, Serialize)]
 pub struct RunCompleteParams {
+    pub run_id: String,
+    pub summary: RunSummary,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunResponse {
+    pub run_id: String,
     pub summary: RunSummary,
 }
 
@@ -154,5 +169,31 @@ mod tests {
         assert_eq!(val["method"], "discover_complete");
         assert!(val["params"]["tests"].is_array());
         assert!(val.get("id").is_none());
+    }
+
+    #[test]
+    fn run_params_without_run_id_deserializes() {
+        let json = r#"{"tests":null}"#;
+        let params: RunParams = serde_json::from_str(json).unwrap();
+        assert!(params.run_id.is_none());
+    }
+
+    #[test]
+    fn run_params_with_run_id_deserializes() {
+        let json = r#"{"tests":null,"run_id":"abc-123"}"#;
+        let params: RunParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.run_id.as_deref(), Some("abc-123"));
+    }
+
+    #[test]
+    fn run_start_params_serialize_with_run_id() {
+        let params = RunStartParams {
+            run_id: "r1".to_string(),
+            tests: vec![],
+        };
+        let val: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&params).unwrap()).unwrap();
+        assert_eq!(val["run_id"], "r1");
+        assert!(val["tests"].is_array());
     }
 }

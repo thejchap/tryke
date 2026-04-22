@@ -43,6 +43,7 @@ The `@test` decorator replaces the `test_` prefix convention. Assertions use `ex
 | `assert x` | `expect(x).to_be_truthy()` |
 | `assert not x` | `expect(x).to_be_falsy()` |
 | `assert x is None` | `expect(x).to_be_none()` |
+| `assert isinstance(x, cls)` | `expect(x).to_be_instance_of(cls)` |
 | `assert x > y` | `expect(x).to_be_greater_than(y)` |
 | `assert x < y` | `expect(x).to_be_less_than(y)` |
 | `assert x in y` | `expect(y).to_contain(x)` |

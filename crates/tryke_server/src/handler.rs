@@ -13,9 +13,9 @@ use tryke_types::filter::TestFilter;
 use tryke_types::{RunSummary, TestOutcome};
 
 use crate::protocol::{
-    DiscoverCompleteParams, DiscoverParams, ErrorResponse, METHOD_NOT_FOUND, Notification, Request,
-    Response, RpcError, RunCompleteParams, RunParams, RunResponse, RunStartParams,
-    TestCompleteParams,
+    DiscoverCompleteParams, DiscoverParams, ErrorResponse, INVALID_PARAMS, METHOD_NOT_FOUND,
+    Notification, Request, Response, RpcError, RunCompleteParams, RunParams, RunResponse,
+    RunStartParams, TestCompleteParams,
 };
 
 pub struct ConnectionHandler {
@@ -140,7 +140,7 @@ async fn execute_run(
     pool: &WorkerPool,
     run_lock: &Mutex<()>,
 ) -> (String, RunSummary) {
-    let run_id = rp.run_id.clone().unwrap_or_else(generate_run_id);
+    let run_id = rp.run_id.clone();
     // Serialize concurrent runs: only one run at a time may dispatch units
     // onto the shared pool, so per-module fixture state (and test_complete
     // notification ordering) is not interleaved across clients.
@@ -242,16 +242,6 @@ async fn execute_run(
     (run_id, summary)
 }
 
-/// Generate a `run_id` unique to this server process. Combines a monotonic
-/// counter with the process id so ids are still recognizable if the server
-/// restarts while a client is reconnecting.
-fn generate_run_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("srv-{}-{:x}", std::process::id(), n)
-}
-
 pub async fn handle_request(
     line: &str,
     disc: &tokio::sync::Mutex<tryke_discovery::Discoverer>,
@@ -277,10 +267,23 @@ pub async fn handle_request(
             serialize_response(id, serde_json::json!({ "tests": tests }))
         }
         "run" => {
-            let rp = req
-                .params
-                .and_then(|p| serde_json::from_value::<RunParams>(p).ok())
-                .unwrap_or_default();
+            let Some(params) = req.params else {
+                return serialize_error(
+                    req.id,
+                    INVALID_PARAMS,
+                    "method 'run' requires params with run_id".to_string(),
+                );
+            };
+            let rp = match serde_json::from_value::<RunParams>(params) {
+                Ok(rp) => rp,
+                Err(e) => {
+                    return serialize_error(
+                        req.id,
+                        INVALID_PARAMS,
+                        format!("invalid params for 'run': {e}"),
+                    );
+                }
+            };
             let (run_id, summary) = execute_run(rp, disc, bcast_tx, pool, run_lock).await;
             serialize_response(id, RunResponse { run_id, summary })
         }
@@ -383,7 +386,7 @@ mod tests {
         let pool = make_pool();
         let run_lock = make_run_lock();
         handle_request(
-            r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"root":"/ignored","tests":null}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"root":"/ignored","tests":null,"run_id":"r1"}}"#,
             &disc,
             &tx,
             &pool,
@@ -400,6 +403,26 @@ mod tests {
         }
         assert!(methods.contains(&"run_start".to_string()));
         assert!(methods.contains(&"run_complete".to_string()));
+    }
+
+    #[tokio::test]
+    async fn run_without_run_id_returns_invalid_params() {
+        let dir = make_root();
+        let (tx, _rx) = broadcast::channel(16);
+        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        let pool = make_pool();
+        let run_lock = make_run_lock();
+        let resp = handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"tests":null}}"#,
+            &disc,
+            &tx,
+            &pool,
+            &run_lock,
+        )
+        .await
+        .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(val["error"]["code"], INVALID_PARAMS);
     }
 
     #[tokio::test]
@@ -460,7 +483,7 @@ mod tests {
         // Run should return only cached tests (test_x), not pick up test_y
         let (tx2, mut rx2) = broadcast::channel(64);
         handle_request(
-            r#"{"jsonrpc":"2.0","id":2,"method":"run","params":{"root":"/ignored","tests":null}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"run","params":{"root":"/ignored","tests":null,"run_id":"r1"}}"#,
             &disc,
             &tx2,
             &pool,
@@ -536,8 +559,7 @@ mod tests {
         let mut c1 = TcpStream::connect(addr).await.unwrap();
         let mut c2 = TcpStream::connect(addr).await.unwrap();
 
-        let run_req =
-            r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"root":"/ignored","tests":null}}"#;
+        let run_req = r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"root":"/ignored","tests":null,"run_id":"r1"}}"#;
         c1.write_all(format!("{run_req}\n").as_bytes())
             .await
             .unwrap();
@@ -574,7 +596,7 @@ mod tests {
         let pool = make_pool();
         let run_lock = make_run_lock();
         handle_request(
-            r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"filter":"alpha"}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"filter":"alpha","run_id":"r1"}}"#,
             &disc,
             &tx,
             &pool,

@@ -13,8 +13,9 @@ use tryke_types::filter::TestFilter;
 use tryke_types::{RunSummary, TestOutcome};
 
 use crate::protocol::{
-    DiscoverCompleteParams, DiscoverParams, ErrorResponse, METHOD_NOT_FOUND, Notification, Request,
-    Response, RpcError, RunCompleteParams, RunParams, RunStartParams, TestCompleteParams,
+    DiscoverCompleteParams, DiscoverParams, ErrorResponse, INVALID_PARAMS, METHOD_NOT_FOUND,
+    Notification, Request, Response, RpcError, RunCompleteParams, RunParams, RunResponse,
+    RunStartParams, TestCompleteParams,
 };
 
 pub struct ConnectionHandler {
@@ -23,6 +24,7 @@ pub struct ConnectionHandler {
     broadcast_rx: broadcast::Receiver<Bytes>,
     broadcast_tx: broadcast::Sender<Bytes>,
     pool: Arc<WorkerPool>,
+    run_lock: Arc<Mutex<()>>,
 }
 
 impl ConnectionHandler {
@@ -32,6 +34,7 @@ impl ConnectionHandler {
         broadcast_rx: broadcast::Receiver<Bytes>,
         broadcast_tx: broadcast::Sender<Bytes>,
         pool: Arc<WorkerPool>,
+        run_lock: Arc<Mutex<()>>,
     ) -> Self {
         Self {
             stream,
@@ -39,6 +42,7 @@ impl ConnectionHandler {
             broadcast_rx,
             broadcast_tx,
             pool,
+            run_lock,
         }
     }
 
@@ -73,8 +77,10 @@ impl ConnectionHandler {
                     let disc = Arc::clone(&self.disc);
                     let bcast_tx = self.broadcast_tx.clone();
                     let pool = Arc::clone(&self.pool);
+                    let run_lock = Arc::clone(&self.run_lock);
                     let line_owned = line.clone();
-                    let response = handle_request(&line_owned, &disc, &bcast_tx, &pool).await;
+                    let response =
+                        handle_request(&line_owned, &disc, &bcast_tx, &pool, &run_lock).await;
                     if let Some(bytes) = response {
                         let mut w = writer.lock().await;
                         if w.write_all(&bytes).await.is_err() || w.flush().await.is_err() {
@@ -132,7 +138,14 @@ async fn execute_run(
     disc: &tokio::sync::Mutex<tryke_discovery::Discoverer>,
     bcast_tx: &broadcast::Sender<Bytes>,
     pool: &WorkerPool,
-) -> RunSummary {
+    run_lock: &Mutex<()>,
+) -> (String, RunSummary) {
+    let run_id = rp.run_id.clone();
+    // Serialize concurrent runs: only one run at a time may dispatch units
+    // onto the shared pool, so per-module fixture state (and test_complete
+    // notification ordering) is not interleaved across clients.
+    let _run_guard = run_lock.lock().await;
+
     let discovery_start = Instant::now();
     let guard = disc.lock().await;
     let all_tests = guard.tests();
@@ -164,6 +177,7 @@ async fn execute_run(
         bcast_tx,
         "run_start",
         RunStartParams {
+            run_id: run_id.clone(),
             tests: tests.clone(),
         },
     );
@@ -195,6 +209,7 @@ async fn execute_run(
             bcast_tx,
             "test_complete",
             TestCompleteParams {
+                run_id: run_id.clone(),
                 result: result.clone(),
             },
         );
@@ -219,11 +234,12 @@ async fn execute_run(
         bcast_tx,
         "run_complete",
         RunCompleteParams {
+            run_id: run_id.clone(),
             summary: summary.clone(),
         },
     );
 
-    summary
+    (run_id, summary)
 }
 
 pub async fn handle_request(
@@ -231,6 +247,7 @@ pub async fn handle_request(
     disc: &tokio::sync::Mutex<tryke_discovery::Discoverer>,
     bcast_tx: &broadcast::Sender<Bytes>,
     pool: &WorkerPool,
+    run_lock: &Mutex<()>,
 ) -> Option<Vec<u8>> {
     let req: Request = serde_json::from_str(line.trim()).ok()?;
     let id = req.id.clone().unwrap_or(Value::Null);
@@ -250,12 +267,25 @@ pub async fn handle_request(
             serialize_response(id, serde_json::json!({ "tests": tests }))
         }
         "run" => {
-            let rp = req
-                .params
-                .and_then(|p| serde_json::from_value::<RunParams>(p).ok())
-                .unwrap_or_default();
-            let summary = execute_run(rp, disc, bcast_tx, pool).await;
-            serialize_response(id, serde_json::json!({ "summary": summary }))
+            let Some(params) = req.params else {
+                return serialize_error(
+                    req.id,
+                    INVALID_PARAMS,
+                    "method 'run' requires params with run_id".to_string(),
+                );
+            };
+            let rp = match serde_json::from_value::<RunParams>(params) {
+                Ok(rp) => rp,
+                Err(e) => {
+                    return serialize_error(
+                        req.id,
+                        INVALID_PARAMS,
+                        format!("invalid params for 'run': {e}"),
+                    );
+                }
+            };
+            let (run_id, summary) = execute_run(rp, disc, bcast_tx, pool, run_lock).await;
+            serialize_response(id, RunResponse { run_id, summary })
         }
         _ => serialize_error(
             req.id,
@@ -302,17 +332,23 @@ mod tests {
         ))
     }
 
+    fn make_run_lock() -> Arc<Mutex<()>> {
+        Arc::new(Mutex::new(()))
+    }
+
     #[tokio::test]
     async fn ping_returns_pong() {
         let dir = make_root();
         let (tx, _rx) = broadcast::channel(16);
         let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
         let pool = make_pool();
+        let run_lock = make_run_lock();
         let resp = handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#,
             &disc,
             &tx,
             &pool,
+            &run_lock,
         )
         .await
         .unwrap();
@@ -328,11 +364,13 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
         let pool = make_pool();
+        let run_lock = make_run_lock();
         let resp = handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"discover","params":{"root":"/ignored"}}"#,
             &disc,
             &tx,
             &pool,
+            &run_lock,
         )
         .await
         .unwrap();
@@ -346,11 +384,13 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(64);
         let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
         let pool = make_pool();
+        let run_lock = make_run_lock();
         handle_request(
-            r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"root":"/ignored","tests":null}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"root":"/ignored","tests":null,"run_id":"r1"}}"#,
             &disc,
             &tx,
             &pool,
+            &run_lock,
         )
         .await;
 
@@ -366,6 +406,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_without_run_id_returns_invalid_params() {
+        let dir = make_root();
+        let (tx, _rx) = broadcast::channel(16);
+        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        let pool = make_pool();
+        let run_lock = make_run_lock();
+        let resp = handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"tests":null}}"#,
+            &disc,
+            &tx,
+            &pool,
+            &run_lock,
+        )
+        .await
+        .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(val["error"]["code"], INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn run_broadcasts_include_run_id() {
+        let dir = make_root();
+        let (tx, mut rx) = broadcast::channel(64);
+        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        let pool = make_pool();
+        let run_lock = make_run_lock();
+        let resp = handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"run_id":"test-run-xyz","tests":null}}"#,
+            &disc,
+            &tx,
+            &pool,
+            &run_lock,
+        )
+        .await
+        .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(val["result"]["run_id"], "test-run-xyz");
+
+        while let Ok(bytes) = rx.try_recv() {
+            let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let method = val["method"].as_str().unwrap_or("");
+            if matches!(method, "run_start" | "run_complete" | "test_complete") {
+                assert_eq!(
+                    val["params"]["run_id"], "test-run-xyz",
+                    "notification {method} missing run_id"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn run_uses_cached_tests_not_rediscover() {
         let dir = make_root();
         fs::write(dir.path().join("test_x.py"), "@test\ndef test_x(): pass\n")
@@ -375,11 +466,13 @@ mod tests {
         // Populate cache via discover
         let (tx, _rx) = broadcast::channel(64);
         let pool = make_pool();
+        let run_lock = make_run_lock();
         handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"discover","params":{"root":"/ignored"}}"#,
             &disc,
             &tx,
             &pool,
+            &run_lock,
         )
         .await;
 
@@ -390,10 +483,11 @@ mod tests {
         // Run should return only cached tests (test_x), not pick up test_y
         let (tx2, mut rx2) = broadcast::channel(64);
         handle_request(
-            r#"{"jsonrpc":"2.0","id":2,"method":"run","params":{"root":"/ignored","tests":null}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"run","params":{"root":"/ignored","tests":null,"run_id":"r1"}}"#,
             &disc,
             &tx2,
             &pool,
+            &run_lock,
         )
         .await;
 
@@ -417,11 +511,13 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
         let pool = make_pool();
+        let run_lock = make_run_lock();
         let resp = handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"unknown_method"}"#,
             &disc,
             &tx,
             &pool,
+            &run_lock,
         )
         .await
         .unwrap();
@@ -442,6 +538,8 @@ mod tests {
         let disc_clone = Arc::clone(&disc);
         let pool_clone = Arc::clone(&pool);
 
+        let run_lock = make_run_lock();
+        let run_lock_clone = Arc::clone(&run_lock);
         tokio::spawn(async move {
             for _ in 0..2u8 {
                 let (stream, _) = listener.accept().await.unwrap();
@@ -449,8 +547,9 @@ mod tests {
                 let bcast_tx_conn = bcast_tx_clone.clone();
                 let d = Arc::clone(&disc_clone);
                 let p = Arc::clone(&pool_clone);
+                let rl = Arc::clone(&run_lock_clone);
                 tokio::spawn(async move {
-                    ConnectionHandler::new(stream, d, bcast_rx, bcast_tx_conn, p)
+                    ConnectionHandler::new(stream, d, bcast_rx, bcast_tx_conn, p, rl)
                         .run()
                         .await;
                 });
@@ -460,8 +559,7 @@ mod tests {
         let mut c1 = TcpStream::connect(addr).await.unwrap();
         let mut c2 = TcpStream::connect(addr).await.unwrap();
 
-        let run_req =
-            r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"root":"/ignored","tests":null}}"#;
+        let run_req = r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"root":"/ignored","tests":null,"run_id":"r1"}}"#;
         c1.write_all(format!("{run_req}\n").as_bytes())
             .await
             .unwrap();
@@ -496,11 +594,13 @@ mod tests {
         // Populate cache
         disc.lock().await.rediscover();
         let pool = make_pool();
+        let run_lock = make_run_lock();
         handle_request(
-            r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"filter":"alpha"}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"filter":"alpha","run_id":"r1"}}"#,
             &disc,
             &tx,
             &pool,
+            &run_lock,
         )
         .await;
 
@@ -516,5 +616,92 @@ mod tests {
             Some(1),
             "filter should restrict to only test_alpha"
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_runs_are_serialized() {
+        // Two concurrent `run` calls on the same pool should execute
+        // back-to-back, not interleaved. Proof: every test_complete
+        // notification between run_start(run_id=A) and run_complete(run_id=A)
+        // carries run_id=A, and same for B.
+        let dir = make_root();
+        fs::write(
+            dir.path().join("test_x.py"),
+            "@test\ndef test_alpha(): pass\n\n@test\ndef test_beta(): pass\n",
+        )
+        .expect("write test file");
+        let (tx, mut rx) = broadcast::channel(256);
+        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        disc.lock().await.rediscover();
+        let pool = make_pool();
+        let run_lock = make_run_lock();
+
+        let disc_a = Arc::clone(&disc);
+        let tx_a = tx.clone();
+        let pool_a = Arc::clone(&pool);
+        let run_lock_a = Arc::clone(&run_lock);
+        let handle_a = tokio::spawn(async move {
+            handle_request(
+                r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"run_id":"A","tests":null}}"#,
+                &disc_a,
+                &tx_a,
+                &pool_a,
+                &run_lock_a,
+            )
+            .await;
+        });
+        let handle_b = tokio::spawn(async move {
+            handle_request(
+                r#"{"jsonrpc":"2.0","id":2,"method":"run","params":{"run_id":"B","tests":null}}"#,
+                &disc,
+                &tx,
+                &pool,
+                &run_lock,
+            )
+            .await;
+        });
+        handle_a.await.unwrap();
+        handle_b.await.unwrap();
+
+        // Collect all notifications and walk them in order. Between
+        // run_start(X) and run_complete(X), every event must have run_id=X.
+        let mut events: Vec<(String, String)> = vec![];
+        while let Ok(bytes) = rx.try_recv() {
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if let Some(m) = v["method"].as_str() {
+                let rid = v["params"]["run_id"].as_str().unwrap_or("").to_string();
+                events.push((m.to_string(), rid));
+            }
+        }
+
+        let mut active: Option<String> = None;
+        for (method, rid) in &events {
+            match method.as_str() {
+                "run_start" => {
+                    assert!(
+                        active.is_none(),
+                        "run_start while another run is active: events={events:?}"
+                    );
+                    active = Some(rid.clone());
+                }
+                "run_complete" => {
+                    assert_eq!(
+                        active.as_ref(),
+                        Some(rid),
+                        "run_complete for {rid} while active is {active:?}"
+                    );
+                    active = None;
+                }
+                "test_complete" => {
+                    assert_eq!(
+                        active.as_ref(),
+                        Some(rid),
+                        "test_complete for {rid} while active is {active:?}"
+                    );
+                }
+                _ => {}
+            }
+        }
+        assert!(active.is_none(), "run never completed: events={events:?}");
     }
 }

@@ -19,6 +19,14 @@ fn build_reporter(format: &ReporterFormat, verbosity: Verbosity) -> Box<dyn Repo
     let use_progress = tryke_reporter::progress::supports_progress()
         && matches!(format, ReporterFormat::Text | ReporterFormat::Dot);
 
+    if use_progress {
+        // ProgressReporter emits OSC 9;4 "set progress" on every test
+        // completion. On Ctrl+C, `on_run_complete` (which emits the
+        // clear sequence) never runs, so the terminal's progress bar
+        // would freeze. Install a signal handler that clears it first.
+        tryke_reporter::progress::install_cleanup_handler();
+    }
+
     match format {
         ReporterFormat::Text if use_progress => Box::new(ProgressReporter::new(
             TextReporter::with_verbosity(verbosity),

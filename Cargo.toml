@@ -42,6 +42,7 @@ tokio-stream = "0.1"
 notify = "6"
 notify-debouncer-mini = "0.4"
 toml = "1.0"
+ctrlc = "3"
 tryke = { path = "crates/tryke" }
 tryke_config = { path = "crates/tryke_config" }
 tryke_discovery = { path = "crates/tryke_discovery" }

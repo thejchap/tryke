@@ -20,6 +20,23 @@ fn emit_osc(state: u8, value: u8) {
     let _ = handle.flush();
 }
 
+/// Install a Ctrl+C handler that clears the terminal progress indicator
+/// before exiting. Without this, `on_run_complete` — which emits the
+/// clear sequence on a normal finish — is skipped when the user SIGINTs
+/// mid-run, and Ghostty/Windows Terminal/ConEmu leave the tab's
+/// progress bar stuck at its last value.
+///
+/// Idempotent: `ctrlc::set_handler` errors if called twice, which we
+/// ignore.
+pub fn install_cleanup_handler() {
+    let _ = ctrlc::set_handler(|| {
+        emit_osc(0, 0);
+        // 128 + SIGINT(2). Matches the exit status of an un-handled
+        // Ctrl+C so wrappers (shells, make, uv run) see the usual signal.
+        std::process::exit(130);
+    });
+}
+
 #[must_use]
 pub fn supports_progress() -> bool {
     use std::env;
@@ -257,5 +274,13 @@ mod tests {
         let reporter = ProgressReporter::new(inner);
         let recovered = reporter.into_inner();
         assert!(!recovered.started);
+    }
+
+    #[test]
+    fn install_cleanup_handler_is_idempotent() {
+        // Second call would error out from ctrlc::set_handler — the
+        // function swallows that. Asserting no panic is the contract.
+        install_cleanup_handler();
+        install_cleanup_handler();
     }
 }

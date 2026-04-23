@@ -1,0 +1,74 @@
+name: Bug report
+description: Something in Tryke is broken or misbehaving.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. A small, runnable reproducer
+        is the single most useful thing you can include.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One or two sentences describing what's wrong.
+      placeholder: "`tryke test --changed` crashes when the working tree has a deleted file."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Minimal reproducer
+      description: |
+        Smallest test file / project layout / commands that reproduce the bug.
+        Paste code directly — no need for a link.
+      render: python
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include full CLI output / stack trace. Use `RUST_LOG=debug` for verbose logs if relevant.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: tryke-version
+    attributes:
+      label: Tryke version
+      description: Output of `tryke --version`.
+      placeholder: "0.0.21"
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      placeholder: "3.13.2"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Other (describe in reproducer)
+    validations:
+      required: true

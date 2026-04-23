@@ -1,0 +1,56 @@
+name: Feature request
+description: Propose a new feature or an improvement to an existing one.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature requests that include a concrete proposal (not just a problem)
+        are easier to move forward. Describing prior art from pytest, Jest,
+        Vitest, or similar is very welcome.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can't you do today, and why does it matter? Concrete scenarios help.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: API sketch, CLI flag, config key — whatever form fits.
+      render: python
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other designs you thought about and why you discarded them.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which component does this touch? Pick the closest; maintainers will re-label if needed.
+      options:
+        - cli
+        - discovery
+        - runner
+        - reporter
+        - config
+        - server (watch / hmr)
+        - expect (assertions)
+        - hooks (fixtures / DI)
+        - worker (python runtime)
+        - docs
+        - benchmarks
+        - ide (core-side protocol for IDE plugins)
+        - pytest-compat
+        - unsure
+    validations:
+      required: true

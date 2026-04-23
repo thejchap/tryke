@@ -2,6 +2,7 @@ use std::{
     io::{BufRead, BufReader, ErrorKind, Write},
     net::TcpStream,
     path::Path,
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -164,12 +165,17 @@ fn read_until_summary(
 }
 
 fn generate_run_id() -> String {
+    // Monotonic per-process counter so two calls in the same nanosecond
+    // still produce distinct ids. Some platforms (notably macOS) report
+    // SystemTime at coarser than nanosecond resolution.
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|d| u64::try_from(d.as_nanos()).ok())
         .unwrap_or(0);
-    format!("cli-{}-{:x}", std::process::id(), nanos)
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("cli-{}-{:x}-{:x}", std::process::id(), nanos, seq)
 }
 
 #[cfg(test)]
@@ -426,6 +432,6 @@ mod tests {
         let a = generate_run_id();
         let b = generate_run_id();
         assert!(a.starts_with("cli-"));
-        assert_ne!(a, b, "consecutive ids should differ by nanos");
+        assert_ne!(a, b, "consecutive ids must be unique");
     }
 }

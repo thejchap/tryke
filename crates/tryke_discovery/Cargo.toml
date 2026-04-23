@@ -13,6 +13,7 @@ license.workspace = true
 ignore = { workspace = true }
 log = "0.4"
 rayon = { workspace = true }
+rmp-serde = { workspace = true }
 salsa = { workspace = true }
 serde = { workspace = true }
 ruff_python_ast = { workspace = true }

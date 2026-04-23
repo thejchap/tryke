@@ -21,7 +21,13 @@ use crate::db::DiscoveredFile;
 /// Bumped whenever the cache schema (the shape of `DiscoveredFile` or
 /// its transitive fields) changes in a way that'd make old entries
 /// invalid. A mismatch on load yields an empty cache.
-const CACHE_VERSION: u32 = 1;
+///
+/// v2: switched from `rmp_serde::to_vec` (structs-as-arrays) to
+/// `to_vec_named` (structs-as-maps). The array encoding mis-deserialises
+/// whenever a field uses `#[serde(skip_serializing_if = ...)]` —
+/// `TestItem` alone skips nine optional fields, so every cached entry
+/// was unreadable.
+const CACHE_VERSION: u32 = 2;
 
 /// Identity of a source file derived from `stat`. Cheap to obtain
 /// without reading the file contents.
@@ -154,8 +160,12 @@ impl DiskCache {
             version: CACHE_VERSION,
             entries: self.entries.clone(),
         };
-        let bytes =
-            rmp_serde::to_vec(&file).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        // `to_vec_named` encodes structs as maps (field names + values)
+        // so `#[serde(skip_serializing_if = ...)]` + `#[serde(default)]`
+        // round-trip: missing fields fill from `Default` on load
+        // instead of corrupting positional alignment in the tuple form.
+        let bytes = rmp_serde::to_vec_named(&file)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let tmp_path = path.with_extension("tmp");
         fs::write(&tmp_path, &bytes)?;
         fs::rename(&tmp_path, path)?;
@@ -193,6 +203,45 @@ mod tests {
             size: 67,
         };
         let data = DiscoveredFile::default();
+        cache.insert(PathBuf::from("foo.py"), key, data.clone());
+        cache.save().expect("save");
+
+        let reloaded = DiskCache::load(path);
+        assert_eq!(reloaded.entries.len(), 1);
+        let got = reloaded
+            .get(Path::new("foo.py"), &key)
+            .expect("present with matching key");
+        assert_eq!(*got, data);
+    }
+
+    #[test]
+    fn roundtrip_with_populated_test_item() {
+        // Regression for the v1 encoding: `TestItem` uses
+        // `skip_serializing_if` on nine optional fields. `to_vec`
+        // (structs-as-arrays) emitted a variable-length tuple that
+        // couldn't be deserialised back, so the whole cache loaded
+        // empty. `to_vec_named` encodes as a map and round-trips.
+        use tryke_types::{ParsedFile, TestItem};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cache.bin");
+        let mut cache = DiskCache::load(path.clone());
+        let key = FileKey {
+            mtime_nanos: 12345,
+            size: 67,
+        };
+        let data = DiscoveredFile {
+            parsed: ParsedFile {
+                tests: vec![TestItem {
+                    name: "test_foo".into(),
+                    module_path: "tests.test_foo".into(),
+                    file_path: Some(PathBuf::from("tests/test_foo.py")),
+                    line_number: Some(9),
+                    ..TestItem::default()
+                }],
+                ..ParsedFile::default()
+            },
+            ..DiscoveredFile::default()
+        };
         cache.insert(PathBuf::from("foo.py"), key, data.clone());
         cache.save().expect("save");
 

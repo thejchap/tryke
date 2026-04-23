@@ -7,6 +7,7 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use log::trace;
 use rayon::prelude::*;
 
+pub(crate) mod cache;
 pub(crate) mod db;
 mod discoverer;
 pub(crate) mod import_graph;
@@ -62,79 +63,109 @@ pub(crate) fn path_to_module(root: &Path, file: &Path) -> String {
     tryke_types::path_to_module(root, file).unwrap_or_default()
 }
 
-/// Resolve `module_name` (e.g. "foo.bar") as a local file under `root`.
-/// Tries `root/foo/bar.py` then `root/foo/bar/__init__.py`.
-fn resolve_absolute_import(root: &Path, module_name: &str) -> Option<PathBuf> {
+/// The two paths a Python importer would try, in order, for a dotted
+/// absolute import `root/foo/bar`: `root/foo/bar.py` first, then
+/// `root/foo/bar/__init__.py`. Returns whichever candidates start with
+/// `root` (the rest are stripped because we'd never resolve them to a
+/// project-local file anyway).
+///
+/// No filesystem access — the caller decides which candidate, if any,
+/// actually exists. See `resolve_import_candidate_groups`.
+fn candidate_absolute_import_paths(root: &Path, module_name: &str) -> Vec<PathBuf> {
     let mut path = root.to_path_buf();
     for part in module_name.split('.') {
         path = path.join(part);
     }
     let py = path.with_extension("py");
-    if py.starts_with(root) && py.exists() {
-        return Some(py);
-    }
     let init = path.join("__init__.py");
-    if init.starts_with(root) && init.exists() {
-        return Some(init);
-    }
-    None
+    [py, init]
+        .into_iter()
+        .filter(|p| p.starts_with(root))
+        .collect()
 }
 
-/// Resolve a module path from `base` directory.
-/// If `module_name` is empty, tries `base/__init__.py`.
-fn resolve_relative_import_path(root: &Path, base: &Path, module_name: &str) -> Option<PathBuf> {
+/// Candidates for a relative import (`from .foo import bar`) walked up
+/// `level-1` directories from `file`'s parent. Mirrors the old
+/// `resolve_relative_import_path` two-candidate behaviour without any
+/// filesystem access.
+fn candidate_relative_import_paths(root: &Path, base: &Path, module_name: &str) -> Vec<PathBuf> {
     if module_name.is_empty() {
         let init = base.join("__init__.py");
-        if init.starts_with(root) && init.exists() {
-            return Some(init);
-        }
-        return None;
+        return if init.starts_with(root) {
+            vec![init]
+        } else {
+            Vec::new()
+        };
     }
     let mut path = base.to_path_buf();
     for part in module_name.split('.') {
         path = path.join(part);
     }
     let py = path.with_extension("py");
-    if py.starts_with(root) && py.exists() {
-        return Some(py);
-    }
     let init = path.join("__init__.py");
-    if init.starts_with(root) && init.exists() {
-        return Some(init);
-    }
-    None
+    [py, init]
+        .into_iter()
+        .filter(|p| p.starts_with(root))
+        .collect()
 }
 
-/// Extract local file imports from a pre-parsed Python module body.
-/// Returns absolute paths of project-local files that this file imports.
-pub(crate) fn extract_local_imports(root: &Path, file: &Path, body: &[Stmt]) -> Vec<PathBuf> {
+/// A first-wins group of candidate import paths: the project-local file
+/// is whichever candidate in the group exists first, per Python's
+/// import semantics (plain `.py` before the package `__init__.py`). The
+/// outer caller resolves against a `HashSet` of enumerated project files.
+pub(crate) type ImportCandidateGroup = Vec<PathBuf>;
+
+/// Resolve candidate groups against a `HashSet` of project-local files,
+/// preserving insertion order and deduplicating across groups. Picks the
+/// first existing candidate within each group, matching the old
+/// `resolve_absolute_import` / `resolve_relative_import_path` contract.
+pub(crate) fn resolve_import_candidate_groups(
+    groups: &[ImportCandidateGroup],
+    project_files: &std::collections::HashSet<PathBuf>,
+) -> Vec<PathBuf> {
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-    let mut result: Vec<PathBuf> = Vec::new();
-    collect_local_imports(root, file, body, &mut seen, &mut result);
-    result
+    let mut out: Vec<PathBuf> = Vec::new();
+    for group in groups {
+        for candidate in group {
+            if project_files.contains(candidate) {
+                if seen.insert(candidate.clone()) {
+                    out.push(candidate.clone());
+                }
+                break;
+            }
+        }
+    }
+    out
 }
 
-fn collect_local_imports(
+/// Extract candidate import groups from a parsed Python module body.
+/// Each group is a first-wins alternatives list; the caller resolves
+/// each group against the project file set via
+/// `resolve_import_candidate_groups`. No filesystem access.
+pub(crate) fn extract_local_import_candidate_groups(
     root: &Path,
     file: &Path,
     body: &[Stmt],
-    seen: &mut std::collections::HashSet<PathBuf>,
-    result: &mut Vec<PathBuf>,
-) {
-    let add =
-        |p: PathBuf, seen: &mut std::collections::HashSet<PathBuf>, result: &mut Vec<PathBuf>| {
-            if seen.insert(p.clone()) {
-                result.push(p);
-            }
-        };
+) -> Vec<ImportCandidateGroup> {
+    let mut groups: Vec<ImportCandidateGroup> = Vec::new();
+    collect_local_import_candidate_groups(root, file, body, &mut groups);
+    groups
+}
 
+fn collect_local_import_candidate_groups(
+    root: &Path,
+    file: &Path,
+    body: &[Stmt],
+    groups: &mut Vec<ImportCandidateGroup>,
+) {
     for stmt in body {
         match stmt {
             Stmt::Import(import_stmt) => {
                 for alias in &import_stmt.names {
                     let module_name = alias.name.id.as_str();
-                    if let Some(path) = resolve_absolute_import(root, module_name) {
-                        add(path, seen, result);
+                    let candidates = candidate_absolute_import_paths(root, module_name);
+                    if !candidates.is_empty() {
+                        groups.push(candidates);
                     }
                 }
             }
@@ -144,14 +175,16 @@ fn collect_local_imports(
                     // Absolute: from foo.bar import x
                     if let Some(module) = &from_stmt.module {
                         let module_name = module.id.as_str();
-                        if let Some(path) = resolve_absolute_import(root, module_name) {
-                            add(path, seen, result);
+                        let candidates = candidate_absolute_import_paths(root, module_name);
+                        if !candidates.is_empty() {
+                            groups.push(candidates);
                         }
                         for alias in &from_stmt.names {
                             let imported = alias.name.id.as_str();
                             let submodule = format!("{module_name}.{imported}");
-                            if let Some(path) = resolve_absolute_import(root, &submodule) {
-                                add(path, seen, result);
+                            let candidates = candidate_absolute_import_paths(root, &submodule);
+                            if !candidates.is_empty() {
+                                groups.push(candidates);
                             }
                         }
                     }
@@ -164,18 +197,18 @@ fn collect_local_imports(
                     if let Some(base) = base {
                         if let Some(module) = &from_stmt.module {
                             // from .utils import x → resolve "utils" from base
-                            if let Some(path) =
-                                resolve_relative_import_path(root, &base, module.id.as_str())
-                            {
-                                add(path, seen, result);
+                            let candidates =
+                                candidate_relative_import_paths(root, &base, module.id.as_str());
+                            if !candidates.is_empty() {
+                                groups.push(candidates);
                             }
                         } else {
                             // from . import x, y → try each name as a submodule
                             for alias in &from_stmt.names {
                                 let name = alias.name.id.as_str();
-                                if let Some(path) = resolve_relative_import_path(root, &base, name)
-                                {
-                                    add(path, seen, result);
+                                let candidates = candidate_relative_import_paths(root, &base, name);
+                                if !candidates.is_empty() {
+                                    groups.push(candidates);
                                 }
                             }
                         }
@@ -187,11 +220,35 @@ fn collect_local_imports(
                 // static import graph so `--changed` mode can precisely
                 // re-run in-source tests when their dependencies change.
                 if let Some(inner) = testing_guard_body(stmt) {
-                    collect_local_imports(root, file, inner, seen, result);
+                    collect_local_import_candidate_groups(root, file, inner, groups);
                 }
             }
         }
     }
+}
+
+/// Extract local file imports from a pre-parsed Python module body.
+/// Returns absolute paths of project-local files that this file imports,
+/// filtering candidates by on-disk existence. Kept for test
+/// compatibility — production discovery uses
+/// `extract_local_import_candidate_groups` plus
+/// `resolve_import_candidate_groups` to avoid per-import syscalls.
+#[cfg(test)]
+pub(crate) fn extract_local_imports(root: &Path, file: &Path, body: &[Stmt]) -> Vec<PathBuf> {
+    let groups = extract_local_import_candidate_groups(root, file, body);
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut out: Vec<PathBuf> = Vec::new();
+    for group in &groups {
+        for candidate in group {
+            if candidate.exists() {
+                if seen.insert(candidate.clone()) {
+                    out.push(candidate.clone());
+                }
+                break;
+            }
+        }
+    }
+    out
 }
 
 fn is_locally_defined(name: &str, body: &[Stmt]) -> bool {
@@ -1440,14 +1497,23 @@ fn collect_doctests_from_body(
     }
 }
 
-pub(crate) fn parse_tests_from_source(root: &Path, file: &Path, source: &str) -> ParsedFile {
+/// Parse `source` once and produce everything discovery needs: the
+/// `ParsedFile` (tests, hooks, guard-else lines, errors), the project-local
+/// imports this file depends on, and whether it contains dynamic imports.
+/// Folding all three derivations into a single AST walk avoids the prior
+/// cold-start cost of parsing each file twice.
+pub(crate) fn discover_file_from_source(
+    root: &Path,
+    file: &Path,
+    source: &str,
+) -> crate::db::DiscoveredFile {
     trace!(
         "parsing {}",
         file.strip_prefix(root).unwrap_or(file).display()
     );
     let Ok(parsed) = parse_module(source) else {
         trace!("parse error in {}", file.display());
-        return ParsedFile::default();
+        return crate::db::DiscoveredFile::default();
     };
     let line_index = LineIndex::from_source_text(source);
     let module = parsed.syntax();
@@ -1471,15 +1537,25 @@ pub(crate) fn parse_tests_from_source(root: &Path, file: &Path, source: &str) ->
     );
     collect_doctests_from_body(body, root, file, &line_index, "", &mut tests);
     let testing_guard_else_lines = find_testing_guard_else_lines(body, &line_index);
+    let import_candidates = extract_local_import_candidate_groups(root, file, body);
+    let dynamic_imports = has_dynamic_imports(body);
     for err in &errors {
         log::error!("tryke discovery: {err}");
     }
-    ParsedFile {
-        tests,
-        hooks,
-        testing_guard_else_lines,
-        errors,
+    crate::db::DiscoveredFile {
+        parsed: ParsedFile {
+            tests,
+            hooks,
+            testing_guard_else_lines,
+            errors,
+        },
+        import_candidates,
+        dynamic_imports,
     }
+}
+
+pub(crate) fn parse_tests_from_source(root: &Path, file: &Path, source: &str) -> ParsedFile {
+    discover_file_from_source(root, file, source).parsed
 }
 
 fn parse_tests_from_file(root: &Path, file: &Path) -> ParsedFile {

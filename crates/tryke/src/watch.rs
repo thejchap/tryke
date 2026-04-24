@@ -74,6 +74,10 @@ async fn run_watch_cycle(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Watch options map directly to CLI flags; grouping into a struct would add indirection without clear benefit."
+)]
 pub async fn run_watch(
     reporter: &mut dyn Reporter,
     root: Option<&Path>,
@@ -82,6 +86,7 @@ pub async fn run_watch(
     maxfail: Option<usize>,
     workers: Option<usize>,
     dist: DistMode,
+    all_tests: bool,
 ) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let root = root.unwrap_or(&cwd);
@@ -128,7 +133,17 @@ pub async fn run_watch(
         discoverer.rediscover_changed(&paths);
         clear_if_tty();
         let disc_start = Instant::now();
-        let tests = test_filter.apply(discoverer.tests_for_changed(&paths));
+        // When `--all` is set, rerun the full test set on every change instead
+        // of restricting to tests transitively affected by the changed files.
+        // Useful when the import graph misses dependencies (dynamic imports,
+        // string-referenced modules, external fixtures) or when debugging
+        // test ordering/flakiness.
+        let raw_tests = if all_tests {
+            discoverer.tests()
+        } else {
+            discoverer.tests_for_changed(&paths)
+        };
+        let tests = test_filter.apply(raw_tests);
         let hooks = discoverer.hooks();
         let disc_dur = Some(disc_start.elapsed());
         emit_discovery_warnings(reporter, &discoverer);

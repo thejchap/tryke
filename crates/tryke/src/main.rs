@@ -151,6 +151,7 @@ fn main() -> Result<()> {
             workers,
             dist,
             include,
+            all,
         } => {
             let resolved_maxfail = if *fail_fast { Some(1) } else { *maxfail };
             let mut rep = build_reporter(reporter, verbosity);
@@ -168,6 +169,7 @@ fn main() -> Result<()> {
                 resolved_maxfail,
                 *workers,
                 (*dist).into(),
+                *all,
             ))
         }
         Commands::Server {
@@ -580,6 +582,24 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn watch_all_flag_defaults_to_false() {
+        let cli = Cli::try_parse_from(["tryke", "watch"]).unwrap();
+        assert!(matches!(cli.command, Commands::Watch { all: false, .. }));
+    }
+
+    #[test]
+    fn watch_all_long_flag_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "watch", "--all"]).unwrap();
+        assert!(matches!(cli.command, Commands::Watch { all: true, .. }));
+    }
+
+    #[test]
+    fn watch_all_short_flag_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "watch", "-a"]).unwrap();
+        assert!(matches!(cli.command, Commands::Watch { all: true, .. }));
     }
 
     #[test]

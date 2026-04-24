@@ -73,6 +73,28 @@ tryke watch -j 4
 
 See [concurrency](../concepts/concurrency.md) for details on the worker pool.
 
+### Run all tests on every change
+
+By default, watch mode reruns only the tests affected by the changed files
+(via the import graph). Pass `--all` (short: `-a`) to rerun the full
+discovered test set on every change instead:
+
+```bash
+tryke watch --all
+```
+
+This is useful when:
+
+- The import graph misses a dependency the test relies on (dynamic imports,
+  plugin registries, fixtures wired up at runtime, string-referenced modules).
+- An external resource (schema, fixture file, environment variable) changed
+  in a way the import graph cannot see.
+- You are debugging test ordering or flake issues and want a full run on
+  every save.
+
+Module reload still happens for the changed files, so Python picks up the new
+code; only the test selection is broadened.
+
 ## Debouncing
 
 File system events are debounced with a 200ms window. Rapid successive saves are coalesced into a single rerun.

@@ -128,6 +128,9 @@ pub enum Commands {
         /// How tests are distributed across workers
         #[arg(long, default_value = "test")]
         dist: Dist,
+        /// Rerun the full test set on every change instead of just affected tests
+        #[arg(short = 'a', long = "all")]
+        all: bool,
     },
     /// Start a persistent worker server.
     Server {

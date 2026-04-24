@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -8,8 +9,29 @@ use tokio_stream::Stream;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tryke_types::{HookItem, TestOutcome, TestResult};
 
+use crate::protocol::RegisterHooksParams;
 use crate::schedule::WorkUnit;
 use crate::worker::WorkerProcess;
+
+/// Per-worker-task state: the (optional) live Python process plus a cache of
+/// the most recent `register_hooks` call per module. The cache exists so
+/// that a freshly-spawned worker (after a crash) can be brought back to the
+/// same hook-registration state as the one it replaces — otherwise
+/// subsequent tests in the same unit would silently run without their
+/// `before_each` / `after_each` fixtures.
+struct WorkerState {
+    process: Option<WorkerProcess>,
+    hook_cache: HashMap<String, RegisterHooksParams>,
+}
+
+impl WorkerState {
+    fn new() -> Self {
+        Self {
+            process: None,
+            hook_cache: HashMap::new(),
+        }
+    }
+}
 
 enum WorkerMsg {
     Ping(oneshot::Sender<()>),
@@ -108,47 +130,65 @@ impl WorkerPool {
 
 pub use tryke_types::path_to_module;
 
-/// Ensure a worker process is spawned, returning a mutable reference.
-/// On spawn failure, sends an error result for `test` and returns `None`.
-fn ensure_worker<'a>(
-    worker: &'a mut Option<WorkerProcess>,
+/// Ensure a worker process is live, spawning one if needed and replaying
+/// every cached `register_hooks` call before returning it. Replay guarantees
+/// that after a crash-and-respawn, subsequent tests still see their
+/// fixtures — without replay, the fresh worker would have empty hook
+/// metadata and silently skip `before_each` / `after_each`.
+async fn ensure_worker<'a>(
+    state: &'a mut WorkerState,
     python_bin: &str,
     path_refs: &[&Path],
     root: &Path,
-    test: &tryke_types::TestItem,
-    result_tx: &mpsc::UnboundedSender<TestResult>,
 ) -> Option<&'a mut WorkerProcess> {
-    if worker.is_none() {
-        trace!("worker_task: spawning process");
-        match WorkerProcess::spawn(python_bin, path_refs, root) {
-            Ok(w) => *worker = Some(w),
-            Err(e) => {
-                let msg = format!("worker spawn failed: {e}");
-                debug!("worker_task: {msg}");
-                let _ = result_tx.send(TestResult {
-                    test: test.clone(),
-                    outcome: TestOutcome::Error { message: msg },
-                    duration: Duration::ZERO,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                });
-                return None;
-            }
+    if state.process.is_some() {
+        return state.process.as_mut();
+    }
+    trace!("worker_task: spawning process");
+    let mut w = match WorkerProcess::spawn(python_bin, path_refs, root) {
+        Ok(w) => w,
+        Err(e) => {
+            debug!("worker_task: spawn failed: {e}");
+            return None;
+        }
+    };
+    for (module, params) in &state.hook_cache {
+        if let Err(e) = w.register_hooks(params.clone()).await {
+            // If hook replay fails the worker is in an inconsistent state
+            // (some modules registered, some not). Drop it so the next
+            // attempt starts from scratch rather than silently running
+            // tests without fixtures.
+            debug!("worker_task: replay register_hooks for {module} failed: {e}");
+            return None;
         }
     }
-    worker.as_mut()
+    state.process = Some(w);
+    state.process.as_mut()
 }
 
-/// Execute a single test on the worker, retrying once on failure.
+/// Execute a single test on the worker. On any RPC error we respawn the
+/// worker (replaying cached hooks) for the next test but do NOT retry the
+/// failing test — a retry could double-execute side effects if the test
+/// partially ran before the crash. The failing test is surfaced as
+/// `TestOutcome::Error` with the worker's stderr attached for diagnosis.
 async fn run_single_test(
-    worker: &mut Option<WorkerProcess>,
+    state: &mut WorkerState,
     python_bin: &str,
     path_refs: &[&Path],
     root: &Path,
     test: tryke_types::TestItem,
     result_tx: &mpsc::UnboundedSender<TestResult>,
 ) {
-    let Some(w) = ensure_worker(worker, python_bin, path_refs, root, &test, result_tx) else {
+    let Some(w) = ensure_worker(state, python_bin, path_refs, root).await else {
+        let _ = result_tx.send(TestResult {
+            test,
+            outcome: TestOutcome::Error {
+                message: "worker unavailable (spawn or hook replay failed)".into(),
+            },
+            duration: Duration::ZERO,
+            stdout: String::new(),
+            stderr: String::new(),
+        });
         return;
     };
     match w.run_test(&test).await {
@@ -156,85 +196,81 @@ async fn run_single_test(
             trace!("worker_task: test {} done", test.name);
             let _ = result_tx.send(result);
         }
-        Err(first_err) => {
-            debug!("worker_task: run_test error, respawning for retry");
+        Err(err) => {
+            debug!("worker_task: run_test error for {}: {err}", test.name);
             let stderr_output = w.drain_stderr().await;
-            *worker = WorkerProcess::spawn(python_bin, path_refs, root).ok();
-            if let Some(w) = worker.as_mut()
-                && let Ok(result) = w.run_test(&test).await
-            {
-                debug!("worker_task: retry succeeded for {}", test.name);
-                let _ = result_tx.send(result);
-            } else {
-                let mut msg = format!("worker error: {first_err}");
-                if !stderr_output.is_empty() {
-                    msg.push_str("\nworker stderr:\n");
-                    msg.push_str(&stderr_output);
-                }
-                debug!("worker_task: retry failed for {}", test.name);
-                let _ = result_tx.send(TestResult {
-                    test,
-                    outcome: TestOutcome::Error { message: msg },
-                    duration: Duration::ZERO,
-                    stdout: String::new(),
-                    stderr: stderr_output,
-                });
+            // Drop the dead worker; the next call to `ensure_worker` will
+            // spawn a fresh one and replay cached hooks so the remaining
+            // tests in this unit keep their fixtures.
+            state.process = None;
+            let mut msg = format!("worker error: {err}");
+            if !stderr_output.is_empty() {
+                msg.push_str("\nworker stderr:\n");
+                msg.push_str(&stderr_output);
             }
+            let _ = result_tx.send(TestResult {
+                test,
+                outcome: TestOutcome::Error { message: msg },
+                duration: Duration::ZERO,
+                stdout: String::new(),
+                stderr: stderr_output,
+            });
         }
     }
 }
 
-/// Send `register_hooks` to the worker for each unique module in the work unit.
+/// Send `register_hooks` to the worker for each unique module in the work
+/// unit, caching the call so any respawn later in the unit can replay it.
 async fn register_hooks_for_unit(
-    worker: &mut Option<WorkerProcess>,
+    state: &mut WorkerState,
     python_bin: &str,
     path_refs: &[&Path],
     root: &Path,
     hooks: &[HookItem],
     tests: &[tryke_types::TestItem],
 ) {
-    // Determine unique modules from the tests.
     let mut seen = std::collections::HashSet::new();
     for test in tests {
-        if seen.insert(test.module_path.clone()) {
-            // Send only hooks belonging to this module.
-            let module_hooks: Vec<crate::protocol::HookWire> = hooks
-                .iter()
-                .filter(|h| h.module_path == test.module_path)
-                .map(|h| crate::protocol::HookWire {
-                    name: h.name.clone(),
-                    per: serde_json::to_value(h.per)
-                        .ok()
-                        .and_then(|v| v.as_str().map(String::from))
-                        .unwrap_or_default(),
-                    groups: h.groups.clone(),
-                    depends_on: h.depends_on.clone(),
-                    line_number: h.line_number,
-                })
-                .collect();
+        if !seen.insert(test.module_path.clone()) {
+            continue;
+        }
+        let module_hooks: Vec<crate::protocol::HookWire> = hooks
+            .iter()
+            .filter(|h| h.module_path == test.module_path)
+            .map(|h| crate::protocol::HookWire {
+                name: h.name.clone(),
+                per: serde_json::to_value(h.per)
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_default(),
+                groups: h.groups.clone(),
+                depends_on: h.depends_on.clone(),
+                line_number: h.line_number,
+            })
+            .collect();
 
-            if module_hooks.is_empty() {
-                continue;
-            }
+        if module_hooks.is_empty() {
+            continue;
+        }
 
-            // Ensure worker is spawned.
-            if worker.is_none() {
-                if let Ok(w) = WorkerProcess::spawn(python_bin, path_refs, root) {
-                    *worker = Some(w);
-                } else {
-                    continue;
-                }
-            }
+        let params = RegisterHooksParams {
+            module: test.module_path.clone(),
+            hooks: module_hooks,
+        };
+        // Cache before sending so a respawn that races with this call can
+        // still replay the correct hooks.
+        state
+            .hook_cache
+            .insert(test.module_path.clone(), params.clone());
 
-            if let Some(w) = worker.as_mut() {
-                let params = crate::protocol::RegisterHooksParams {
-                    module: test.module_path.clone(),
-                    hooks: module_hooks,
-                };
-                if let Err(e) = w.register_hooks(params).await {
-                    debug!("worker_task: register_hooks failed: {e}");
-                }
-            }
+        let Some(w) = ensure_worker(state, python_bin, path_refs, root).await else {
+            continue;
+        };
+        if let Err(e) = w.register_hooks(params).await {
+            debug!("worker_task: register_hooks failed: {e}");
+            // Worker is potentially wedged; drop it so the next test
+            // forces a respawn-with-replay.
+            state.process = None;
         }
     }
 }
@@ -246,28 +282,19 @@ async fn worker_task(
     rx: async_channel::Receiver<WorkerMsg>,
 ) {
     let path_refs: Vec<&Path> = python_path.iter().map(PathBuf::as_path).collect();
-    let mut worker: Option<WorkerProcess> = None;
+    let mut state = WorkerState::new();
 
     while let Ok(msg) = rx.recv().await {
         match msg {
             WorkerMsg::Ping(ack_tx) => {
                 trace!("worker_task: ping (pre-warm)");
-                if worker.is_none() {
-                    trace!("worker_task: spawning process for warm-up");
-                    match WorkerProcess::spawn(&python_bin, &path_refs, &root) {
-                        Ok(w) => worker = Some(w),
-                        Err(e) => {
-                            debug!("worker_task: warm-up spawn failed: {e}");
-                        }
-                    }
-                }
+                let _ = ensure_worker(&mut state, &python_bin, &path_refs, &root).await;
                 let _ = ack_tx.send(());
             }
             WorkerMsg::Unit(unit, result_tx) => {
-                // Send hook metadata for each unique module in this unit.
                 if !unit.hooks.is_empty() {
                     register_hooks_for_unit(
-                        &mut worker,
+                        &mut state,
                         &python_bin,
                         &path_refs,
                         &root,
@@ -276,7 +303,6 @@ async fn worker_task(
                     )
                     .await;
                 }
-                // Track modules in this unit for finalization.
                 let mut finalize_modules = std::collections::HashSet::new();
                 for test in &unit.tests {
                     if !unit.hooks.is_empty() {
@@ -285,19 +311,11 @@ async fn worker_task(
                 }
                 for test in unit.tests {
                     trace!("worker_task: running test {}", test.name);
-                    run_single_test(
-                        &mut worker,
-                        &python_bin,
-                        &path_refs,
-                        &root,
-                        test,
-                        &result_tx,
-                    )
-                    .await;
+                    run_single_test(&mut state, &python_bin, &path_refs, &root, test, &result_tx)
+                        .await;
                 }
-                // Finalize hooks for each module in this unit.
                 for module in finalize_modules {
-                    if let Some(w) = worker.as_mut()
+                    if let Some(w) = state.process.as_mut()
                         && let Err(e) = w.finalize_hooks(module).await
                     {
                         debug!("worker_task: finalize_hooks failed: {e}");
@@ -306,7 +324,7 @@ async fn worker_task(
             }
             WorkerMsg::Reload(modules, ack_tx) => {
                 trace!("worker_task: reload {modules:?}");
-                if let Some(w) = worker.as_mut() {
+                if let Some(w) = state.process.as_mut() {
                     let _ = w.reload(&modules).await;
                 }
                 let _ = ack_tx.send(());
@@ -318,7 +336,143 @@ async fn worker_task(
         }
     }
 
-    if let Some(mut w) = worker {
+    if let Some(mut w) = state.process.take() {
         w.shutdown().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use tokio_stream::StreamExt;
+    use tryke_types::{FixturePer, HookItem, TestItem};
+
+    use super::*;
+    use crate::schedule::WorkUnit;
+
+    fn workspace_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("workspace root")
+    }
+
+    fn test_python_bin() -> String {
+        crate::resolve_python(&workspace_root())
+    }
+
+    fn python_package_dir() -> PathBuf {
+        workspace_root().join("python")
+    }
+
+    fn make_test_item(module: &str, name: &str, file: &std::path::Path) -> TestItem {
+        TestItem {
+            name: name.to_string(),
+            module_path: module.to_string(),
+            file_path: Some(file.to_path_buf()),
+            ..TestItem::default()
+        }
+    }
+
+    /// End-to-end crash-recovery test: a middle test crashes the worker;
+    /// the failure must surface as `TestOutcome::Error` for exactly that
+    /// test, subsequent tests in the unit must still run with their
+    /// fixtures (hooks replayed on respawn), and the crashing test must
+    /// NOT be retried (no double-execution of side effects).
+    #[tokio::test]
+    async fn worker_crash_replays_hooks_and_does_not_double_execute() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+
+        let crash_counter = dir.path().join("CRASH_COUNT");
+        let crash_counter_escaped = crash_counter.to_string_lossy().replace('\\', "\\\\");
+        let test_file = dir.path().join("test_crash.py");
+        let source = format!(
+            r#"from tryke import test, fixture, Depends, expect
+
+@fixture
+def counter() -> int:
+    return 42
+
+@test
+def test_first(n: int = Depends(counter)) -> None:
+    expect(n).to_equal(42)
+
+@test
+def test_crasher() -> None:
+    import os
+    with open("{crash_counter_escaped}", "a") as f:
+        f.write("x")
+        f.flush()
+    os._exit(1)
+
+@test
+def test_third(n: int = Depends(counter)) -> None:
+    expect(n).to_equal(42)
+"#
+        );
+        std::fs::write(&test_file, source).expect("write test file");
+
+        let hook = HookItem {
+            name: "counter".into(),
+            module_path: "test_crash".into(),
+            per: FixturePer::Test,
+            groups: vec![],
+            depends_on: vec![],
+            line_number: None,
+        };
+        let tests = vec![
+            make_test_item("test_crash", "test_first", &test_file),
+            make_test_item("test_crash", "test_crasher", &test_file),
+            make_test_item("test_crash", "test_third", &test_file),
+        ];
+        let unit = WorkUnit {
+            tests,
+            hooks: vec![hook],
+        };
+
+        let pool = WorkerPool::with_python_path(
+            1,
+            &test_python_bin(),
+            dir.path(),
+            &[dir.path().to_path_buf(), python_package_dir()],
+        );
+        pool.warm().await;
+
+        let mut results: Vec<TestResult> = pool.run(vec![unit]).collect().await;
+        results.sort_by_key(|r| r.test.name.clone());
+
+        assert_eq!(results.len(), 3, "expected 3 results, got {results:?}");
+        // Sorted: test_crasher, test_first, test_third
+        let crasher = &results[0];
+        let first = &results[1];
+        let third = &results[2];
+
+        assert_eq!(crasher.test.name, "test_crasher");
+        assert!(
+            matches!(crasher.outcome, TestOutcome::Error { .. }),
+            "crasher should be Error, got {:?}",
+            crasher.outcome
+        );
+        assert!(
+            matches!(first.outcome, TestOutcome::Passed),
+            "first should pass (fixture wired), got {:?}",
+            first.outcome
+        );
+        assert!(
+            matches!(third.outcome, TestOutcome::Passed),
+            "third should pass after respawn+hook-replay, got {:?}",
+            third.outcome
+        );
+
+        let count = std::fs::read_to_string(&crash_counter).unwrap_or_default();
+        assert_eq!(
+            count.len(),
+            1,
+            "crashing test must run exactly once (no retry), got {count:?}"
+        );
+
+        pool.shutdown();
     }
 }

@@ -240,6 +240,9 @@ Options:
 
           [default: test]
 
+  -a, --all
+          Rerun the full test set on every change instead of just affected tests
+
   -h, --help
           Print help (see a summary with '-h')
 ```

@@ -301,6 +301,33 @@ with describe("POST /users"):
 
 `api()` runs once for the file (module-level `per="scope"`). `seed_users()` runs before each test in "GET /users" only.
 
+`describe` blocks can also be nested. Each nested block opens a new lexical scope, so fixtures defined in an inner block apply only to tests in that block, while still inheriting fixtures from every enclosing scope. Group names compose into the test's prefix in definition order:
+
+```python
+with describe("users"):
+    @fixture(per="scope")
+    def repo() -> UserRepo:
+        return UserRepo(":memory:")
+
+    with describe("create"):
+        @fixture
+        def payload() -> dict[str, str]:
+            return {"name": "alice"}
+
+        @test
+        def inserts_row(
+            repo: UserRepo = Depends(repo),
+            payload: dict[str, str] = Depends(payload),
+        ):
+            repo.create(payload)
+            expect(repo.count()).to_equal(1)
+
+    with describe("delete"):
+        # `payload` is NOT in scope here — it's local to "create".
+        # `repo` IS in scope — inherited from the enclosing "users" block.
+        ...
+```
+
 ### Composing fixtures via Depends chains
 
 Fixtures can depend on other fixtures, forming a dependency graph:

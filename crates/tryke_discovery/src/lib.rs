@@ -215,6 +215,24 @@ fn collect_local_import_candidate_groups(
                     }
                 }
             }
+            Stmt::Assign(s) => {
+                // PEP 810 transitional mechanism: a package `__init__.py` may
+                // declare `__lazy_modules__ = ["sub_a", "sub_b"]` to mark its
+                // submodules as lazily-importable from the package on Python
+                // 3.15+. Treat each entry as a static dependency so that
+                // editing the submodule re-runs tests that touch the package.
+                if let Some(names) = lazy_modules_targets(&s.targets, &s.value) {
+                    push_lazy_module_sibling_groups(root, file, &names, groups);
+                }
+            }
+            Stmt::AnnAssign(s) => {
+                // `__lazy_modules__: list[str] = [...]` form.
+                if let Some(value) = s.value.as_deref()
+                    && let Some(names) = lazy_modules_ann_target(&s.target, value)
+                {
+                    push_lazy_module_sibling_groups(root, file, &names, groups);
+                }
+            }
             _ => {
                 // Imports inside `if __TRYKE_TESTING__:` participate in the
                 // static import graph so `--changed` mode can precisely
@@ -249,6 +267,63 @@ pub(crate) fn extract_local_imports(root: &Path, file: &Path, body: &[Stmt]) -> 
         }
     }
     out
+}
+
+/// If `value` is a list literal of string literals AND `targets` is the single
+/// name `__lazy_modules__`, return the list contents as borrowed strings.
+fn lazy_modules_targets<'a>(targets: &[Expr], value: &'a Expr) -> Option<Vec<&'a str>> {
+    let [Expr::Name(n)] = targets else {
+        return None;
+    };
+    if n.id.as_str() != "__lazy_modules__" {
+        return None;
+    }
+    string_list_entries(value)
+}
+
+/// `__lazy_modules__: list[str] = [...]` annotated-assignment variant.
+fn lazy_modules_ann_target<'a>(target: &Expr, value: &'a Expr) -> Option<Vec<&'a str>> {
+    let Expr::Name(n) = target else {
+        return None;
+    };
+    if n.id.as_str() != "__lazy_modules__" {
+        return None;
+    }
+    string_list_entries(value)
+}
+
+fn string_list_entries(value: &Expr) -> Option<Vec<&str>> {
+    let Expr::List(list) = value else {
+        return None;
+    };
+    list.elts
+        .iter()
+        .map(|elt| match elt {
+            Expr::StringLiteral(s) => Some(s.value.to_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// For each name in `__lazy_modules__`, push a candidate group resolving
+/// it as a sibling submodule (or subpackage) of the declaring file's
+/// directory. Each group preserves Python's `name.py` before
+/// `name/__init__.py` precedence.
+fn push_lazy_module_sibling_groups(
+    root: &Path,
+    file: &Path,
+    names: &[&str],
+    groups: &mut Vec<ImportCandidateGroup>,
+) {
+    let Some(base) = file.parent() else {
+        return;
+    };
+    for name in names {
+        let candidates = candidate_relative_import_paths(root, base, name);
+        if !candidates.is_empty() {
+            groups.push(candidates);
+        }
+    }
 }
 
 fn is_locally_defined(name: &str, body: &[Stmt]) -> bool {
@@ -2436,6 +2511,133 @@ def my_func():
         let file = root.join("test_foo.py");
         let imports = extract_local_imports(root, &file, &parsed.syntax().body);
         assert_eq!(imports.len(), 1);
+    }
+
+    // PEP 810: `lazy import` and `lazy from` parse as the same AST nodes as
+    // their eager counterparts (with `is_lazy=true`), so the static
+    // dependency graph treats them identically — editing the lazily-imported
+    // file still re-runs dependents under `--changed`.
+    #[test]
+    fn extract_local_imports_lazy_absolute() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(root.join("utils.py"), "").expect("write");
+        let source = "lazy import utils\n";
+        let parsed = parse_module(source).expect("parse");
+        let file = root.join("test_foo.py");
+        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        assert_eq!(imports, vec![root.join("utils.py")]);
+    }
+
+    #[test]
+    fn extract_local_imports_lazy_from() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let pkg = root.join("pkg");
+        fs::create_dir_all(&pkg).expect("mkdir");
+        fs::write(pkg.join("__init__.py"), "").expect("write");
+        fs::write(pkg.join("helpers.py"), "").expect("write");
+        let source = "lazy from pkg import helpers\n";
+        let parsed = parse_module(source).expect("parse");
+        let file = root.join("test_foo.py");
+        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        assert_eq!(
+            imports,
+            vec![pkg.join("__init__.py"), pkg.join("helpers.py"),]
+        );
+    }
+
+    #[test]
+    fn extract_local_imports_lazy_is_not_dynamic() {
+        // `lazy import` is statically visible — `has_dynamic_imports` must
+        // not flag it, otherwise `--changed` falls back to always-dirty.
+        let source = "lazy import utils\nlazy from pkg import sub\n";
+        let parsed = parse_module(source).expect("parse");
+        assert!(!has_dynamic_imports(&parsed.syntax().body));
+    }
+
+    // PEP 810 transitional mechanism: a package's `__init__.py` may declare
+    // `__lazy_modules__ = ["sub"]` to expose `sub` as a lazy attribute on
+    // 3.15+. We treat each entry as a static sibling-submodule dependency so
+    // edits to `pkg/sub.py` mark `pkg/__init__.py` dirty.
+    #[test]
+    fn extract_local_imports_lazy_modules_list() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let pkg = root.join("pkg");
+        fs::create_dir_all(&pkg).expect("mkdir");
+        fs::write(pkg.join("__init__.py"), "").expect("write");
+        fs::write(pkg.join("heavy.py"), "").expect("write");
+        fs::write(pkg.join("other.py"), "").expect("write");
+        let source = "__lazy_modules__ = [\"heavy\", \"other\"]\n";
+        let parsed = parse_module(source).expect("parse");
+        let file = pkg.join("__init__.py");
+        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        assert_eq!(imports, vec![pkg.join("heavy.py"), pkg.join("other.py")]);
+    }
+
+    #[test]
+    fn extract_local_imports_lazy_modules_list_annotated() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let pkg = root.join("pkg");
+        fs::create_dir_all(&pkg).expect("mkdir");
+        fs::write(pkg.join("__init__.py"), "").expect("write");
+        fs::write(pkg.join("heavy.py"), "").expect("write");
+        let source = "__lazy_modules__: list[str] = [\"heavy\"]\n";
+        let parsed = parse_module(source).expect("parse");
+        let file = pkg.join("__init__.py");
+        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        assert_eq!(imports, vec![pkg.join("heavy.py")]);
+    }
+
+    #[test]
+    fn extract_local_imports_lazy_modules_resolves_subpackage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let pkg = root.join("pkg");
+        let nested = pkg.join("nested");
+        fs::create_dir_all(&nested).expect("mkdir");
+        fs::write(pkg.join("__init__.py"), "").expect("write");
+        fs::write(nested.join("__init__.py"), "").expect("write");
+        let source = "__lazy_modules__ = [\"nested\"]\n";
+        let parsed = parse_module(source).expect("parse");
+        let file = pkg.join("__init__.py");
+        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        assert_eq!(imports, vec![nested.join("__init__.py")]);
+    }
+
+    #[test]
+    fn extract_local_imports_lazy_modules_skips_non_string_entries() {
+        // Mixed-type list (e.g. `[name, "other"]`) is not a valid PEP 810
+        // declaration and is ignored entirely rather than partially honored.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let pkg = root.join("pkg");
+        fs::create_dir_all(&pkg).expect("mkdir");
+        fs::write(pkg.join("__init__.py"), "").expect("write");
+        fs::write(pkg.join("other.py"), "").expect("write");
+        let source = "__lazy_modules__ = [name, \"other\"]\n";
+        let parsed = parse_module(source).expect("parse");
+        let file = pkg.join("__init__.py");
+        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        assert!(imports.is_empty());
+    }
+
+    #[test]
+    fn extract_local_imports_lazy_modules_only_when_named_correctly() {
+        // A list literal bound to any other name is not a PEP 810 marker.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let pkg = root.join("pkg");
+        fs::create_dir_all(&pkg).expect("mkdir");
+        fs::write(pkg.join("__init__.py"), "").expect("write");
+        fs::write(pkg.join("heavy.py"), "").expect("write");
+        let source = "__all__ = [\"heavy\"]\n";
+        let parsed = parse_module(source).expect("parse");
+        let file = pkg.join("__init__.py");
+        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        assert!(imports.is_empty());
     }
 
     #[test]

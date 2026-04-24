@@ -28,6 +28,8 @@ No other `if`/`for`/`while` bodies are descended: keeping discovery narrow means
 | `from . import utils` (relative) | ✅ |
 | `from __future__ import annotations` | ✅ |
 | `TYPE_CHECKING` imports | ✅ |
+| `lazy import foo` / `lazy from foo import bar` (PEP 810) | ✅ |
+| `__lazy_modules__ = ["sub"]` in a package `__init__.py` | ✅ |
 | `importlib.import_module("foo")` | ❌ |
 | `__import__("foo")` | ❌ |
 | Tests defined in dynamically-loaded modules | ❌ |
@@ -112,6 +114,29 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from myapp import HeavyType  # tracked, not flagged
+```
+
+### Use `lazy import` for deferred imports (PEP 810)
+
+Python 3.15 introduces an explicit `lazy` keyword that defers a real import to the
+first use of the bound name. Tryke parses `lazy import` and `lazy from` exactly like
+their eager counterparts and adds them to the import graph, so deferring an import
+does **not** break `--changed` selection or watch-mode reloads:
+
+```python
+# tracked just like a plain import
+lazy import heavy_module
+lazy from myapp import heavy_helper
+```
+
+Tryke also recognises the PEP 810 transitional `__lazy_modules__` declaration in a
+package's `__init__.py`. Each listed submodule is treated as a static dependency of
+the package, so editing a lazily-exposed submodule still re-runs tests that touch
+the package:
+
+```python
+# myapp/__init__.py
+__lazy_modules__ = ["plugins", "heavy_helpers"]
 ```
 
 ### Exclude files that don't contain tests

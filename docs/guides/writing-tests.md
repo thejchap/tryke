@@ -22,15 +22,6 @@ def addition():
     expect(1 + 1).to_equal(2)
 ```
 
-This is especially useful when generating tests in a loop:
-
-```python
-for x, expected in [(1, 2), (2, 3), (3, 4)]:
-    @test(name=f"increment {x}")
-    def _(x=x, expected=expected):
-        expect(x + 1).to_equal(expected)
-```
-
 If you don't pass `name=`, Tryke uses the first line of the function's docstring as the display name, falling back to the function name if there is no docstring:
 
 ```python

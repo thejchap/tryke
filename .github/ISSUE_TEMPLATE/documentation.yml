@@ -1,0 +1,25 @@
+name: Documentation
+description: Something on tryke.dev or in the README is wrong, missing, or confusing.
+labels: ["documentation"]
+body:
+  - type: input
+    id: page
+    attributes:
+      label: Page / location
+      description: URL on tryke.dev or path in this repo (e.g. README.md, CONTRIBUTING.md).
+      placeholder: "https://tryke.dev/migration.html"
+    validations:
+      required: true
+
+  - type: textarea
+    id: issue
+    attributes:
+      label: What is wrong, missing, or confusing?
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested change (optional)
+      description: If you have wording or structure in mind, paste it here.

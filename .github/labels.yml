@@ -1,0 +1,141 @@
+# Label taxonomy for thejchap/tryke.
+#
+# Synced to GitHub by .github/workflows/labels.yml on pushes to main that
+# modify this file. The sync runs with `skip-delete: true`, so removing a
+# label here does NOT delete it on GitHub — delete manually if intended.
+#
+# Conventions:
+#   - Type labels:      one per issue (bug, enhancement, documentation, ...)
+#   - Area labels:      one or more (area: cli, area: runner, ...)
+#   - Platform labels:  only when the issue is platform-specific
+#   - Workflow labels:  status / triage signals for contributors
+
+# --- Type -------------------------------------------------------------------
+
+- name: bug
+  color: d73a4a
+  description: Something isn't working
+
+- name: enhancement
+  color: a2eeef
+  description: New feature or request
+
+- name: breaking
+  color: b60205
+  description: A breaking API or CLI change
+
+- name: performance
+  color: fbca04
+  description: Performance regression or opportunity
+
+- name: internal
+  color: cfd3d7
+  description: Refactor or cleanup with no user-visible behavior change
+
+- name: documentation
+  color: 0075ca
+  description: Improvements or additions to documentation
+
+- name: question
+  color: d876e3
+  description: Further information is requested
+
+# --- Area -------------------------------------------------------------------
+
+- name: "area: cli"
+  color: 006b75
+  description: crates/tryke CLI surface
+
+- name: "area: discovery"
+  color: 006b75
+  description: crates/tryke_discovery — AST parsing, test/fixture discovery
+
+- name: "area: runner"
+  color: 006b75
+  description: crates/tryke_runner — worker pool, scheduling
+
+- name: "area: reporter"
+  color: 006b75
+  description: crates/tryke_reporter — output formats
+
+- name: "area: config"
+  color: 006b75
+  description: crates/tryke_config — pyproject and CLI flag parsing
+
+- name: "area: server"
+  color: 006b75
+  description: crates/tryke_server — watch mode and hot reload
+
+- name: "area: expect"
+  color: 006b75
+  description: python/tryke/expect.py — assertion API and matchers
+
+- name: "area: hooks"
+  color: 006b75
+  description: python/tryke/hooks.py — fixtures and dependency injection
+
+- name: "area: worker"
+  color: 006b75
+  description: python/tryke/worker.py — Python test runtime
+
+- name: "area: docs"
+  color: 006b75
+  description: tryke.dev site and top-level README
+
+- name: "area: benchmarks"
+  color: 006b75
+  description: benchmarks/ suite and tooling
+
+- name: "area: ide"
+  color: 006b75
+  description: Core-side changes that affect IDE plugins (VS Code, neotest, ...)
+
+- name: "area: pytest-compat"
+  color: 006b75
+  description: pytest parity and migration gaps
+
+# --- Platform ---------------------------------------------------------------
+
+- name: "platform: linux"
+  color: fef2c0
+  description: Linux-specific
+
+- name: "platform: macos"
+  color: fef2c0
+  description: macOS-specific
+
+- name: "platform: windows"
+  color: fef2c0
+  description: Windows-specific
+
+# --- Workflow / community ---------------------------------------------------
+
+- name: good first issue
+  color: 7057ff
+  description: Good for newcomers
+
+- name: help wanted
+  color: 008672
+  description: Contributions especially welcome
+
+- name: needs-design
+  color: bfd4f2
+  description: Requires design discussion before implementation
+
+- name: needs-repro
+  color: e4e669
+  description: Waiting on a minimal reproducer from the reporter
+
+# --- Dependabot / automation ------------------------------------------------
+
+- name: dependencies
+  color: 0366d6
+  description: Pull requests that update a dependency file
+
+- name: github_actions
+  color: "000000"
+  description: Pull requests that update GitHub Actions code
+
+- name: rust
+  color: dea584
+  description: Pull requests that update rust code

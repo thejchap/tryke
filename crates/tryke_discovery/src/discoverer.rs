@@ -3,13 +3,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use log::{debug, trace};
-use ruff_python_parser::parse_module;
+use log::{debug, trace, warn};
+use rayon::prelude::*;
 use salsa::Setter;
 use tryke_types::{HookItem, TestItem};
 
 use crate::{
-    db::{Database, SourceFile, parse_tests},
+    cache::{DiskCache, FileKey},
+    db::{Database, DiscoveredFile, SourceFile, discover_file},
     import_graph::{GraphEntry, ImportGraph},
 };
 
@@ -19,6 +20,41 @@ pub struct Discoverer {
     root: PathBuf,
     import_graph: ImportGraph,
     excludes: Vec<String>,
+    /// Set of all project-local python files known to the discoverer.
+    /// Populated by the most recent `rediscover` and updated by
+    /// `rediscover_changed` so import candidates can be resolved via
+    /// `HashSet` membership instead of per-import `stat()` syscalls.
+    project_files: HashSet<PathBuf>,
+    /// Authoritative store of per-file discovery results. Populated by
+    /// the most recent `rediscover` / `rediscover_changed` from either
+    /// a disk-cache hit or a salsa parse. Reader methods (`tests`,
+    /// `hooks`, `testing_guard_else_locations`) read from here so
+    /// cached files are visible without a salsa parse.
+    results: HashMap<PathBuf, DiscoveredFile>,
+    /// Persistent mtime/size-keyed cache of `DiscoveredFile` results,
+    /// loaded at construction and saved after each `rediscover`.
+    cache: DiskCache,
+    /// The `FileKey` (mtime + size) observed during the most recent
+    /// stat of each enumerated file. Used to decide which entries to
+    /// persist back into `cache` after parsing.
+    cache_keys_hit: HashMap<PathBuf, FileKey>,
+}
+
+/// Result of the parallel stat-and-maybe-read phase of `rediscover`.
+enum FileWork {
+    Hit {
+        path: PathBuf,
+        data: DiscoveredFile,
+        key: FileKey,
+    },
+    Miss {
+        path: PathBuf,
+        source: String,
+        key: FileKey,
+    },
+    StatError {
+        path: PathBuf,
+    },
 }
 
 impl Discoverer {
@@ -32,12 +68,18 @@ impl Discoverer {
     pub fn new_with_excludes(start: &Path, excludes: &[String]) -> Self {
         let root = crate::find_project_root(start).unwrap_or_else(|| start.to_path_buf());
         let root = root.canonicalize().unwrap_or(root);
+        let cache_path = root.join(".tryke").join("cache").join("discovery-v1.bin");
+        let cache = DiskCache::load(cache_path);
         Self {
             db: Database::default(),
             inputs: HashMap::new(),
             root,
             import_graph: ImportGraph::default(),
             excludes: excludes.to_vec(),
+            project_files: HashSet::new(),
+            results: HashMap::new(),
+            cache,
+            cache_keys_hit: HashMap::new(),
         }
     }
 
@@ -49,66 +91,204 @@ impl Discoverer {
             paths.len(),
             self.root.display()
         );
-        for path in &paths {
-            let text = std::fs::read_to_string(path).unwrap_or_default();
-            let (imports, dynamic) = if let Ok(parsed) = parse_module(&text) {
-                let body = &parsed.syntax().body;
-                (
-                    crate::extract_local_imports(&self.root, path, body),
-                    crate::has_dynamic_imports(body),
-                )
-            } else {
-                (vec![], false)
-            };
-            if let Some(file) = self.inputs.get(path) {
-                if file.text(&self.db) != &text {
-                    trace!("rediscover: re-parsing changed file {}", path.display());
-                    file.set_text(&mut self.db).to(text);
-                }
-            } else {
-                trace!("rediscover: parsing new file {}", path.display());
-                let file = SourceFile::new(&self.db, text, self.root.clone(), path.clone());
-                self.inputs.insert(path.clone(), file);
-            }
-            self.import_graph.update(path.clone(), imports);
-            if dynamic {
-                self.import_graph.mark_always_dirty(path.clone());
-            } else {
-                self.import_graph.clear_always_dirty(path);
-            }
-        }
-        let path_set: HashSet<&PathBuf> = paths.iter().collect();
+        let path_set: HashSet<PathBuf> = paths.iter().cloned().collect();
+
+        // Phase 1: in parallel, stat every file and consult the disk
+        // cache. For cache hits we keep the cached `DiscoveredFile`;
+        // for misses we also carry the file text (read opportunistically
+        // during stat) so the parallel parse phase doesn't have to read
+        // it again. The closure captures `&self.cache` only — the
+        // rest of `self` holds a salsa `Database` that isn't `Sync`.
+        let cache_ref = &self.cache;
+        let keyed: Vec<FileWork> = paths
+            .par_iter()
+            .map(|path| Self::prepare_work(cache_ref, path))
+            .collect();
+
+        // Phase 2: drop cache entries for paths we no longer enumerate
+        // (file deleted or newly excluded).
+        self.cache.retain(&path_set);
+
+        // Phase 3: serial ingest of cache hits + upsert misses into
+        // salsa. Salsa mutations require `&mut self.db`, so this runs
+        // single-threaded. The expensive work has already happened.
+        let mut misses: Vec<PathBuf> = Vec::new();
+        let mut hit_count = 0usize;
         let removed: Vec<PathBuf> = self
-            .inputs
+            .results
             .keys()
-            .filter(|p| !path_set.contains(p))
+            .filter(|p| !path_set.contains(*p))
             .cloned()
             .collect();
         for path in removed {
             self.import_graph.remove(&path);
             self.inputs.remove(&path);
+            self.results.remove(&path);
         }
-        let tests: Vec<TestItem> = self
-            .inputs
-            .values()
-            .flat_map(|f| parse_tests(&self.db, *f).tests)
+        for work in keyed {
+            match work {
+                FileWork::Hit { path, data, key } => {
+                    // Hot path: file unchanged since last run. Use the
+                    // cached result directly; no parse, no salsa.
+                    self.results.insert(path.clone(), data);
+                    self.cache_keys_hit
+                        .entry(path)
+                        .and_modify(|k| *k = key)
+                        .or_insert(key);
+                    hit_count += 1;
+                }
+                FileWork::Miss { path, source, key } => {
+                    self.upsert_source(&path, source);
+                    self.cache_keys_hit.insert(path.clone(), key);
+                    misses.push(path);
+                }
+                FileWork::StatError { path } => {
+                    warn!("rediscover: stat failed for {}, skipping", path.display());
+                }
+            }
+        }
+        debug!(
+            "rediscover: cache hits {}/{} ({} parses pending)",
+            hit_count,
+            paths.len(),
+            misses.len()
+        );
+
+        // Phase 4: parallel parse for all misses. Salsa's memo tables
+        // absorb concurrent queries via the cloned `StorageHandle`.
+        let miss_snapshots: Vec<(PathBuf, SourceFile)> = misses
+            .iter()
+            .filter_map(|p| self.inputs.get(p).map(|f| (p.clone(), *f)))
             .collect();
+        let miss_results: Vec<(PathBuf, DiscoveredFile)> = self.parse_in_parallel(&miss_snapshots);
+        for (path, data) in &miss_results {
+            self.results.insert(path.clone(), data.clone());
+            if let Some(&key) = self.cache_keys_hit.get(path) {
+                self.cache.insert(path.clone(), key, data.clone());
+            }
+        }
+
+        // Phase 5: resolve import candidates for every file (hit + miss)
+        // against the enumerated file set, then update the import
+        // graph and collect tests. Resolution is parallel — per-file
+        // work is independent and fast HashSet lookups still accrue.
+        let resolved: Vec<(PathBuf, Vec<PathBuf>, bool, Vec<TestItem>)> = self
+            .results
+            .par_iter()
+            .map(|(path, result)| {
+                let imports =
+                    crate::resolve_import_candidate_groups(&result.import_candidates, &path_set);
+                (
+                    path.clone(),
+                    imports,
+                    result.dynamic_imports,
+                    result.parsed.tests.clone(),
+                )
+            })
+            .collect();
+        let mut tests: Vec<TestItem> = Vec::new();
+        for (path, imports, dynamic, file_tests) in resolved {
+            self.import_graph.update(path.clone(), imports);
+            if dynamic {
+                self.import_graph.mark_always_dirty(path);
+            } else {
+                self.import_graph.clear_always_dirty(&path);
+            }
+            tests.extend(file_tests);
+        }
+        self.project_files = path_set;
+
+        // Phase 6: persist the cache. Save errors are logged but not
+        // propagated — a stale cache is annoying, but a failed save
+        // shouldn't fail discovery.
+        if let Err(err) = self.cache.save() {
+            warn!("rediscover: failed to save discovery cache: {err}");
+        }
+
         debug!("rediscover: discovered {} tests total", tests.len());
         tests
     }
 
+    /// Stat `path` and consult the disk cache. On a cache hit, return
+    /// the cached `DiscoveredFile` without reading the file. On a
+    /// miss, read the file text so the parse phase doesn't stat-then-
+    /// read (halving the syscalls per miss).
+    ///
+    /// Takes `&DiskCache` rather than `&self` so rayon workers can
+    /// share it across threads — `Discoverer` holds a salsa
+    /// `Database` that isn't `Sync`.
+    fn prepare_work(cache: &DiskCache, path: &Path) -> FileWork {
+        let Ok(metadata) = std::fs::metadata(path) else {
+            return FileWork::StatError {
+                path: path.to_path_buf(),
+            };
+        };
+        let Ok(key) = FileKey::from_metadata(&metadata) else {
+            return FileWork::StatError {
+                path: path.to_path_buf(),
+            };
+        };
+        if let Some(data) = cache.get(path, &key) {
+            FileWork::Hit {
+                path: path.to_path_buf(),
+                data: data.clone(),
+                key,
+            }
+        } else {
+            let source = std::fs::read_to_string(path).unwrap_or_default();
+            FileWork::Miss {
+                path: path.to_path_buf(),
+                source,
+                key,
+            }
+        }
+    }
+
+    /// Run `discover_file` across many salsa `SourceFile` inputs in parallel.
+    /// Each rayon worker materialises its own `Database` from a `Sync`
+    /// `StorageHandle`; the underlying salsa memo tables are shared via Arc,
+    /// so parses populate one cache.
+    fn parse_in_parallel(
+        &self,
+        snapshots: &[(PathBuf, SourceFile)],
+    ) -> Vec<(PathBuf, DiscoveredFile)> {
+        let handle = self.db.storage_handle();
+        snapshots
+            .par_iter()
+            .map_init(
+                || Database::from_handle(handle.clone()),
+                |db, (path, file)| (path.clone(), discover_file(db, *file)),
+            )
+            .collect()
+    }
+
+    /// Upsert the salsa input for `path` with the given text: either create
+    /// a new `SourceFile` or call `set_text` on the existing one if changed.
+    fn upsert_source(&mut self, path: &Path, text: String) {
+        if let Some(file) = self.inputs.get(path) {
+            if file.text(&self.db) != &text {
+                trace!("rediscover: re-parsing changed file {}", path.display());
+                file.set_text(&mut self.db).to(text);
+            }
+        } else {
+            trace!("rediscover: parsing new file {}", path.display());
+            let file = SourceFile::new(&self.db, text, self.root.clone(), path.to_path_buf());
+            self.inputs.insert(path.to_path_buf(), file);
+        }
+    }
+
     pub fn tests(&self) -> Vec<TestItem> {
-        self.inputs
+        self.results
             .values()
-            .flat_map(|f| parse_tests(&self.db, *f).tests)
+            .flat_map(|r| r.parsed.tests.clone())
             .collect()
     }
 
     /// Returns all hooks discovered across all known files.
     pub fn hooks(&self) -> Vec<HookItem> {
-        self.inputs
+        self.results
             .values()
-            .flat_map(|f| parse_tests(&self.db, *f).hooks)
+            .flat_map(|r| r.parsed.hooks.clone())
             .collect()
     }
 
@@ -118,38 +298,14 @@ impl Discoverer {
             "rediscover_changed: processing {} changed paths",
             changed.len()
         );
+        let mut touched: Vec<PathBuf> = Vec::new();
         for path in &changed {
             if path.extension().is_some_and(|ext| ext == "py") {
                 if path.exists() {
                     let text = std::fs::read_to_string(path).unwrap_or_default();
-                    let (imports, dynamic) = if let Ok(parsed) = parse_module(&text) {
-                        let body = &parsed.syntax().body;
-                        (
-                            crate::extract_local_imports(&self.root, path, body),
-                            crate::has_dynamic_imports(body),
-                        )
-                    } else {
-                        (vec![], false)
-                    };
-                    if let Some(file) = self.inputs.get(path) {
-                        if file.text(&self.db) != &text {
-                            trace!(
-                                "rediscover_changed: re-parsing changed file {}",
-                                path.display()
-                            );
-                            file.set_text(&mut self.db).to(text);
-                        }
-                    } else {
-                        trace!("rediscover_changed: parsing new file {}", path.display());
-                        let file = SourceFile::new(&self.db, text, self.root.clone(), path.clone());
-                        self.inputs.insert(path.clone(), file);
-                    }
-                    self.import_graph.update(path.clone(), imports);
-                    if dynamic {
-                        self.import_graph.mark_always_dirty(path.clone());
-                    } else {
-                        self.import_graph.clear_always_dirty(path);
-                    }
+                    self.upsert_source(path, text);
+                    self.project_files.insert(path.clone());
+                    touched.push(path.clone());
                 } else {
                     trace!(
                         "rediscover_changed: removing deleted file {}",
@@ -157,13 +313,40 @@ impl Discoverer {
                     );
                     self.import_graph.remove(path);
                     self.inputs.remove(path);
+                    self.project_files.remove(path);
+                    self.results.remove(path);
+                    self.cache.remove(path);
                 }
             }
         }
+        for path in &touched {
+            if let Some(file) = self.inputs.get(path).copied() {
+                let result = discover_file(&self.db, file);
+                let imports = crate::resolve_import_candidate_groups(
+                    &result.import_candidates,
+                    &self.project_files,
+                );
+                self.import_graph.update(path.clone(), imports);
+                if result.dynamic_imports {
+                    self.import_graph.mark_always_dirty(path.clone());
+                } else {
+                    self.import_graph.clear_always_dirty(path);
+                }
+                // Update both the in-memory result set and the disk
+                // cache so the new parse sticks for this file.
+                if let Ok(key) = FileKey::from_path(path) {
+                    self.cache.insert(path.clone(), key, result.clone());
+                }
+                self.results.insert(path.clone(), result);
+            }
+        }
+        if let Err(err) = self.cache.save() {
+            warn!("rediscover_changed: failed to save discovery cache: {err}");
+        }
         let tests: Vec<TestItem> = self
-            .inputs
+            .results
             .values()
-            .flat_map(|f| parse_tests(&self.db, *f).tests)
+            .flat_map(|r| r.parsed.tests.clone())
             .collect();
         debug!("rediscover_changed: {} tests after update", tests.len());
         tests
@@ -248,21 +431,20 @@ impl Discoverer {
     /// guards; the caller surfaces them as warnings so users don't debug
     /// missing tests from an unsupported guard shape.
     pub fn testing_guard_else_locations(&self) -> Vec<(PathBuf, u32)> {
-        let mut results: Vec<(PathBuf, u32)> = Vec::new();
-        for (path, file) in &self.inputs {
-            let parsed = parse_tests(&self.db, *file);
-            for line in &parsed.testing_guard_else_lines {
-                results.push((path.clone(), *line));
+        let mut lines: Vec<(PathBuf, u32)> = Vec::new();
+        for (path, result) in &self.results {
+            for line in &result.parsed.testing_guard_else_lines {
+                lines.push((path.clone(), *line));
             }
         }
-        results.sort();
-        results
+        lines.sort();
+        lines
     }
 
     /// Returns a sorted summary of the import graph for all known files.
     pub fn import_graph_summary(&self) -> Vec<GraphEntry> {
         let mut entries: Vec<GraphEntry> = self
-            .inputs
+            .results
             .keys()
             .map(|file| {
                 let imports = self

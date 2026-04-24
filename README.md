@@ -16,63 +16,42 @@ For more information, see the [documentation](https://tryke.dev/).
 Write a test.
 
 ```python
-from tryke import Depends, describe, expect, fixture, test
+import tryke as t
 
 
-class Users:
-    def __init__(self) -> None:
-        self._rows: dict[int, str] = {}
-
-    def create(self, name: str) -> int:
-        user_id = len(self._rows) + 1
-        self._rows[user_id] = name
-        return user_id
-
-    def get(self, user_id: int) -> str:
-        return self._rows[user_id]
-
-
-# Fixtures combine setup + teardown in one function. `yield` splits them;
-# `per="scope"` caches the value for every test in the lexical scope.
-@fixture(per="scope")
-def users():
-    db = Users()
+# Fixtures with `per="scope"` are cached for their scope:
+# - Module-level for globally defined fixtures
+# - Per `describe` block for fixtures defined within a `describe` block
+@t.fixture(per="scope")
+def database():
+    db = {}
     yield db
-    db._rows.clear()  # Teardown: runs once after the whole describe block.
+    db.clear()
 
 
-with describe("users"):
+with t.describe("users"):
+    # By default, fixtures run per-test
+    # Fixtures can be composed by requesting other fixtures
+    @t.fixture
+    def users(database: dict[str, dict[str, str]] = t.Depends(database)):
+        database["users"] = {}
+        return database["users"]
 
-    # Dependencies are explicit and typed — `Depends(users)` resolves to
-    # the `Users` return type above, no magic name-matching required.
-    @test
-    def create_and_get(db: Users = Depends(users)):
-        user_id = db.create("alice")
-        # Assertions are soft by default: all three run even if one fails,
-        # so you get the full diagnostic in a single run.
-        expect(user_id).to_equal(1)
-        expect(db.get(user_id)).to_equal("alice")
-        expect(lambda: db.get(999)).to_raise(KeyError)
+    with t.describe("get"):
+        # Define display labels for tests
+        # Async tests are supported
+        @t.test("returns a stored user")
+        async def test_get(users: dict[str, str] = t.Depends(users)):
+            users["alice"] = "alice@example.com"
+            t.expect(users["alice"]).to_equal("alice@example.com")
 
-    # Parametrize with `@test.cases` — each case is its own test ID,
-    # labels are arbitrary strings, kwargs are statically type-checked.
-    @test.cases(
-        test.case("lowercase", name="alice"),
-        test.case("with spaces", name="Alice Liddell"),
-        test.case("unicode", name="Алиса"),
-    )
-    def round_trips_names(name: str, db: Users = Depends(users)):
-        expect(db.get(db.create(name))).to_equal(name)
+    with t.describe("set"):
 
-    # Native async — no `pytest-asyncio` plugin needed.
-    @test
-    async def async_create(db: Users = Depends(users)):
-        expect(db.create("bob")).to_be_greater_than(0)
+        @t.test("stores a new user")
+        async def test_set(users: dict[str, str] = t.Depends(users)):
+            users["bob"] = "bob@example.com"
+            t.expect(users["bob"]).to_equal("bob@example.com")
 
-    # Skip / xfail / todo markers ship in the box.
-    @test.xfail("reserved-name handling not implemented yet")
-    def rejects_reserved_names(db: Users = Depends(users)):
-        expect(lambda: db.create("admin")).to_raise(ValueError)
 ```
 
 Run your tests — `tryke watch` for an always-on loop, `tryke test --changed`
@@ -82,11 +61,30 @@ for just what your working tree touched, or plain:
 uvx tryke test
 ```
 
+```text
+tryke test v0.0.18
+
+example.py:
+  users
+    get
+      ✓ returns a stored user [0.00ms]
+        ✓ expect(users["alice"]).to_equal("alice@example.com")
+    set
+      ✓ stores a new user [0.00ms]
+        ✓ expect(users["bob"]).to_equal("bob@example.com")
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+   Start at  08:58:39
+   Duration  46.01ms (discover 6.08ms, tests 39.93ms)
+
+  PASS
+```
+
 ## Coming from pytest?
 
 The [migration guide](https://tryke.dev/migration.html) has a side-by-side cheat
-sheet and — faster — a
-[copy-paste LLM prompt](https://tryke.dev/migration.html#migration-prompt) that
+sheet and — faster — a [copy-paste LLM prompt](https://tryke.dev/migration.html#migration-prompt) that
 walks an AI coding assistant through a phased, gated pytest &rarr; Tryke
 migration with discovery- and results-parity checks built in.
 

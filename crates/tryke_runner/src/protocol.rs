@@ -100,7 +100,7 @@ pub struct HookWire {
     pub line_number: Option<u32>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RegisterHooksParams {
     pub module: String,
     pub hooks: Vec<HookWire>,

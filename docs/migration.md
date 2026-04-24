@@ -162,16 +162,18 @@ async def async_operation():
 
 ### Running changed tests
 
-**pytest** (requires plugin):
+**pytest** (requires a plugin like `pytest-picked` or `pytest-testmon`):
 
 ```bash
-pytest --lf  # last failed
+pytest --picked          # from pytest-picked: tests in git-changed files
+pytest --testmon         # from pytest-testmon: tests affected at runtime
 ```
 
-**Tryke** (built-in):
+**Tryke** (built-in, uses a static import graph):
 
 ```bash
-tryke test --changed  # tests affected by git changes
+tryke test --changed        # tests affected by git-changed files
+tryke test --changed-first  # changed tests first, then the rest
 ```
 
 ## What's different
@@ -310,6 +312,48 @@ trivially explain the mismatch.
 Create a `.migration/` directory at the repo root for baseline and comparison
 artifacts; add it to `.gitignore`. Keep a running `.migration/NOTES.md` of
 decisions and mismatches.
+
+## Working across sessions
+
+A migration of any real size will span multiple assistant sessions. Context
+windows are finite, and a fresh session that starts by re-exploring the tree
+and re-deriving conversion patterns burns its budget before any code gets
+written. Two additional files in `.migration/` keep sessions continuous:
+
+- **`.migration/PATTERNS.md`** — a concrete, **repo-specific** playbook of
+  proven conversions: which conftest fixtures you re-homed and where, any
+  project-specific helper wrappers you wrote (e.g. an `_expect_raises_async`
+  for awaitable exception assertions), autouse rewrites, name-collision
+  aliasing rules, pre-run cleanup commands, discovery-tripwire `grep`
+  commands. This is **not** a copy of the cheat sheet — it is the
+  adaptations you learned the hard way for *this* codebase. When you
+  discover a new pattern mid-session, add it here before you forget.
+- **`.migration/CURRENT.md`** — a ≤50-line "resume here" pointer: current
+  branch and last commit SHA, the exact next file to port with its size /
+  test count / any known blockers, copy-paste run and commit commands, and
+  a 2–3 item ranked list of what to take on after that. A fresh session
+  reads this file first and jumps straight to work.
+
+Update `CURRENT.md` at the end of every session. Append to `PATTERNS.md`
+whenever you solve a non-obvious conversion the next file is likely to hit
+too.
+
+## Committing and pushing
+
+Commit **after every file** (or small batch of files) with a descriptive
+message — do not wait until end of session. After each commit, push the
+branch. Two reasons:
+
+1. If a tracking PR exists, every push triggers CI and grows the review
+   surface one slice at a time — reviewers can keep up. If no PR exists
+   yet, still push: opening a PR later is a single command, but unpushed
+   work lost to a crashed session is unrecoverable.
+2. When you resume, `git log origin/<branch>` is the unambiguous
+   ground-truth for what is done. Local-only commits are invisible to the
+   next session.
+
+If a PR is open, note its URL in `CURRENT.md` so the next session pushes
+to it automatically.
 
 ## Phase 0 — Baseline capture (pytest)
 

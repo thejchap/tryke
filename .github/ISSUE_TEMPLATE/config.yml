@@ -1,0 +1,17 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://tryke.dev/
+    about: Read the docs before filing — many questions are answered there.
+  - name: Migration from pytest
+    url: https://tryke.dev/migration.html
+    about: Side-by-side cheat sheet and an LLM prompt for phased migration.
+  - name: VS Code extension
+    url: https://github.com/thejchap/tryke-vscode/issues
+    about: Bugs or requests for the VS Code extension belong in that repo.
+  - name: Neovim (neotest) adapter
+    url: https://github.com/thejchap/neotest-tryke/issues
+    about: Bugs or requests for the neotest adapter belong in that repo.
+  - name: Discussion / question
+    url: https://github.com/thejchap/tryke/discussions
+    about: Open-ended questions, ideas, and design chat.

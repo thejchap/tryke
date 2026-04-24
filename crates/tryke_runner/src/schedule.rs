@@ -40,9 +40,9 @@ pub fn partition(tests: Vec<TestItem>, mode: DistMode) -> Vec<WorkUnit> {
 /// The result of [`partition_with_hooks`]: the work units plus any
 /// warnings produced while planning. Warnings cover situations where
 /// the requested `mode` had to be upgraded for correctness (e.g. a
-/// file-scope `_all` hook forced file-level grouping), and should be
-/// surfaced to the user so they understand why the distribution
-/// differs from what they asked for on the CLI.
+/// file-scope `per="scope"` fixture forced file-level grouping), and
+/// should be surfaced to the user so they understand why the
+/// distribution differs from what they asked for on the CLI.
 #[derive(Debug)]
 pub struct PartitionResult {
     pub units: Vec<WorkUnit>,
@@ -51,9 +51,9 @@ pub struct PartitionResult {
 
 /// Like [`partition`], but attaches discovered hooks to each work unit.
 ///
-/// When `_all` hooks are present, `DistMode::Test` is upgraded:
-/// - File-scope `_all` hooks (empty groups) force file-level grouping
-/// - Group-scope `_all` hooks force group-level grouping
+/// When `per="scope"` fixtures are present, `DistMode::Test` is upgraded:
+/// - File-scope `per="scope"` fixtures (empty groups) force file-level grouping
+/// - Group-scope `per="scope"` fixtures force group-level grouping
 #[must_use]
 fn group_by_file(tests: Vec<TestItem>) -> Vec<WorkUnit> {
     let mut by_file: IndexMap<Option<PathBuf>, Vec<TestItem>> = IndexMap::new();
@@ -151,7 +151,7 @@ pub fn partition_with_hooks(
         }
         result
     } else if mode == DistMode::Group && !file_constrained_modules.is_empty() {
-        // Group mode with file-scope _all hooks: upgrade those modules to file level.
+        // Group mode with file-scope per="scope" fixtures: upgrade those modules to file level.
         let (constrained, free): (Vec<_>, Vec<_>) = tests
             .into_iter()
             .partition(|t| file_constrained_modules.contains(t.module_path.as_str()));
@@ -310,13 +310,13 @@ mod tests {
     }
 
     #[test]
-    fn test_mode_with_file_scope_before_all_forces_file_grouping() {
+    fn test_mode_with_file_scope_scope_fixture_forces_file_grouping() {
         let tests = vec![
             item("a.py", "t1", &[]),
             item("a.py", "t2", &[]),
             item("b.py", "t3", &[]),
         ];
-        // Hook is in test_mod (same as a.py items) — only a.py tests are constrained.
+        // Fixture is in test_mod (same as a.py items) — only a.py tests are constrained.
         let hooks = vec![hook("setup", FixturePer::Scope, &[])];
         let result = partition_with_hooks(tests, &hooks, DistMode::Test);
         let a_units: Vec<_> = result
@@ -329,14 +329,14 @@ mod tests {
     }
 
     #[test]
-    fn test_mode_with_only_each_hooks_stays_individual() {
+    fn test_mode_with_only_per_test_fixtures_stays_individual() {
         let tests = vec![item("a.py", "t1", &[]), item("a.py", "t2", &[])];
         let hooks = vec![hook("setup", FixturePer::Test, &[])];
         let result = partition_with_hooks(tests, &hooks, DistMode::Test);
         assert_eq!(
             result.units.len(),
             2,
-            "each hooks don't constrain scheduling"
+            "per=\"test\" fixtures don't constrain scheduling"
         );
         assert!(result.warnings.is_empty());
     }
@@ -370,15 +370,15 @@ mod tests {
     }
 
     #[test]
-    fn group_mode_with_file_scope_before_all_forces_file_grouping() {
+    fn group_mode_with_file_scope_scope_fixture_forces_file_grouping() {
         let tests = vec![
             item("a.py", "t1", &["math"]),
             item("a.py", "t2", &["math"]),
             item("a.py", "t3", &["strings"]),
             item("b.py", "t4", &["other"]),
         ];
-        // Module "a" has a file-scope before_all (empty groups) — even in group mode,
-        // all of a.py's tests must land on one worker.
+        // Module "a" has a file-scope per="scope" fixture (empty groups) — even in
+        // group mode, all of a.py's tests must land on one worker.
         let hooks = vec![hook("setup", FixturePer::Scope, &[])];
         let result = partition_with_hooks(tests, &hooks, DistMode::Group);
         let a_units: Vec<_> = result
@@ -418,14 +418,14 @@ mod tests {
     }
 
     #[test]
-    fn before_all_in_one_module_does_not_constrain_other_modules() {
+    fn scope_fixture_in_one_module_does_not_constrain_other_modules() {
         let tests = vec![
             item("a.py", "t1", &[]),
             item("a.py", "t2", &[]),
             item("b.py", "t3", &[]),
             item("b.py", "t4", &[]),
         ];
-        // Only module "a" has a before_all hook.
+        // Only module "a" has a per="scope" fixture.
         let hooks = vec![hook_for_module("setup", "a", FixturePer::Scope, &[])];
         let result = partition_with_hooks(tests, &hooks, DistMode::Test);
         // a.py tests are grouped (1 unit), b.py tests are individual (2 units)
@@ -446,8 +446,8 @@ mod tests {
 
     #[test]
     fn test_mode_upgrade_emits_warning_naming_affected_modules() {
-        // The user asked for --dist test but a file-scope before_all on
-        // module "a" forces file-level grouping. The user must see this
+        // The user asked for --dist test but a file-scope per="scope" fixture
+        // on module "a" forces file-level grouping. The user must see this
         // as an explicit warning so they understand why their CLI flag
         // didn't take effect.
         let tests = vec![

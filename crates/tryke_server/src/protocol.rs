@@ -17,12 +17,18 @@ pub struct DiscoverParams {
     pub root: PathBuf,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct RunParams {
     pub tests: Option<Vec<String>>,
     pub filter: Option<String>,
     pub paths: Option<Vec<String>>,
     pub markers: Option<String>,
+    /// Client-generated opaque identifier that the server echoes back in the
+    /// `run` RPC response and every `run_start` / `test_complete` /
+    /// `run_complete` notification. Required: clients use this to
+    /// demultiplex notifications when multiple runs share the broadcast
+    /// channel.
+    pub run_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,20 +65,30 @@ pub struct DiscoverCompleteParams {
 
 #[derive(Debug, Serialize)]
 pub struct RunStartParams {
+    pub run_id: String,
     pub tests: Vec<TestItem>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct TestCompleteParams {
+    pub run_id: String,
     pub result: TestResult,
 }
 
 #[derive(Debug, Serialize)]
 pub struct RunCompleteParams {
+    pub run_id: String,
+    pub summary: RunSummary,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunResponse {
+    pub run_id: String,
     pub summary: RunSummary,
 }
 
 pub const METHOD_NOT_FOUND: i32 = -32601;
+pub const INVALID_PARAMS: i32 = -32602;
 
 #[cfg(test)]
 mod tests {
@@ -97,17 +113,16 @@ mod tests {
 
     #[test]
     fn deserializes_run_request_tests_null() {
-        let json =
-            r#"{"jsonrpc":"2.0","id":3,"method":"run","params":{"root":"/tmp","tests":null}}"#;
+        let json = r#"{"jsonrpc":"2.0","id":3,"method":"run","params":{"root":"/tmp","tests":null,"run_id":"r1"}}"#;
         let req: Request = serde_json::from_str(json).unwrap();
         let params: RunParams = serde_json::from_value(req.params.unwrap()).unwrap();
         assert!(params.tests.is_none());
+        assert_eq!(params.run_id, "r1");
     }
 
     #[test]
     fn deserializes_run_request_with_tests() {
-        let json =
-            r#"{"jsonrpc":"2.0","id":3,"method":"run","params":{"root":"/tmp","tests":["a","b"]}}"#;
+        let json = r#"{"jsonrpc":"2.0","id":3,"method":"run","params":{"root":"/tmp","tests":["a","b"],"run_id":"r1"}}"#;
         let req: Request = serde_json::from_str(json).unwrap();
         let params: RunParams = serde_json::from_value(req.params.unwrap()).unwrap();
         assert_eq!(params.tests, Some(vec!["a".to_string(), "b".to_string()]));
@@ -154,5 +169,31 @@ mod tests {
         assert_eq!(val["method"], "discover_complete");
         assert!(val["params"]["tests"].is_array());
         assert!(val.get("id").is_none());
+    }
+
+    #[test]
+    fn run_params_without_run_id_is_rejected() {
+        let json = r#"{"tests":null}"#;
+        let result: Result<RunParams, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "run_id is required");
+    }
+
+    #[test]
+    fn run_params_with_run_id_deserializes() {
+        let json = r#"{"tests":null,"run_id":"abc-123"}"#;
+        let params: RunParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.run_id, "abc-123");
+    }
+
+    #[test]
+    fn run_start_params_serialize_with_run_id() {
+        let params = RunStartParams {
+            run_id: "r1".to_string(),
+            tests: vec![],
+        };
+        let val: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&params).unwrap()).unwrap();
+        assert_eq!(val["run_id"], "r1");
+        assert!(val["tests"].is_array());
     }
 }

@@ -226,6 +226,121 @@ impl Discoverer {
         tests
     }
 
+    /// Discover tests within the given `walk_roots` only. Used for the
+    /// `tryke test path/...` fast path: skips the full-project walk and
+    /// the import-graph build (phase 5), since path-restricted runs
+    /// don't drive change-based selection.
+    ///
+    /// Mutates `self.results` / `self.inputs` only for files within the
+    /// walk roots. The caller is expected to use a fresh `Discoverer`
+    /// here — the long-lived `Discoverer` used by server/watch must not
+    /// see this method, since skipping import-graph maintenance would
+    /// corrupt their incremental state.
+    pub fn rediscover_restricted(&mut self, walk_roots: &[PathBuf]) -> Vec<TestItem> {
+        let mut paths =
+            crate::collect_python_files_restricted(&self.root, walk_roots, &self.excludes);
+        paths.sort();
+        debug!(
+            "rediscover_restricted: found {} python files across {} walk roots",
+            paths.len(),
+            walk_roots.len()
+        );
+        let path_set: HashSet<PathBuf> = paths.iter().cloned().collect();
+
+        // Phase 1: parallel stat + cache lookup (same as `rediscover`).
+        let cache_ref = &self.cache;
+        let keyed: Vec<FileWork> = paths
+            .par_iter()
+            .map(|path| Self::prepare_work(cache_ref, path))
+            .collect();
+
+        // Phase 2 (`self.cache.retain`) intentionally skipped: we walked
+        // a deliberate subset, so we must not evict entries for files
+        // outside the walk roots — they're still valid for the next
+        // full `rediscover`.
+
+        // Phase 3: serial salsa ingest.
+        let mut misses: Vec<PathBuf> = Vec::new();
+        let mut hit_count = 0usize;
+        for work in keyed {
+            match work {
+                FileWork::Hit { path, data, key } => {
+                    self.results.insert(path.clone(), data);
+                    self.cache_keys_hit
+                        .entry(path)
+                        .and_modify(|k| *k = key)
+                        .or_insert(key);
+                    hit_count += 1;
+                }
+                FileWork::Miss { path, source, key } => {
+                    self.upsert_source(&path, source);
+                    self.cache_keys_hit.insert(path.clone(), key);
+                    misses.push(path);
+                }
+                FileWork::StatError { path } => {
+                    warn!(
+                        "rediscover_restricted: stat failed for {}, skipping",
+                        path.display()
+                    );
+                }
+            }
+        }
+        debug!(
+            "rediscover_restricted: cache hits {}/{} ({} parses pending)",
+            hit_count,
+            paths.len(),
+            misses.len()
+        );
+
+        // Phase 4: parallel parse for misses.
+        let miss_snapshots: Vec<(PathBuf, SourceFile)> = misses
+            .iter()
+            .filter_map(|p| self.inputs.get(p).map(|f| (p.clone(), *f)))
+            .collect();
+        let miss_results: Vec<(PathBuf, DiscoveredFile)> = self.parse_in_parallel(&miss_snapshots);
+        for (path, data) in &miss_results {
+            self.results.insert(path.clone(), data.clone());
+            if let Some(&key) = self.cache_keys_hit.get(path) {
+                self.cache.insert(path.clone(), key, data.clone());
+            }
+        }
+
+        // Phase 5 (full import-graph rebuild) intentionally skipped:
+        // restricted discovery doesn't drive change-based selection, so
+        // the import edges aren't consulted. We do a lightweight pass to
+        // mark always-dirty files so dynamic-import warnings still
+        // surface for the discovered subset.
+        let dynamic_paths: Vec<PathBuf> = self
+            .results
+            .iter()
+            .filter(|(p, r)| path_set.contains(*p) && r.dynamic_imports)
+            .map(|(p, _)| p.clone())
+            .collect();
+        for path in dynamic_paths {
+            self.import_graph.mark_always_dirty(path);
+        }
+
+        self.project_files.clone_from(&path_set);
+
+        // Phase 6: persist cache.
+        if let Err(err) = self.cache.save() {
+            warn!("rediscover_restricted: failed to save discovery cache: {err}");
+        }
+
+        // Collect tests only from the restricted set so the return is
+        // independent of any prior state on `self.results`.
+        let tests: Vec<TestItem> = path_set
+            .iter()
+            .filter_map(|p| self.results.get(p))
+            .flat_map(|r| r.parsed.tests.clone())
+            .collect();
+        debug!(
+            "rediscover_restricted: discovered {} tests total",
+            tests.len()
+        );
+        tests
+    }
+
     /// Stat `path` and consult the disk cache. On a cache hit, return
     /// the cached `DiscoveredFile` without reading the file. On a
     /// miss, read the file text so the parse phase doesn't stat-then-
@@ -986,6 +1101,61 @@ mod tests {
             test_entry.imports.is_empty(),
             "without src=[\"python\"], mypkg.mod should not resolve; got {:?}",
             test_entry.imports
+        );
+    }
+
+    #[test]
+    fn rediscover_restricted_skips_import_graph() {
+        // utils.py is imported by test_foo.py. After rediscover_restricted
+        // walks only test_foo.py, the import graph must remain empty —
+        // proving phase 5 was skipped. The discovered tests must still
+        // come from the restricted file.
+        let utils_src = "def helper(): pass\n";
+        let test_foo_src = "from utils import helper\n@test\ndef test_foo():\n    pass\n";
+        let other_src = "@test\ndef test_other():\n    pass\n";
+        let dir = make_project(&[
+            ("utils.py", utils_src),
+            ("test_foo.py", test_foo_src),
+            ("test_other.py", other_src),
+        ]);
+        let mut discoverer = Discoverer::new(dir.path());
+        let walk_roots = vec![dir.path().join("test_foo.py")];
+        let tests = discoverer.rediscover_restricted(&walk_roots);
+
+        let names: Vec<&str> = tests.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["test_foo"], "got: {names:?}");
+
+        let summary = discoverer.import_graph_summary();
+        let with_edges: Vec<&Path> = summary
+            .iter()
+            .filter(|e| !e.imports.is_empty() || !e.imported_by.is_empty())
+            .map(|e| e.file.as_path())
+            .collect();
+        assert!(
+            with_edges.is_empty(),
+            "phase 5 was skipped, so no import edges should be recorded; got entries with edges: {with_edges:?}"
+        );
+    }
+
+    #[test]
+    fn rediscover_restricted_marks_dynamic_imports_for_warnings() {
+        // Even though we skip the full graph build, dynamic-import
+        // warnings still need to surface for the walked subset.
+        let dynamic_src = "import importlib\nmod = importlib.import_module('os')\nfrom tryke import test\n@test\ndef test_dyn(): pass\n";
+        let dir = make_project(&[("test_dyn.py", dynamic_src)]);
+        let mut discoverer = Discoverer::new(dir.path());
+        let walk_roots = vec![dir.path().join("test_dyn.py")];
+        discoverer.rediscover_restricted(&walk_roots);
+
+        let dyn_files = discoverer.dynamic_import_files();
+        let names: Vec<&str> = dyn_files
+            .iter()
+            .filter_map(|p| p.file_name())
+            .filter_map(|n| n.to_str())
+            .collect();
+        assert!(
+            names.contains(&"test_dyn.py"),
+            "dynamic-import file should be tracked: {names:?}"
         );
     }
 }

@@ -1,8 +1,9 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use log::{debug, warn};
 use tryke_config::load_effective_config;
 use tryke_discovery::Discoverer;
+use tryke_types::filter::PathSpec;
 use tryke_types::{DiscoveryWarning, DiscoveryWarningKind, HookItem};
 
 use crate::git::resolve_changed_files;
@@ -134,6 +135,86 @@ pub fn discover_tests(
             warnings,
         }
     }
+}
+
+/// Discover tests restricted to the given path specs. Skips the full
+/// project walk and the import-graph build, since path-restricted runs
+/// don't drive change-based selection. Falls back to `discover_tests`
+/// if any spec resolves to a nonexistent file or escapes the project
+/// root — the existing post-filter (`TestFilter::apply`) still runs in
+/// `main` and handles suffix-match semantics in that case.
+pub fn discover_tests_for_paths(
+    root: &Path,
+    path_specs: &[PathSpec],
+    excludes: &[String],
+) -> DiscoverySelection {
+    let walk_roots = match resolve_walk_roots(root, path_specs) {
+        Some(roots) => roots,
+        None => {
+            debug!("discover_tests_for_paths: falling back to full discovery");
+            return discover_tests(root, false, None, excludes);
+        }
+    };
+
+    let mut discoverer = Discoverer::new_with_excludes(root, excludes);
+    let tests = discoverer.rediscover_restricted(&walk_roots);
+    let warnings = all_discovery_warnings(&discoverer);
+    let hooks = discoverer.hooks();
+    DiscoverySelection {
+        tests,
+        hooks,
+        changed_files: None,
+        changed_prefix_len: None,
+        warnings,
+    }
+}
+
+/// Translate `PathSpec`s into a deduplicated list of filesystem walk
+/// roots. Returns `None` if any spec resolves to a missing path or
+/// escapes `root`, signalling the caller to fall back to the full walk.
+fn resolve_walk_roots(root: &Path, path_specs: &[PathSpec]) -> Option<Vec<PathBuf>> {
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut walk_roots: Vec<PathBuf> = Vec::with_capacity(path_specs.len());
+    for spec in path_specs {
+        let raw = match spec {
+            PathSpec::File(p) | PathSpec::FileLine(p, _) => p.clone(),
+        };
+        let abs = if raw.is_absolute() {
+            raw
+        } else {
+            root.join(&raw)
+        };
+        let Ok(resolved) = abs.canonicalize() else {
+            debug!(
+                "discover_tests_for_paths: {} does not exist on disk",
+                abs.display()
+            );
+            return None;
+        };
+        if !resolved.starts_with(&canonical_root) {
+            warn!(
+                "discover_tests_for_paths: {} is outside project root {}, falling back",
+                resolved.display(),
+                canonical_root.display()
+            );
+            return None;
+        }
+        // `.py` files take the single-file fast path inside
+        // `collect_python_files_restricted`; directories trigger a walk;
+        // non-`.py` files yield no tests (the extension filter drops
+        // them) which mirrors the existing post-filter semantics.
+        walk_roots.push(resolved);
+    }
+
+    // Dedupe by ancestry: a file under a kept directory is redundant.
+    walk_roots.sort_by_key(|p| p.components().count());
+    let mut deduped: Vec<PathBuf> = Vec::new();
+    for r in walk_roots {
+        if !deduped.iter().any(|kept| r.starts_with(kept)) {
+            deduped.push(r);
+        }
+    }
+    Some(deduped)
 }
 
 /// Discover all tests but place changed tests first in the returned list.
@@ -404,6 +485,163 @@ mod tests {
         assert!(
             file_names.contains(&"test_dyn.py"),
             "warning should reference test_dyn.py, got: {file_names:?}"
+        );
+    }
+
+    // --- discover_tests_for_paths tests ---
+
+    fn make_project(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        for (rel, content) in files {
+            let path = dir.path().join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create_dir_all");
+            }
+            std::fs::write(&path, content).expect("write file");
+        }
+        dir
+    }
+
+    fn pathspec_file(p: &str) -> PathSpec {
+        PathSpec::File(PathBuf::from(p))
+    }
+
+    #[test]
+    fn for_paths_single_file_finds_only_that_file_tests() {
+        let dir = make_project(&[
+            (
+                "test_a.py",
+                "from tryke import test\n@test\ndef test_a(): pass\n",
+            ),
+            (
+                "test_b.py",
+                "from tryke import test\n@test\ndef test_b(): pass\n",
+            ),
+        ]);
+        let specs = vec![pathspec_file("test_a.py")];
+        let discovered = discover_tests_for_paths(dir.path(), &specs, &[]);
+        let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["test_a"], "got: {names:?}");
+    }
+
+    #[test]
+    fn for_paths_directory_walks_only_subtree() {
+        let dir = make_project(&[
+            (
+                "tests/test_a.py",
+                "from tryke import test\n@test\ndef test_a(): pass\n",
+            ),
+            (
+                "tests/test_b.py",
+                "from tryke import test\n@test\ndef test_b(): pass\n",
+            ),
+            (
+                "other/test_c.py",
+                "from tryke import test\n@test\ndef test_c(): pass\n",
+            ),
+        ]);
+        let specs = vec![pathspec_file("tests")];
+        let discovered = discover_tests_for_paths(dir.path(), &specs, &[]);
+        let mut names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["test_a", "test_b"], "got: {names:?}");
+    }
+
+    #[test]
+    fn for_paths_mixed_file_and_dir_dedupe_by_ancestry() {
+        let dir = make_project(&[
+            (
+                "tests/test_a.py",
+                "from tryke import test\n@test\ndef test_a(): pass\n",
+            ),
+            (
+                "tests/test_b.py",
+                "from tryke import test\n@test\ndef test_b(): pass\n",
+            ),
+        ]);
+        // Dir + a contained file should dedupe to just the dir; both
+        // tests should be discovered (not just test_a).
+        let specs = vec![pathspec_file("tests"), pathspec_file("tests/test_a.py")];
+        let discovered = discover_tests_for_paths(dir.path(), &specs, &[]);
+        let mut names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["test_a", "test_b"], "got: {names:?}");
+    }
+
+    #[test]
+    fn for_paths_nonexistent_falls_back_to_full_walk() {
+        let dir = make_project(&[(
+            "test_real.py",
+            "from tryke import test\n@test\ndef test_real(): pass\n",
+        )]);
+        let specs = vec![pathspec_file("does_not_exist.py")];
+        let discovered = discover_tests_for_paths(dir.path(), &specs, &[]);
+        // Fallback runs full discovery; the post-filter (applied in
+        // main, not here) is what would narrow the set. So we expect
+        // every test in the project here.
+        let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            names.contains(&"test_real"),
+            "fallback should run full discovery: {names:?}"
+        );
+    }
+
+    #[test]
+    fn for_paths_file_line_spec_walks_just_that_file() {
+        let dir = make_project(&[
+            (
+                "test_a.py",
+                "from tryke import test\n@test\ndef test_a(): pass\n",
+            ),
+            (
+                "test_b.py",
+                "from tryke import test\n@test\ndef test_b(): pass\n",
+            ),
+        ]);
+        let specs = vec![PathSpec::FileLine(PathBuf::from("test_a.py"), 2)];
+        let discovered = discover_tests_for_paths(dir.path(), &specs, &[]);
+        let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
+        // The walk is restricted to test_a.py — test_b should not appear
+        // even before the post-filter narrows by line.
+        assert_eq!(names, vec!["test_a"], "got: {names:?}");
+    }
+
+    #[test]
+    fn for_paths_excludes_honored_inside_walk_root() {
+        let dir = make_project(&[
+            (
+                "tests/test_a.py",
+                "from tryke import test\n@test\ndef test_a(): pass\n",
+            ),
+            (
+                "tests/skip/test_skipme.py",
+                "from tryke import test\n@test\ndef test_skipme(): pass\n",
+            ),
+        ]);
+        let specs = vec![pathspec_file("tests")];
+        let discovered = discover_tests_for_paths(dir.path(), &specs, &["tests/skip".to_string()]);
+        let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["test_a"], "got: {names:?}");
+    }
+
+    #[test]
+    fn for_paths_outside_root_falls_back_to_full_walk() {
+        let dir = make_project(&[(
+            "test_real.py",
+            "from tryke import test\n@test\ndef test_real(): pass\n",
+        )]);
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let outside_file = outside.path().join("stray.py");
+        std::fs::write(&outside_file, "x = 1\n").expect("write stray");
+        let specs = vec![PathSpec::File(outside_file)];
+        let discovered = discover_tests_for_paths(dir.path(), &specs, &[]);
+        let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
+        // Out-of-root spec falls back to full discovery rather than
+        // attempting to walk outside the project.
+        assert!(
+            names.contains(&"test_real"),
+            "fallback should still find in-project tests: {names:?}"
         );
     }
 }

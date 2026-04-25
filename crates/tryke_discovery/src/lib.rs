@@ -59,6 +59,54 @@ pub(crate) fn collect_python_files(root: &Path, excludes: &[String]) -> Vec<Path
         .collect()
 }
 
+/// Like `collect_python_files`, but walks only the supplied `walk_roots`
+/// instead of the whole project. Used by the path-restricted discovery
+/// fast path (`Discoverer::rediscover_restricted`) so a `tryke test
+/// path/to/foo.py` invocation doesn't pay an O(project-files) walk.
+///
+/// `walk_roots` may contain absolute paths to either directories or
+/// individual `.py` files. The exclude matcher is anchored at
+/// `project_root` so `pyproject.toml` exclude patterns evaluate against
+/// project-relative paths exactly as in the full walk.
+pub(crate) fn collect_python_files_restricted(
+    project_root: &Path,
+    walk_roots: &[PathBuf],
+    excludes: &[String],
+) -> Vec<PathBuf> {
+    let exclude_matcher = build_excludes(project_root, excludes);
+    let is_excluded = |p: &Path| -> bool {
+        exclude_matcher
+            .matched_path_or_any_parents(p, false)
+            .is_ignore()
+    };
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for walk_root in walk_roots {
+        if walk_root.is_file() {
+            // Single-file fast path: skip WalkBuilder entirely.
+            if walk_root.extension().is_some_and(|ext| ext == "py") && !is_excluded(walk_root) {
+                paths.push(walk_root.clone());
+            }
+            continue;
+        }
+        for entry in WalkBuilder::new(walk_root).build().filter_map(Result::ok) {
+            if !entry.file_type().is_some_and(|t| t.is_file()) {
+                continue;
+            }
+            let path = entry.into_path();
+            if path.extension().is_none_or(|ext| ext != "py") {
+                continue;
+            }
+            if is_excluded(&path) {
+                continue;
+            }
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
 pub(crate) fn path_to_module(root: &Path, file: &Path) -> String {
     tryke_types::path_to_module(root, file).unwrap_or_default()
 }

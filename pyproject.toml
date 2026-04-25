@@ -55,6 +55,11 @@ ignore = ["D", "COM812"]
 
 [tool.tryke]
 exclude = ["benchmarks/suites", "demo"]
+# Treat both the repo root and `python/` as source roots for absolute
+# import resolution, mirroring `[tool.maturin] python-source = "python"`.
+# Without this, `from tryke.worker import ...` in tests/ would not
+# resolve to python/tryke/worker.py in the import graph.
+src = [".", "python"]
 
 [tool.maturin]
 bindings = "bin"

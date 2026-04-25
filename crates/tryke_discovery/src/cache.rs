@@ -27,7 +27,10 @@ use crate::db::DiscoveredFile;
 /// whenever a field uses `#[serde(skip_serializing_if = ...)]` —
 /// `TestItem` alone skips nine optional fields, so every cached entry
 /// was unreadable.
-const CACHE_VERSION: u32 = 2;
+/// v3: absolute-import resolution now walks configured `src` roots,
+/// so cached `import_candidates` from v2 (always keyed to project
+/// root) would miss resolutions under secondary roots like `python/`.
+const CACHE_VERSION: u32 = 3;
 
 /// Identity of a source file derived from `stat`. Cheap to obtain
 /// without reading the file contents.

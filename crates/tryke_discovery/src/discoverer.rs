@@ -18,6 +18,11 @@ pub struct Discoverer {
     db: Database,
     inputs: HashMap<PathBuf, SourceFile>,
     root: PathBuf,
+    /// Absolute source roots used to resolve `from foo.bar import x`
+    /// against the enumerated project files. Derived from
+    /// `[tool.tryke] src` joined onto `root` and canonicalized. Defaults
+    /// to `[root]` (project root) when the config doesn't set `src`.
+    src_roots: Vec<PathBuf>,
     import_graph: ImportGraph,
     excludes: Vec<String>,
     /// Set of all project-local python files known to the discoverer.
@@ -60,20 +65,32 @@ enum FileWork {
 impl Discoverer {
     #[must_use]
     pub fn new(start: &Path) -> Self {
-        let excludes = crate::configured_excludes(start, &[]);
-        Self::new_with_excludes(start, &excludes)
+        let config = tryke_config::load_effective_config(start);
+        Self::new_with_options(start, &config.discovery.exclude, &config.discovery.src)
     }
 
     #[must_use]
     pub fn new_with_excludes(start: &Path, excludes: &[String]) -> Self {
+        let src = tryke_config::load_effective_config(start).discovery.src;
+        Self::new_with_options(start, excludes, &src)
+    }
+
+    #[must_use]
+    pub fn new_with_options(start: &Path, excludes: &[String], src: &[String]) -> Self {
         let root = crate::find_project_root(start).unwrap_or_else(|| start.to_path_buf());
         let root = root.canonicalize().unwrap_or(root);
+        let src_roots = if src.is_empty() {
+            vec![root.clone()]
+        } else {
+            crate::resolve_src_roots(&root, src)
+        };
         let cache_path = root.join(".tryke").join("cache").join("discovery-v1.bin");
         let cache = DiskCache::load(cache_path);
         Self {
             db: Database::default(),
             inputs: HashMap::new(),
             root,
+            src_roots,
             import_graph: ImportGraph::default(),
             excludes: excludes.to_vec(),
             project_files: HashSet::new(),
@@ -272,7 +289,13 @@ impl Discoverer {
             }
         } else {
             trace!("rediscover: parsing new file {}", path.display());
-            let file = SourceFile::new(&self.db, text, self.root.clone(), path.to_path_buf());
+            let file = SourceFile::new(
+                &self.db,
+                text,
+                self.root.clone(),
+                self.src_roots.clone(),
+                path.to_path_buf(),
+            );
             self.inputs.insert(path.to_path_buf(), file);
         }
     }
@@ -873,6 +896,96 @@ mod tests {
         assert!(
             !names.contains(&"test_dyn"),
             "test_dyn should no longer be always-dirty, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn absolute_import_resolves_under_configured_src_root() {
+        // Mirrors the real-world tryke layout: package under `python/` is
+        // a top-level import root, but the test file that imports it
+        // lives at the repo root alongside `tests/`. Without `src =
+        // ["python"]` in the config, `from mypkg.mod import X` would
+        // resolve to `<root>/mypkg/mod.py` — which doesn't exist — and
+        // the import graph edge would be dropped.
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.tryke]\nsrc = [\".\", \"python\"]\n",
+        )
+        .expect("write pyproject");
+        fs::create_dir_all(dir.path().join("python/mypkg")).expect("mkdir mypkg");
+        fs::create_dir_all(dir.path().join("tests")).expect("mkdir tests");
+        fs::write(
+            dir.path().join("python/mypkg/__init__.py"),
+            "# package marker\n",
+        )
+        .expect("write __init__.py");
+        fs::write(
+            dir.path().join("python/mypkg/mod.py"),
+            "def value() -> int:\n    return 1\n",
+        )
+        .expect("write mod.py");
+        fs::write(
+            dir.path().join("tests/test_mod.py"),
+            "from mypkg.mod import value\n\n@test\ndef test_value():\n    assert value() == 1\n",
+        )
+        .expect("write test_mod.py");
+
+        let mut discoverer = Discoverer::new(dir.path());
+        discoverer.rediscover();
+
+        let entries = discoverer.import_graph_summary();
+        let test_entry = entries
+            .iter()
+            .find(|e| e.file == Path::new("tests/test_mod.py"))
+            .expect("tests/test_mod.py in graph");
+        assert!(
+            test_entry
+                .imports
+                .iter()
+                .any(|p| p == Path::new("python/mypkg/mod.py")),
+            "test_mod.py should import python/mypkg/mod.py via src=[\"python\"]; got {:?}",
+            test_entry.imports
+        );
+    }
+
+    #[test]
+    fn absolute_import_without_src_root_does_not_resolve() {
+        // Default `src = ["."]` means `from mypkg.mod import X` only
+        // looks under the project root. The file lives under python/
+        // so the import edge is dropped — this is the pre-src behavior
+        // we want to preserve for projects without a python-source layout.
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject");
+        fs::create_dir_all(dir.path().join("python/mypkg")).expect("mkdir mypkg");
+        fs::write(
+            dir.path().join("python/mypkg/__init__.py"),
+            "# package marker\n",
+        )
+        .expect("write __init__.py");
+        fs::write(
+            dir.path().join("python/mypkg/mod.py"),
+            "def value() -> int:\n    return 1\n",
+        )
+        .expect("write mod.py");
+        fs::write(
+            dir.path().join("test_mod.py"),
+            "from mypkg.mod import value\n\n@test\ndef test_value():\n    assert value() == 1\n",
+        )
+        .expect("write test_mod.py");
+
+        let mut discoverer = Discoverer::new(dir.path());
+        discoverer.rediscover();
+
+        let entries = discoverer.import_graph_summary();
+        let test_entry = entries
+            .iter()
+            .find(|e| e.file == Path::new("test_mod.py"))
+            .expect("test_mod.py in graph");
+        assert!(
+            test_entry.imports.is_empty(),
+            "without src=[\"python\"], mypkg.mod should not resolve; got {:?}",
+            test_entry.imports
         );
     }
 }

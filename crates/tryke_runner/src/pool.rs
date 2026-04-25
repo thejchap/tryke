@@ -198,7 +198,7 @@ async fn run_single_test(
         }
         Err(err) => {
             debug!("worker_task: run_test error for {}: {err}", test.name);
-            let stderr_output = w.drain_stderr().await;
+            let stderr_output = w.drain_stderr();
             // Drop the dead worker; the next call to `ensure_worker` will
             // spawn a fresh one and replay cached hooks so the remaining
             // tests in this unit keep their fixtures.

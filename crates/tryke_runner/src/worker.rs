@@ -1,10 +1,11 @@
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use log::{debug, trace};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tryke_types::{Assertion, ExpectedAssertion, TestItem, TestOutcome, TestResult};
 
 use crate::protocol::{
@@ -12,11 +13,19 @@ use crate::protocol::{
     RunDoctestParams, RunTestParams, RunTestResultWire,
 };
 
+/// Cap on retained worker-stderr bytes. Beyond this we keep the most recent
+/// bytes and drop older ones — enough for diagnostic context on failures
+/// without unbounded memory growth on workers that spew warnings.
+const STDERR_RETAIN_BYTES: usize = 1 << 20; // 1 MiB
+
 pub struct WorkerProcess {
     child: Child,
     stdin: BufWriter<ChildStdin>,
     stdout: BufReader<ChildStdout>,
-    stderr: Option<ChildStderr>,
+    /// Continuously-drained worker stderr. A background task reads the
+    /// child's stderr pipe into this buffer so the pipe never fills and
+    /// the worker can't block on a stderr write mid-RPC.
+    stderr_buf: Arc<Mutex<Vec<u8>>>,
     next_id: u64,
 }
 
@@ -35,13 +44,40 @@ impl WorkerProcess {
             .spawn()?;
         let stdin = BufWriter::new(child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?);
         let stdout = BufReader::new(child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?);
-        let stderr = child.stderr.take();
+        let stderr = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
         debug!("worker spawned (pid {:?})", child.id());
+
+        // The worker can write to stderr at any time (asyncio default
+        // exception handler, library warnings, etc.). The kernel pipe
+        // buffer defaults to 64 KiB on Linux, so without an active
+        // reader the worker's next stderr write blocks once the pipe
+        // fills — and the worker stops responding to RPCs, surfacing
+        // as "tryke hangs at finalize_hooks". Spawn a drainer that
+        // keeps the pipe empty for the worker's lifetime.
+        let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        {
+            let buf = Arc::clone(&stderr_buf);
+            tokio::spawn(async move {
+                let mut reader = stderr;
+                let mut chunk = [0u8; 8192];
+                loop {
+                    match reader.read(&mut chunk).await {
+                        Ok(0) => break,
+                        Ok(n) => append_stderr(&buf, &chunk[..n]),
+                        Err(e) => {
+                            trace!("stderr drainer: read error: {e}");
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+
         Ok(Self {
             child,
             stdin,
             stdout,
-            stderr,
+            stderr_buf,
             next_id: 1,
         })
     }
@@ -185,20 +221,20 @@ impl WorkerProcess {
         }
     }
 
-    pub async fn drain_stderr(&mut self) -> String {
-        let Some(stderr) = self.stderr.take() else {
-            return String::new();
+    /// Snapshot the buffered worker stderr and clear the buffer.
+    ///
+    /// # Panics
+    /// Panics only if the stderr-drainer task panicked while holding the
+    /// internal mutex (poisoning it). That task does no fallible work.
+    pub fn drain_stderr(&mut self) -> String {
+        let bytes = {
+            let mut g = self
+                .stderr_buf
+                .lock()
+                .expect("stderr buffer mutex poisoned");
+            std::mem::take(&mut *g)
         };
-        let mut buf = Vec::new();
-        let result = tokio::time::timeout(Duration::from_secs(1), async {
-            let mut reader = stderr;
-            reader.read_to_end(&mut buf).await
-        })
-        .await;
-        if result.is_err() {
-            trace!("drain_stderr: timed out");
-        }
-        String::from_utf8_lossy(&buf).into_owned()
+        String::from_utf8_lossy(&bytes).into_owned()
     }
 
     pub async fn shutdown(&mut self) {
@@ -213,6 +249,21 @@ impl Drop for WorkerProcess {
         // the synchronous variant — safe to call on already-dead processes.
         let _ = self.child.start_kill();
     }
+}
+
+fn append_stderr(buf: &Mutex<Vec<u8>>, data: &[u8]) {
+    let mut g = buf.lock().expect("stderr buffer mutex poisoned");
+    if data.len() >= STDERR_RETAIN_BYTES {
+        // A single chunk already fills the cap; keep only its tail.
+        g.clear();
+        g.extend_from_slice(&data[data.len() - STDERR_RETAIN_BYTES..]);
+        return;
+    }
+    let total = g.len() + data.len();
+    if total > STDERR_RETAIN_BYTES {
+        g.drain(..total - STDERR_RETAIN_BYTES);
+    }
+    g.extend_from_slice(data);
 }
 
 fn build_pythonpath(extra: &[&Path]) -> String {
@@ -627,5 +678,81 @@ mod tests {
             status.is_ok_and(|s| !s.success()),
             "child process {pid} should be dead after start_kill + drop"
         );
+    }
+
+    #[test]
+    fn append_stderr_caps_at_retain_bytes() {
+        let buf = Mutex::new(Vec::<u8>::new());
+        // Fill with a recognisable head sequence, then push past the cap.
+        let head = vec![b'A'; STDERR_RETAIN_BYTES];
+        append_stderr(&buf, &head);
+        let tail = vec![b'B'; 1024];
+        append_stderr(&buf, &tail);
+
+        let g = buf.lock().unwrap();
+        assert_eq!(g.len(), STDERR_RETAIN_BYTES);
+        // Oldest A's are dropped; tail B's retained.
+        assert_eq!(&g[g.len() - tail.len()..], &tail[..]);
+        assert_eq!(g[0], b'A');
+    }
+
+    #[test]
+    fn append_stderr_handles_single_oversized_write() {
+        let buf = Mutex::new(Vec::<u8>::new());
+        let big = vec![b'X'; STDERR_RETAIN_BYTES + 4096];
+        append_stderr(&buf, &big);
+        let g = buf.lock().unwrap();
+        assert_eq!(g.len(), STDERR_RETAIN_BYTES);
+        assert!(g.iter().all(|b| *b == b'X'));
+    }
+
+    /// Reproducer for the "tryke hangs at `finalize_hooks`" bug: when the
+    /// worker writes more than the kernel pipe buffer (~64 KiB) to stderr
+    /// without anyone draining it, the worker's next stderr write blocks
+    /// and it stops responding to RPCs. The drainer task spawned in
+    /// `WorkerProcess::spawn` must keep the pipe empty so RPC flow is
+    /// unaffected.
+    #[tokio::test]
+    async fn worker_continues_after_large_stderr_write() {
+        // Use a shell child as a stand-in for the python worker. It writes
+        // 1 MiB to stderr (well past the pipe buffer) and then echoes a
+        // line on stdout. If the drainer is wired correctly, the stdout
+        // line arrives promptly.
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("yes 'X' | head -c 1048576 1>&2; echo done")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn shell");
+
+        let stderr = child.stderr.take().expect("no stderr");
+        let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        {
+            let buf = Arc::clone(&stderr_buf);
+            tokio::spawn(async move {
+                let mut reader = stderr;
+                let mut chunk = [0u8; 8192];
+                while let Ok(n) = reader.read(&mut chunk).await {
+                    if n == 0 {
+                        break;
+                    }
+                    append_stderr(&buf, &chunk[..n]);
+                }
+            });
+        }
+
+        let mut stdout = BufReader::new(child.stdout.take().expect("no stdout"));
+        let mut line = String::new();
+        let read = tokio::time::timeout(Duration::from_secs(5), stdout.read_line(&mut line))
+            .await
+            .expect("stdout read timed out — drainer not keeping up with stderr");
+        assert!(read.is_ok());
+        assert_eq!(line.trim(), "done");
+
+        let _ = child.wait().await;
+        let buffered = stderr_buf.lock().unwrap().len();
+        assert_eq!(buffered, STDERR_RETAIN_BYTES);
     }
 }

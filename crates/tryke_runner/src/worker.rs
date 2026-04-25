@@ -55,7 +55,15 @@ impl WorkerProcess {
         // as "tryke hangs at finalize_hooks". Spawn a drainer that
         // keeps the pipe empty for the worker's lifetime.
         let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
-        spawn_stderr_drainer(stderr, Arc::clone(&stderr_buf))?;
+        if let Err(err) = spawn_stderr_drainer(stderr, Arc::clone(&stderr_buf)) {
+            if let Err(kill_err) = child.start_kill() {
+                debug!(
+                    "failed to kill worker after stderr drainer setup error (pid {:?}): {kill_err}",
+                    child.id()
+                );
+            }
+            return Err(err);
+        }
 
         Ok(Self {
             child,
@@ -766,7 +774,20 @@ mod tests {
         assert_eq!(line.trim(), "done");
 
         let _ = child.wait().await;
-        let buffered = stderr_buf.lock().unwrap().len();
+        // The drainer task runs concurrently and may not have read all
+        // remaining pipe bytes by the time the child exits. Poll until
+        // it reaches the expected cap rather than asserting immediately.
+        let buffered = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let n = stderr_buf.lock().unwrap().len();
+                if n == STDERR_RETAIN_BYTES {
+                    break n;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("stderr drainer did not retain expected bytes after child exit");
         assert_eq!(buffered, STDERR_RETAIN_BYTES);
     }
 }

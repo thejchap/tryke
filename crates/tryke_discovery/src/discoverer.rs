@@ -316,11 +316,10 @@ impl Discoverer {
         // the import edges aren't consulted. We do a lightweight pass to
         // mark always-dirty files so dynamic-import warnings still
         // surface for the discovered subset.
-        let dynamic_paths: Vec<PathBuf> = self
-            .results
+        let dynamic_paths: Vec<PathBuf> = path_set
             .iter()
-            .filter(|(p, r)| path_set.contains(*p) && r.dynamic_imports)
-            .map(|(p, _)| p.clone())
+            .filter(|p| self.results.get(p).is_some_and(|r| r.dynamic_imports))
+            .cloned()
             .collect();
         for path in dynamic_paths {
             self.import_graph.mark_always_dirty(path);

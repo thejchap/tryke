@@ -18,11 +18,28 @@ A list of file paths or directory patterns to exclude from test discovery:
 exclude = [
     "benchmarks/",
     "scripts/",
-    "tests/legacy/",
+    "tests/generated/",
 ]
 ```
 
 Excluded paths are skipped during both test collection and import graph construction.
+
+### `src`
+
+A list of source roots used to resolve absolute imports against the project's files. Defaults to `["."]` — the project root — which is correct for projects whose packages live next to `pyproject.toml`.
+
+For layouts that put the package tree under a subdirectory (for example a maturin project with `python-source = "python"`, where the package lives at `python/mypkg/`), list that subdirectory so absolute imports in test files resolve to the right source file:
+
+```toml
+[tool.tryke]
+src = [".", "python"]
+```
+
+With `src = [".", "python"]`, `from mypkg.mod import X` in a test file is tried as `./mypkg/mod.py` first and then `python/mypkg/mod.py` — matching how `sys.path` layers multiple package roots.
+
+Roots earlier in the list take precedence. Roots that don't resolve to a file on disk are skipped silently, so listing `"."` alongside a subdirectory is safe.
+
+This only affects absolute imports (`from foo.bar import x`). Relative imports (`from .sibling import x`) always resolve from the importing file's directory and are unaffected.
 
 ## CLI overrides
 

@@ -95,7 +95,7 @@ uvx tryke test
 ```
 
 ```text
-tryke test v0.0.18
+tryke test v0.0.23
 
 example.py:
   users

@@ -66,6 +66,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict
 
 import tryke_guard
+from tryke.coverage import Coverage
 from tryke.expect import (
     CaseArgs,
     CasesMarked,
@@ -102,9 +103,6 @@ _TRYKE_PKG = str(Path(__file__).resolve().parent)
 # Messages go to stderr so they don't corrupt the JSON-RPC channel on
 # stdout. Off by default.
 _log = logging.getLogger("tryke.worker")
-
-
-# -- Wire-format TypedDicts (mirror crates/tryke_runner/src/protocol.rs) ------
 
 
 class _AssertionWire(TypedDict):
@@ -363,8 +361,20 @@ class Worker:
         self._hook_metadata: dict[str, list[object]] = {}
         # Hook executors cached per module.
         self._executors: dict[str, HookExecutor] = {}
+        # Coverage logic
+        self._coverage: Coverage | None = None
 
     def run(self) -> None:
+        """Main worker loop
+
+        Handle IPC via JSON-RPC
+        """
+
+        # TODO(thejchap): driven by config  # noqa: FIX002, TD003
+        if True:
+            self._coverage = Coverage()
+            self._coverage.register()
+
         for raw in self._input:
             line = raw.strip()
             if not line:

@@ -12,6 +12,8 @@ pub struct SourceFile {
     #[returns(ref)]
     pub root: PathBuf,
     #[returns(ref)]
+    pub src_roots: Vec<PathBuf>,
+    #[returns(ref)]
     pub path: PathBuf,
 }
 
@@ -31,7 +33,12 @@ pub struct DiscoveredFile {
 
 #[salsa::tracked]
 pub fn discover_file(db: &dyn Db, file: SourceFile) -> DiscoveredFile {
-    crate::discover_file_from_source(file.root(db), file.path(db), file.text(db))
+    crate::discover_file_from_source(
+        file.root(db),
+        file.src_roots(db),
+        file.path(db),
+        file.text(db),
+    )
 }
 
 #[salsa::db]

@@ -5,9 +5,23 @@ use std::{
 
 use serde::Deserialize;
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DiscoveryConfig {
     pub exclude: Vec<String>,
+    /// Source roots for absolute-import resolution. `tryke.worker` is
+    /// tried as `<root>/tryke/worker.py` (then `.../__init__.py`) under
+    /// each root in order, matching how `sys.path` layers multiple
+    /// package roots. Defaults to `["."]` — the project root.
+    pub src: Vec<String>,
+}
+
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            exclude: Vec::new(),
+            src: vec![".".into()],
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -23,6 +37,7 @@ impl TrykeConfig {
             tool.tryke.or(tool.trike).map(|config| Self {
                 discovery: DiscoveryConfig {
                     exclude: config.exclude.unwrap_or_default(),
+                    src: config.src.unwrap_or_else(|| vec![".".into()]),
                 },
             })
         })
@@ -81,6 +96,7 @@ struct PyprojectTool {
 #[derive(Debug, Default, Deserialize)]
 struct RawTrykeConfig {
     exclude: Option<Vec<String>>,
+    src: Option<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -105,6 +121,7 @@ mod tests {
             Some(TrykeConfig {
                 discovery: DiscoveryConfig {
                     exclude: vec!["benchmarks/suites".into(), "generated".into()],
+                    src: vec![".".into()],
                 },
             })
         );
@@ -118,9 +135,23 @@ mod tests {
             Some(TrykeConfig {
                 discovery: DiscoveryConfig {
                     exclude: vec!["generated".into()],
+                    src: vec![".".into()],
                 },
             })
         );
+    }
+
+    #[test]
+    fn parses_src_roots() {
+        let config =
+            TrykeConfig::from_toml_str("[tool.tryke]\nsrc = [\".\", \"python\"]\n").expect("some");
+        assert_eq!(config.discovery.src, vec![".", "python"]);
+    }
+
+    #[test]
+    fn src_defaults_to_project_root_when_unset() {
+        let config = TrykeConfig::from_toml_str("[tool.tryke]\n").expect("some");
+        assert_eq!(config.discovery.src, vec!["."]);
     }
 
     #[test]

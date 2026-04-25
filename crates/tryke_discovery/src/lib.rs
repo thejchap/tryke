@@ -63,25 +63,32 @@ pub(crate) fn path_to_module(root: &Path, file: &Path) -> String {
     tryke_types::path_to_module(root, file).unwrap_or_default()
 }
 
-/// The two paths a Python importer would try, in order, for a dotted
-/// absolute import `root/foo/bar`: `root/foo/bar.py` first, then
-/// `root/foo/bar/__init__.py`. Returns whichever candidates start with
-/// `root` (the rest are stripped because we'd never resolve them to a
-/// project-local file anyway).
+/// The paths a Python importer would try, in order, for a dotted
+/// absolute import `foo.bar` across each configured source root.
+/// Under each root, `root/foo/bar.py` comes before
+/// `root/foo/bar/__init__.py` (matching Python's import precedence);
+/// roots earlier in the slice take precedence over later roots.
+/// Candidates that don't start with their root are dropped (they could
+/// never resolve to a project-local file anyway).
 ///
 /// No filesystem access — the caller decides which candidate, if any,
 /// actually exists. See `resolve_import_candidate_groups`.
-fn candidate_absolute_import_paths(root: &Path, module_name: &str) -> Vec<PathBuf> {
-    let mut path = root.to_path_buf();
-    for part in module_name.split('.') {
-        path = path.join(part);
+fn candidate_absolute_import_paths(src_roots: &[PathBuf], module_name: &str) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::with_capacity(src_roots.len() * 2);
+    for root in src_roots {
+        let mut path = root.clone();
+        for part in module_name.split('.') {
+            path = path.join(part);
+        }
+        let py = path.with_extension("py");
+        let init = path.join("__init__.py");
+        for candidate in [py, init] {
+            if candidate.starts_with(root) {
+                out.push(candidate);
+            }
+        }
     }
-    let py = path.with_extension("py");
-    let init = path.join("__init__.py");
-    [py, init]
-        .into_iter()
-        .filter(|p| p.starts_with(root))
-        .collect()
+    out
 }
 
 /// Candidates for a relative import (`from .foo import bar`) walked up
@@ -144,16 +151,18 @@ pub(crate) fn resolve_import_candidate_groups(
 /// `resolve_import_candidate_groups`. No filesystem access.
 pub(crate) fn extract_local_import_candidate_groups(
     root: &Path,
+    src_roots: &[PathBuf],
     file: &Path,
     body: &[Stmt],
 ) -> Vec<ImportCandidateGroup> {
     let mut groups: Vec<ImportCandidateGroup> = Vec::new();
-    collect_local_import_candidate_groups(root, file, body, &mut groups);
+    collect_local_import_candidate_groups(root, src_roots, file, body, &mut groups);
     groups
 }
 
 fn collect_local_import_candidate_groups(
     root: &Path,
+    src_roots: &[PathBuf],
     file: &Path,
     body: &[Stmt],
     groups: &mut Vec<ImportCandidateGroup>,
@@ -163,7 +172,7 @@ fn collect_local_import_candidate_groups(
             Stmt::Import(import_stmt) => {
                 for alias in &import_stmt.names {
                     let module_name = alias.name.id.as_str();
-                    let candidates = candidate_absolute_import_paths(root, module_name);
+                    let candidates = candidate_absolute_import_paths(src_roots, module_name);
                     if !candidates.is_empty() {
                         groups.push(candidates);
                     }
@@ -175,14 +184,14 @@ fn collect_local_import_candidate_groups(
                     // Absolute: from foo.bar import x
                     if let Some(module) = &from_stmt.module {
                         let module_name = module.id.as_str();
-                        let candidates = candidate_absolute_import_paths(root, module_name);
+                        let candidates = candidate_absolute_import_paths(src_roots, module_name);
                         if !candidates.is_empty() {
                             groups.push(candidates);
                         }
                         for alias in &from_stmt.names {
                             let imported = alias.name.id.as_str();
                             let submodule = format!("{module_name}.{imported}");
-                            let candidates = candidate_absolute_import_paths(root, &submodule);
+                            let candidates = candidate_absolute_import_paths(src_roots, &submodule);
                             if !candidates.is_empty() {
                                 groups.push(candidates);
                             }
@@ -238,7 +247,7 @@ fn collect_local_import_candidate_groups(
                 // static import graph so `--changed` mode can precisely
                 // re-run in-source tests when their dependencies change.
                 if let Some(inner) = testing_guard_body(stmt) {
-                    collect_local_import_candidate_groups(root, file, inner, groups);
+                    collect_local_import_candidate_groups(root, src_roots, file, inner, groups);
                 }
             }
         }
@@ -252,8 +261,13 @@ fn collect_local_import_candidate_groups(
 /// `extract_local_import_candidate_groups` plus
 /// `resolve_import_candidate_groups` to avoid per-import syscalls.
 #[cfg(test)]
-pub(crate) fn extract_local_imports(root: &Path, file: &Path, body: &[Stmt]) -> Vec<PathBuf> {
-    let groups = extract_local_import_candidate_groups(root, file, body);
+pub(crate) fn extract_local_imports(
+    root: &Path,
+    src_roots: &[PathBuf],
+    file: &Path,
+    body: &[Stmt],
+) -> Vec<PathBuf> {
+    let groups = extract_local_import_candidate_groups(root, src_roots, file, body);
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut out: Vec<PathBuf> = Vec::new();
     for group in &groups {
@@ -1579,6 +1593,7 @@ fn collect_doctests_from_body(
 /// cold-start cost of parsing each file twice.
 pub(crate) fn discover_file_from_source(
     root: &Path,
+    src_roots: &[PathBuf],
     file: &Path,
     source: &str,
 ) -> crate::db::DiscoveredFile {
@@ -1612,7 +1627,7 @@ pub(crate) fn discover_file_from_source(
     );
     collect_doctests_from_body(body, root, file, &line_index, "", &mut tests);
     let testing_guard_else_lines = find_testing_guard_else_lines(body, &line_index);
-    let import_candidates = extract_local_import_candidate_groups(root, file, body);
+    let import_candidates = extract_local_import_candidate_groups(root, src_roots, file, body);
     let dynamic_imports = has_dynamic_imports(body);
     for err in &errors {
         log::error!("tryke discovery: {err}");
@@ -1629,31 +1644,47 @@ pub(crate) fn discover_file_from_source(
     }
 }
 
-pub(crate) fn parse_tests_from_source(root: &Path, file: &Path, source: &str) -> ParsedFile {
-    discover_file_from_source(root, file, source).parsed
+pub(crate) fn parse_tests_from_source(
+    root: &Path,
+    src_roots: &[PathBuf],
+    file: &Path,
+    source: &str,
+) -> ParsedFile {
+    discover_file_from_source(root, src_roots, file, source).parsed
 }
 
-fn parse_tests_from_file(root: &Path, file: &Path) -> ParsedFile {
+fn parse_tests_from_file(root: &Path, src_roots: &[PathBuf], file: &Path) -> ParsedFile {
     let Ok(source) = fs::read_to_string(file) else {
         return ParsedFile::default();
     };
-    parse_tests_from_source(root, file, &source)
+    parse_tests_from_source(root, src_roots, file, &source)
 }
 
 #[must_use]
 pub fn discover_from(start: &Path) -> Vec<TestItem> {
-    let excludes = configured_excludes(start, &[]);
-    discover_from_with_excludes(start, &excludes)
+    let config = tryke_config::load_effective_config(start);
+    discover_from_with_options(start, &config.discovery.exclude, &config.discovery.src)
 }
 
 #[must_use]
 pub fn discover_from_with_excludes(start: &Path, excludes: &[String]) -> Vec<TestItem> {
+    let src = tryke_config::load_effective_config(start).discovery.src;
+    discover_from_with_options(start, excludes, &src)
+}
+
+#[must_use]
+pub fn discover_from_with_options(
+    start: &Path,
+    excludes: &[String],
+    src: &[String],
+) -> Vec<TestItem> {
     let root = find_project_root(start).unwrap_or_else(|| start.to_path_buf());
+    let src_roots = resolve_src_roots(&root, src);
     let mut files = collect_python_files(&root, excludes);
     files.sort();
     let parsed: Vec<ParsedFile> = files
         .par_iter()
-        .map(|f| parse_tests_from_file(&root, f))
+        .map(|f| parse_tests_from_file(&root, &src_roots, f))
         .collect();
     let mut tests: Vec<TestItem> = parsed.into_iter().flat_map(|p| p.tests).collect();
     tests.sort_by(|a, b| {
@@ -1662,6 +1693,21 @@ pub fn discover_from_with_excludes(start: &Path, excludes: &[String]) -> Vec<Tes
             .then(a.line_number.cmp(&b.line_number))
     });
     tests
+}
+
+/// Resolve configured `src` entries (relative strings) into absolute
+/// source roots under `root`. Canonicalizes each so comparisons against
+/// the enumerated project file set (also canonicalized by the
+/// discoverer) compare apples to apples; falls back to the joined path
+/// if canonicalize fails (e.g. the configured root doesn't exist yet).
+#[must_use]
+pub fn resolve_src_roots(root: &Path, src: &[String]) -> Vec<PathBuf> {
+    src.iter()
+        .map(|entry| {
+            let joined = root.join(entry);
+            joined.canonicalize().unwrap_or(joined)
+        })
+        .collect()
 }
 
 /// # Errors
@@ -1775,7 +1821,7 @@ def not_a_test():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 2);
         let names: Vec<_> = items.iter().map(|i| i.name.as_str()).collect();
         assert!(names.contains(&"test_one"));
@@ -1789,7 +1835,7 @@ def test_skipped():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 0);
     }
 
@@ -1803,7 +1849,7 @@ def test_fn():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].line_number, Some(3));
     }
@@ -1812,7 +1858,7 @@ def test_fn():
     fn returns_empty_for_parse_error() {
         let source = "this is not valid python @@@";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 0);
     }
 
@@ -1820,7 +1866,8 @@ def test_fn():
     fn returns_empty_for_unreadable_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let nonexistent = dir.path().join("nonexistent.py");
-        let items = parse_tests_from_file(dir.path(), &nonexistent).tests;
+        let items =
+            parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &nonexistent).tests;
         assert_eq!(items.len(), 0);
     }
 
@@ -1833,7 +1880,7 @@ def my_func():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 0);
     }
 
@@ -1845,7 +1892,7 @@ def my_func():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 0);
     }
 
@@ -1857,7 +1904,7 @@ def my_func():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "my_func");
     }
@@ -1873,7 +1920,7 @@ def square(n, expected):
     expect(n * n).to_equal(expected)
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 3, "expected one item per case");
         for item in &items {
             assert_eq!(item.name, "square");
@@ -1897,7 +1944,7 @@ def fn():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         let ids: Vec<_> = items.iter().map(TestItem::id).collect();
         assert_eq!(ids.len(), 2);
         assert!(ids[0].ends_with("::fn[a]"), "got {}", ids[0]);
@@ -1915,7 +1962,7 @@ def square(n, expected):
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 3, "expected one item per test.case spec");
         let labels: Vec<_> = items
             .iter()
@@ -1932,7 +1979,7 @@ def fn(n):
     pass
 ";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_file(dir.path(), &file);
+        let parsed = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file);
         assert!(parsed.tests.is_empty());
         assert!(
             parsed.errors.iter().any(|e| e.contains("test.case")),
@@ -1951,7 +1998,7 @@ def add(a, b, sum):
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 2);
         let labels: Vec<_> = items
             .iter()
@@ -1969,7 +2016,7 @@ with describe(\"math\"):
         pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 2);
         for item in &items {
             assert_eq!(item.groups, vec!["math".to_string()]);
@@ -1984,7 +2031,7 @@ def fn():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 2);
         for item in &items {
             assert_eq!(item.skip.as_deref(), Some("WIP"));
@@ -2001,7 +2048,7 @@ def square(n):
     pass
 "#;
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].skip, None);
         assert_eq!(items[1].skip.as_deref(), Some("known bug"));
@@ -2017,7 +2064,7 @@ def check(n):
     pass
 "#;
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].xfail, None);
         assert_eq!(items[1].xfail.as_deref(), Some("upstream issue"));
@@ -2033,7 +2080,7 @@ def feature(n):
     pass
 "#;
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].todo, None);
         assert_eq!(items[1].todo.as_deref(), Some("not implemented"));
@@ -2050,7 +2097,7 @@ def fn(n):
     pass
 "#;
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 2);
         // First case inherits function-level skip.
         assert_eq!(items[0].skip.as_deref(), Some("default skip"));
@@ -2072,7 +2119,7 @@ def fn(n):
     pass
 "#;
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].skip.as_deref(), Some("default"));
         assert_eq!(items[1].skip.as_deref(), Some("per-case reason"));
@@ -2085,7 +2132,7 @@ def fn():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 2);
         // kwargs form doesn't support per-case modifiers — "skip" inside
         // the dict is a test parameter, not a modifier.
@@ -2103,7 +2150,7 @@ def fn(n):
     pass
 "#;
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         // Non-literal skip value is silently ignored at discovery time.
         assert_eq!(items[0].skip, None);
@@ -2118,7 +2165,7 @@ def plain():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].case_label, None);
         assert_eq!(items[0].case_index, None);
@@ -2131,7 +2178,7 @@ def fn():
     pass
 ";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_file(dir.path(), &file);
+        let parsed = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file);
         // Non-literal decorator argument should not silently produce
         // a test — surface a diagnostic instead.
         assert!(
@@ -2156,7 +2203,7 @@ def my_func():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "my_func");
     }
@@ -2168,7 +2215,7 @@ def test_fn():
     expect(add(1, 1)).to_equal(2)
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         let assertions = &items[0].expected_assertions;
         assert_eq!(assertions.len(), 1);
@@ -2185,7 +2232,7 @@ def test_fn():
     expect(x).not_.to_be_none()
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items[0].expected_assertions.len(), 1);
         let a = &items[0].expected_assertions[0];
         assert_eq!(a.subject, "x");
@@ -2202,7 +2249,7 @@ def test_fn():
     expect(b).to_equal(2)
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items[0].expected_assertions.len(), 2);
     }
 
@@ -2214,7 +2261,7 @@ def test_fn():
     assert result == 2
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items[0].expected_assertions.len(), 0);
     }
 
@@ -2226,7 +2273,7 @@ def test_fn():
     expect(x).to_equal(1)
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items[0].expected_assertions.len(), 1);
         assert_eq!(items[0].expected_assertions[0].line, 4);
     }
@@ -2238,7 +2285,7 @@ def test_fn():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "test_fn");
     }
@@ -2250,7 +2297,7 @@ def test_fn():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].display_name.as_deref(), Some("addition works"));
     }
@@ -2262,7 +2309,7 @@ def test_fn():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].display_name.as_deref(), Some("my label"));
     }
@@ -2274,7 +2321,7 @@ def test_fn():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items[0].display_name.as_deref(), Some("kwarg"));
     }
 
@@ -2286,7 +2333,7 @@ def test_fn():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items[0].display_name.as_deref(), Some("docstring name"));
     }
 
@@ -2298,7 +2345,7 @@ def test_fn():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items[0].display_name.as_deref(), Some("explicit"));
     }
 
@@ -2309,7 +2356,7 @@ def test_fn():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items[0].display_name, None);
     }
 
@@ -2320,7 +2367,7 @@ def test_fn():
     expect(x, name=\"my label\").to_equal(1)
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         let a = &items[0].expected_assertions[0];
         assert_eq!(a.label.as_deref(), Some("my label"));
         assert_eq!(a.subject, "x");
@@ -2333,7 +2380,7 @@ def test_fn():
     expect(x, \"my label\").to_equal(1)
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         let a = &items[0].expected_assertions[0];
         assert_eq!(a.label.as_deref(), Some("my label"));
         assert_eq!(a.subject, "x");
@@ -2346,7 +2393,7 @@ def test_fn():
     expect(x, \"pos\", name=\"kw\").to_equal(1)
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items[0].expected_assertions[0].label.as_deref(), Some("kw"));
     }
 
@@ -2357,7 +2404,7 @@ def test_fn():
     expect(x).to_equal(1)
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items[0].expected_assertions[0].label, None);
     }
 
@@ -2383,7 +2430,7 @@ def my_func():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].display_name.as_deref(), Some("foo"));
     }
@@ -2396,7 +2443,8 @@ def my_func():
         let source = "import utils\n";
         let parsed = parse_module(source).expect("parse");
         let file = root.join("test_foo.py");
-        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        let imports =
+            extract_local_imports(root, &[root.to_path_buf()], &file, &parsed.syntax().body);
         assert_eq!(imports, vec![root.join("utils.py")]);
     }
 
@@ -2408,7 +2456,8 @@ def my_func():
         let source = "from utils import helper\n";
         let parsed = parse_module(source).expect("parse");
         let file = root.join("test_foo.py");
-        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        let imports =
+            extract_local_imports(root, &[root.to_path_buf()], &file, &parsed.syntax().body);
         assert_eq!(imports, vec![root.join("utils.py")]);
     }
 
@@ -2423,7 +2472,8 @@ def my_func():
         let source = "from pkg import helpers\n";
         let parsed = parse_module(source).expect("parse");
         let file = root.join("test_foo.py");
-        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        let imports =
+            extract_local_imports(root, &[root.to_path_buf()], &file, &parsed.syntax().body);
         assert_eq!(
             imports,
             vec![
@@ -2441,7 +2491,8 @@ def my_func():
         let source = "import os\nimport pytest\n";
         let parsed = parse_module(source).expect("parse");
         let file = root.join("test_foo.py");
-        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        let imports =
+            extract_local_imports(root, &[root.to_path_buf()], &file, &parsed.syntax().body);
         assert!(imports.is_empty());
     }
 
@@ -2455,7 +2506,8 @@ def my_func():
         let source = "from .utils import helper\n";
         let parsed = parse_module(source).expect("parse");
         let file = sub.join("test_foo.py");
-        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        let imports =
+            extract_local_imports(root, &[root.to_path_buf()], &file, &parsed.syntax().body);
         assert_eq!(imports, vec![sub.join("utils.py")]);
     }
 
@@ -2469,7 +2521,8 @@ def my_func():
         let source = "from ..utils import helper\n";
         let parsed = parse_module(source).expect("parse");
         let file = sub.join("test_foo.py");
-        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        let imports =
+            extract_local_imports(root, &[root.to_path_buf()], &file, &parsed.syntax().body);
         assert_eq!(imports, vec![root.join("pkg").join("utils.py")]);
     }
 
@@ -2483,7 +2536,8 @@ def my_func():
         let source = "from . import helpers\n";
         let parsed = parse_module(source).expect("parse");
         let file = sub.join("test_foo.py");
-        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        let imports =
+            extract_local_imports(root, &[root.to_path_buf()], &file, &parsed.syntax().body);
         assert_eq!(imports, vec![sub.join("helpers.py")]);
     }
 
@@ -2497,7 +2551,8 @@ def my_func():
         let source = "import mypkg\n";
         let parsed = parse_module(source).expect("parse");
         let file = root.join("test_foo.py");
-        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        let imports =
+            extract_local_imports(root, &[root.to_path_buf()], &file, &parsed.syntax().body);
         assert_eq!(imports, vec![sub.join("__init__.py")]);
     }
 
@@ -2509,7 +2564,8 @@ def my_func():
         let source = "import utils\nimport utils\n";
         let parsed = parse_module(source).expect("parse");
         let file = root.join("test_foo.py");
-        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        let imports =
+            extract_local_imports(root, &[root.to_path_buf()], &file, &parsed.syntax().body);
         assert_eq!(imports.len(), 1);
     }
 
@@ -2525,7 +2581,8 @@ def my_func():
         let source = "lazy import utils\n";
         let parsed = parse_module(source).expect("parse");
         let file = root.join("test_foo.py");
-        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        let imports =
+            extract_local_imports(root, &[root.to_path_buf()], &file, &parsed.syntax().body);
         assert_eq!(imports, vec![root.join("utils.py")]);
     }
 
@@ -2540,7 +2597,8 @@ def my_func():
         let source = "lazy from pkg import helpers\n";
         let parsed = parse_module(source).expect("parse");
         let file = root.join("test_foo.py");
-        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        let imports =
+            extract_local_imports(root, &[root.to_path_buf()], &file, &parsed.syntax().body);
         assert_eq!(
             imports,
             vec![pkg.join("__init__.py"), pkg.join("helpers.py"),]
@@ -2572,7 +2630,8 @@ def my_func():
         let source = "__lazy_modules__ = [\"heavy\", \"other\"]\n";
         let parsed = parse_module(source).expect("parse");
         let file = pkg.join("__init__.py");
-        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        let imports =
+            extract_local_imports(root, &[root.to_path_buf()], &file, &parsed.syntax().body);
         assert_eq!(imports, vec![pkg.join("heavy.py"), pkg.join("other.py")]);
     }
 
@@ -2587,7 +2646,8 @@ def my_func():
         let source = "__lazy_modules__: list[str] = [\"heavy\"]\n";
         let parsed = parse_module(source).expect("parse");
         let file = pkg.join("__init__.py");
-        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        let imports =
+            extract_local_imports(root, &[root.to_path_buf()], &file, &parsed.syntax().body);
         assert_eq!(imports, vec![pkg.join("heavy.py")]);
     }
 
@@ -2603,7 +2663,8 @@ def my_func():
         let source = "__lazy_modules__ = [\"nested\"]\n";
         let parsed = parse_module(source).expect("parse");
         let file = pkg.join("__init__.py");
-        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        let imports =
+            extract_local_imports(root, &[root.to_path_buf()], &file, &parsed.syntax().body);
         assert_eq!(imports, vec![nested.join("__init__.py")]);
     }
 
@@ -2620,7 +2681,8 @@ def my_func():
         let source = "__lazy_modules__ = [name, \"other\"]\n";
         let parsed = parse_module(source).expect("parse");
         let file = pkg.join("__init__.py");
-        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        let imports =
+            extract_local_imports(root, &[root.to_path_buf()], &file, &parsed.syntax().body);
         assert!(imports.is_empty());
     }
 
@@ -2636,7 +2698,8 @@ def my_func():
         let source = "__all__ = [\"heavy\"]\n";
         let parsed = parse_module(source).expect("parse");
         let file = pkg.join("__init__.py");
-        let imports = extract_local_imports(root, &file, &parsed.syntax().body);
+        let imports =
+            extract_local_imports(root, &[root.to_path_buf()], &file, &parsed.syntax().body);
         assert!(imports.is_empty());
     }
 
@@ -2647,7 +2710,7 @@ def test_fn():
     expect(x).to_equal(1).fatal()
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items[0].expected_assertions.len(), 1);
         let a = &items[0].expected_assertions[0];
         assert_eq!(a.subject, "x");
@@ -2663,7 +2726,7 @@ def test_fn():
     expect(x).not_.to_be_none().fatal()
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items[0].expected_assertions.len(), 1);
         let a = &items[0].expected_assertions[0];
         assert_eq!(a.subject, "x");
@@ -2677,7 +2740,7 @@ def test_fn():
     fn recognizes_test_skip_bare() {
         let source = "@test.skip\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].skip.as_deref(), Some(""));
     }
@@ -2686,7 +2749,7 @@ def test_fn():
     fn recognizes_test_skip_with_reason() {
         let source = "@test.skip(\"broken\")\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].skip.as_deref(), Some("broken"));
     }
@@ -2695,7 +2758,7 @@ def test_fn():
     fn recognizes_test_skip_reason_kwarg() {
         let source = "@test.skip(reason=\"broken\")\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items[0].skip.as_deref(), Some("broken"));
     }
 
@@ -2703,7 +2766,7 @@ def test_fn():
     fn recognizes_test_todo_bare() {
         let source = "@test.todo\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].todo.as_deref(), Some(""));
     }
@@ -2712,7 +2775,7 @@ def test_fn():
     fn recognizes_test_todo_with_description() {
         let source = "@test.todo(\"need caching\")\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items[0].todo.as_deref(), Some("need caching"));
     }
 
@@ -2720,7 +2783,7 @@ def test_fn():
     fn recognizes_test_xfail_bare() {
         let source = "@test.xfail\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].xfail.as_deref(), Some(""));
     }
@@ -2729,7 +2792,7 @@ def test_fn():
     fn recognizes_test_xfail_with_reason() {
         let source = "@test.xfail(\"upstream bug\")\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items[0].xfail.as_deref(), Some("upstream bug"));
     }
 
@@ -2737,7 +2800,7 @@ def test_fn():
     fn recognizes_qualified_test_skip() {
         let source = "import tryke\n@tryke.test.skip(\"broken\")\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].skip.as_deref(), Some("broken"));
     }
@@ -2746,7 +2809,7 @@ def test_fn():
     fn recognizes_test_skip_if() {
         let source = "@test.skip_if(True, reason=\"always\")\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         // skip_if cannot be resolved statically
         assert!(items[0].skip.is_none());
@@ -2756,7 +2819,7 @@ def test_fn():
     fn extracts_tags_from_test_decorator() {
         let source = "@test(tags=[\"slow\", \"network\"])\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].tags, vec!["slow", "network"]);
     }
@@ -2765,7 +2828,7 @@ def test_fn():
     fn extracts_tags_from_skip_decorator() {
         let source = "@test.skip(\"broken\", tags=[\"admin\"])\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].tags, vec!["admin"]);
         assert_eq!(items[0].skip.as_deref(), Some("broken"));
@@ -2775,7 +2838,7 @@ def test_fn():
     fn no_tags_by_default() {
         let source = "@test\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert!(items[0].tags.is_empty());
     }
 
@@ -2783,7 +2846,7 @@ def test_fn():
     fn plain_test_has_no_modifiers() {
         let source = "@test\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert!(items[0].skip.is_none());
         assert!(items[0].todo.is_none());
         assert!(items[0].xfail.is_none());
@@ -2800,7 +2863,7 @@ with describe(\"Math\"):
         expect(1 + 1).to_equal(2)
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "test_add");
         assert_eq!(items[0].groups, vec!["Math"]);
@@ -2820,7 +2883,7 @@ with describe(\"Math\"):
             pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].name, "test_add");
         assert_eq!(items[0].groups, vec!["Math", "addition"]);
@@ -2832,7 +2895,7 @@ with describe(\"Math\"):
     fn top_level_tests_have_empty_groups() {
         let source = "@test\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert!(items[0].groups.is_empty());
     }
 
@@ -2849,7 +2912,7 @@ def test_standalone():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].groups, vec!["Group"]);
         assert!(items[1].groups.is_empty());
@@ -2864,7 +2927,7 @@ with tryke.describe(\"Suite\"):
         pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].groups, vec!["Suite"]);
     }
@@ -2878,7 +2941,7 @@ with describe(\"Group\"):
         expect(1).to_equal(2)
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].groups, vec!["Group"]);
         assert_eq!(items[0].skip.as_deref(), Some("broken"));
@@ -2968,7 +3031,7 @@ def add(a, b):
     return a + b
 "#;
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "add");
         assert_eq!(items[0].doctest_object, Some("add".to_string()));
@@ -3000,7 +3063,7 @@ class Calc:
         self.value += n
 "#;
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].doctest_object, Some("Calc".to_string()));
         assert_eq!(items[1].doctest_object, Some("Calc.add".to_string()));
@@ -3019,7 +3082,7 @@ def helper():
     pass
 "#;
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "__module__");
         assert_eq!(items[0].doctest_object, Some(String::new()));
@@ -3033,7 +3096,7 @@ def foo():
     pass
 "#;
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert!(items.is_empty());
     }
 
@@ -3055,7 +3118,7 @@ def test_add():
     expect(add(1, 2)).to_equal(3)
 "#;
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 2);
         // Decorated test comes first (collect_tests_from_body runs first)
         assert_eq!(items[0].name, "test_add");
@@ -3071,7 +3134,8 @@ def test_add():
     fn discovers_bare_fixture_at_module_level() {
         let source = "@fixture\ndef setup():\n    pass\n\n@test\ndef test_fn():\n    pass\n";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         assert_eq!(parsed.hooks.len(), 1);
         assert_eq!(parsed.hooks[0].name, "setup");
         assert_eq!(parsed.hooks[0].per, FixturePer::Test);
@@ -3082,7 +3146,8 @@ def test_add():
     fn discovers_scope_fixture_via_kwarg() {
         let source = "@fixture(per=\"scope\")\ndef db(): pass\n";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         assert_eq!(parsed.hooks.len(), 1);
         assert_eq!(parsed.hooks[0].per, FixturePer::Scope);
     }
@@ -3091,7 +3156,8 @@ def test_add():
     fn discovers_test_fixture_via_explicit_kwarg() {
         let source = "@fixture(per=\"test\")\ndef setup(): pass\n";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         assert_eq!(parsed.hooks[0].per, FixturePer::Test);
     }
 
@@ -3099,7 +3165,8 @@ def test_add():
     fn discovers_call_form_fixture_without_kwargs() {
         let source = "@fixture()\ndef setup(): pass\n";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         assert_eq!(parsed.hooks.len(), 1);
         assert_eq!(parsed.hooks[0].per, FixturePer::Test);
     }
@@ -3108,7 +3175,8 @@ def test_add():
     fn discovers_fixture_inside_describe_block() {
         let source = "with describe(\"users\"):\n    @fixture\n    def seed(): pass\n    @test\n    def test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         assert_eq!(parsed.hooks.len(), 1);
         assert_eq!(parsed.hooks[0].name, "seed");
         assert_eq!(parsed.hooks[0].groups, vec!["users"]);
@@ -3118,7 +3186,8 @@ def test_add():
     fn discovers_qualified_tryke_fixture() {
         let source = "import tryke\n@tryke.fixture(per=\"scope\")\ndef db(): pass\n";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         assert_eq!(parsed.hooks.len(), 1);
         assert_eq!(parsed.hooks[0].per, FixturePer::Scope);
     }
@@ -3129,7 +3198,8 @@ def test_add():
 @fixture(per=\"scope\")\ndef db(): pass\n\
 @fixture\ndef table(conn=Depends(db)): pass\n";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         assert_eq!(parsed.hooks.len(), 2);
         let table_hook = parsed
             .hooks
@@ -3151,7 +3221,8 @@ def test_add():
 @fixture(per=\"scope\")\ndef cache(): pass\n\
 @fixture\ndef svc(d=Depends(db), c=Depends(cache)): pass\n";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         let svc = parsed
             .hooks
             .iter()
@@ -3169,7 +3240,8 @@ def test_add():
     fn fixture_without_depends_has_empty_depends_on() {
         let source = "@fixture\ndef setup(): pass\n";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         assert!(parsed.hooks[0].depends_on.is_empty());
         assert!(parsed.errors.is_empty());
     }
@@ -3179,7 +3251,8 @@ def test_add():
         let source = "\
 @fixture\ndef svc(x=Depends(mod.fn)): pass\n";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         assert_eq!(parsed.hooks.len(), 1);
         assert!(parsed.hooks[0].depends_on.is_empty());
         assert_eq!(
@@ -3202,7 +3275,8 @@ def test_add():
         let source = "\
 @fixture\ndef svc(x=Depends()): pass\n";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         assert_eq!(parsed.hooks.len(), 1);
         assert!(parsed.hooks[0].depends_on.is_empty());
         assert_eq!(parsed.errors.len(), 1);
@@ -3218,7 +3292,8 @@ def test_add():
         let source = "\
 @fixture\ndef svc(x=Depends(factory())): pass\n";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         assert_eq!(parsed.hooks.len(), 1);
         assert!(parsed.hooks[0].depends_on.is_empty());
         assert_eq!(parsed.errors.len(), 1);
@@ -3231,7 +3306,8 @@ def test_add():
 @fixture(per=\"scope\")\ndef db(): pass\n\
 @fixture\ndef svc(a=Depends(db), b=Depends(unsupported.thing)): pass\n";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         let svc = parsed
             .hooks
             .iter()
@@ -3248,7 +3324,8 @@ def test_add():
 @fixture\ndef setup(): pass\n\
 @test\ndef test_fn(): pass\n";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         assert_eq!(parsed.tests.len(), 1);
         assert_eq!(parsed.hooks.len(), 1);
     }
@@ -3259,7 +3336,8 @@ def test_add():
 def fixture(fn):\n    return fn\n\
 @fixture\ndef setup(): pass\n";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         assert!(parsed.hooks.is_empty());
     }
 
@@ -3267,7 +3345,8 @@ def fixture(fn):\n    return fn\n\
     fn fixture_has_line_number() {
         let source = "\n\n@fixture\ndef setup(): pass\n";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         assert_eq!(parsed.hooks[0].line_number, Some(3));
     }
 
@@ -3287,7 +3366,8 @@ if __TRYKE_TESTING__:
         pass
 ";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         let names: Vec<&str> = parsed.tests.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec!["guarded"]);
     }
@@ -3304,7 +3384,8 @@ if tryke_guard.__TRYKE_TESTING__:
         pass
 ";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         let names: Vec<&str> = parsed.tests.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec!["guarded"]);
     }
@@ -3320,7 +3401,8 @@ if CONFIG_FLAG:
         pass
 ";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         assert!(parsed.tests.is_empty());
     }
 
@@ -3333,7 +3415,8 @@ if not __TRYKE_TESTING__:
         pass
 ";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         assert!(parsed.tests.is_empty());
     }
 
@@ -3348,7 +3431,8 @@ else:
     pass
 ";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         // Discovery must NOT pick up tests under a guard with else.
         assert!(parsed.tests.is_empty());
         // But it MUST record the line so a warning is surfaced.
@@ -3366,7 +3450,8 @@ elif OTHER_FLAG:
     pass
 ";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         assert!(parsed.tests.is_empty());
         assert_eq!(parsed.testing_guard_else_lines, vec![1]);
     }
@@ -3380,7 +3465,8 @@ if __TRYKE_TESTING__:
         pass
 ";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         assert!(parsed.testing_guard_else_lines.is_empty());
     }
 
@@ -3395,7 +3481,8 @@ else:
     pass
 ";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         assert!(parsed.testing_guard_else_lines.is_empty());
     }
 
@@ -3415,7 +3502,8 @@ if __TRYKE_TESTING__:
         pass
 ";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         let names: Vec<&str> = parsed.tests.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names.len(), 2);
         assert!(names.contains(&"guarded"));
@@ -3432,7 +3520,8 @@ if __TRYKE_TESTING__:
         yield \"conn\"
 ";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         let names: Vec<&str> = parsed.hooks.iter().map(|h| h.name.as_str()).collect();
         assert_eq!(names, vec!["db"]);
     }
@@ -3450,7 +3539,8 @@ if __TRYKE_TESTING__:
         return a + b
 ";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         let doctests: Vec<&str> = parsed
             .tests
             .iter()
@@ -3572,7 +3662,8 @@ with describe(\"math\"):
             pass
 ";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_source(dir.path(), &file, source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
         assert_eq!(parsed.tests.len(), 1);
         assert_eq!(parsed.tests[0].name, "addition");
         assert_eq!(parsed.tests[0].groups, vec!["math".to_string()]);
@@ -3588,7 +3679,7 @@ with t.describe(\"Channel\"):
         pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "test_basic");
         assert_eq!(items[0].groups, vec!["Channel".to_string()]);
@@ -3603,7 +3694,7 @@ def db():
     pass
 ";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_file(dir.path(), &file);
+        let parsed = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file);
         assert_eq!(parsed.hooks.len(), 1);
         assert_eq!(parsed.hooks[0].name, "db");
     }
@@ -3617,7 +3708,7 @@ def fn():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 2);
         let labels: Vec<_> = items
             .iter()
@@ -3638,7 +3729,7 @@ def fn(n):
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 2);
         let labels: Vec<_> = items
             .iter()
@@ -3657,7 +3748,7 @@ with d(\"Group\"):
         pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "fn");
         assert_eq!(items[0].groups, vec!["Group".to_string()]);
@@ -3672,7 +3763,7 @@ def fn():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].skip.as_deref(), Some("broken"));
     }
@@ -3693,7 +3784,7 @@ if __TRYKE_TESTING__:
             pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "test_basic");
         assert_eq!(items[0].groups, vec!["Channel".to_string()]);
@@ -3714,7 +3805,7 @@ def fn():
     pass
 ";
         let (dir, file) = write_source(source);
-        let items = parse_tests_from_file(dir.path(), &file).tests;
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert!(items.is_empty(), "expected shadowed alias to not match");
     }
 
@@ -3731,7 +3822,7 @@ def child(p=Dep(parent)):
     pass
 ";
         let (dir, file) = write_source(source);
-        let parsed = parse_tests_from_file(dir.path(), &file);
+        let parsed = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file);
         let child = parsed
             .hooks
             .iter()

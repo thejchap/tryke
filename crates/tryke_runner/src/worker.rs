@@ -253,9 +253,8 @@ fn spawn_stderr_drainer(
     stderr: tokio::process::ChildStderr,
     buf: Arc<Mutex<Vec<u8>>>,
 ) -> Result<()> {
-    let handle = tokio::runtime::Handle::try_current().map_err(|e| {
-        anyhow!("WorkerProcess::spawn requires an active tokio runtime: {e}")
-    })?;
+    let handle = tokio::runtime::Handle::try_current()
+        .map_err(|e| anyhow!("WorkerProcess::spawn requires an active tokio runtime: {e}"))?;
     handle.spawn(async move {
         let mut reader = stderr;
         let mut chunk = [0u8; 8192];

@@ -1,7 +1,7 @@
 [project]
 name = "tryke"
 dynamic = ["version"]
-description = "tryke — python testing tool"
+description = "Tryke - A Python testing tool"
 readme = "README.md"
 authors = [{ name = "Justin Chapman", email = "commonmodestudio@gmail.com" }]
 requires-python = ">=3.12"

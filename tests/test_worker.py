@@ -20,8 +20,6 @@ from tryke.worker import (
     _make_assertion_wire,
 )
 
-# -- Helpers ------------------------------------------------------------------
-
 
 def _rpc(method: str, id_: int = 1, **params: object) -> dict:
     """Build a JSON-RPC request dict."""
@@ -72,16 +70,13 @@ def _run_test_fn(
     return resp["result"]
 
 
-# -- JSON-RPC envelope -------------------------------------------------------
-
-
 with describe("json-rpc envelope"):
 
     @test(name="ping returns pong")
     def test_ping() -> None:
         resp = _send(_rpc("ping"))
-        expect(resp["result"]).to_equal("pong")
-        expect(resp["id"]).to_equal(1)
+        expect(resp["result"], "ping result is pong").to_equal("pong")
+        expect(resp["id"], "response echoes request id").to_equal(1)
 
     @test(name="malformed JSON returns parse error")
     def test_malformed_json() -> None:
@@ -89,7 +84,7 @@ with describe("json-rpc envelope"):
         output_buf = io.StringIO()
         Worker(input_buf, output_buf).run()
         resp = json.loads(output_buf.getvalue().strip())
-        expect(resp["error"]["code"]).to_equal(-32700)
+        expect(resp["error"]["code"], "parse error code").to_equal(-32700)
 
     @test(name="empty lines are skipped")
     def test_empty_lines() -> None:
@@ -98,21 +93,23 @@ with describe("json-rpc envelope"):
         output_buf = io.StringIO()
         Worker(input_buf, output_buf).run()
         lines = [ln for ln in output_buf.getvalue().split("\n") if ln.strip()]
-        expect(lines).to_have_length(1)
+        expect(lines, "single response despite blank lines").to_have_length(1)
 
     @test(name="unknown method returns internal error")
     def test_unknown_method() -> None:
         resp = _send(_rpc("bogus"))
-        expect(resp["error"]["code"]).to_equal(-32603)
-        expect(resp["error"]["message"]).to_contain(
+        expect(resp["error"]["code"], "internal error code").to_equal(-32603)
+        expect(resp["error"]["message"], "error mentions unknown method").to_contain(
             "unknown method",
         )
 
     @test(name="missing required param returns -32602")
     def test_missing_param() -> None:
         resp = _send(_rpc("run_test"))
-        expect(resp["error"]["code"]).to_equal(-32602)
-        expect(resp["error"]["message"]).to_contain(
+        expect(resp["error"]["code"], "invalid params code").to_equal(-32602)
+        expect(
+            resp["error"]["message"], "error names the missing parameter"
+        ).to_contain(
             "requires parameter",
         )
 
@@ -125,13 +122,10 @@ with describe("json-rpc envelope"):
             "params": {"module": 123, "function": "f"},
         }
         resp = _send(req)
-        expect(resp["error"]["code"]).to_equal(-32602)
-        expect(resp["error"]["message"]).to_contain(
+        expect(resp["error"]["code"], "invalid params code").to_equal(-32602)
+        expect(resp["error"]["message"], "error explains type requirement").to_contain(
             "must be a string",
         )
-
-
-# -- run_test outcomes --------------------------------------------------------
 
 
 with describe("run_test outcomes"):
@@ -142,8 +136,10 @@ with describe("run_test outcomes"):
             pass
 
         result = _run_test_fn(fn)
-        expect(result["outcome"]).to_equal("passed")
-        expect(result["duration_ms"]).to_be_greater_than_or_equal(
+        expect(result["outcome"], "test passed").to_equal("passed")
+        expect(
+            result["duration_ms"], "duration is non-negative"
+        ).to_be_greater_than_or_equal(
             0,
         )
 
@@ -158,21 +154,25 @@ with describe("run_test outcomes"):
             )
 
         result = _run_test_fn(fn)
-        expect(result["outcome"]).to_equal("failed")
-        expect(result["message"]).to_contain("bad")
-        expect(len(result["assertions"])).to_be_greater_than(0)
+        expect(result["outcome"], "expectation error fails the test").to_equal("failed")
+        expect(result["message"], "failure message includes the error text").to_contain(
+            "bad"
+        )
+        expect(
+            len(result["assertions"]), "assertion details are reported"
+        ).to_be_greater_than(0)
 
     @test(name="soft assertion failures are collected")
     def test_soft_failures() -> None:
         def fn() -> None:
             # These run inside the worker's soft-assertion context,
             # so they collect failures instead of raising.
-            expect(1).to_equal(2)
-            expect(3).to_equal(4)
+            expect(1, "first soft failure").to_equal(2)
+            expect(3, "second soft failure").to_equal(4)
 
         result = _run_test_fn(fn)
-        expect(result["outcome"]).to_equal("failed")
-        expect(result["assertions"]).to_have_length(2)
+        expect(result["outcome"], "soft failures fail the test").to_equal("failed")
+        expect(result["assertions"], "both soft failures collected").to_have_length(2)
 
     @test(name="general exception")
     def test_general_exception() -> None:
@@ -181,9 +181,13 @@ with describe("run_test outcomes"):
             raise RuntimeError(msg)
 
         result = _run_test_fn(fn)
-        expect(result["outcome"]).to_equal("failed")
-        expect(result["message"]).to_contain("RuntimeError")
-        expect(result["message"]).to_contain("boom")
+        expect(result["outcome"], "general exception fails the test").to_equal("failed")
+        expect(result["message"], "message names the exception type").to_contain(
+            "RuntimeError"
+        )
+        expect(result["message"], "message includes the exception text").to_contain(
+            "boom"
+        )
 
     @test(name="AssertionError (non-ExpectationError)")
     def test_plain_assertion_error() -> None:
@@ -192,8 +196,12 @@ with describe("run_test outcomes"):
             raise AssertionError(msg)
 
         result = _run_test_fn(fn)
-        expect(result["outcome"]).to_equal("failed")
-        expect(result["message"]).to_contain("plain assert")
+        expect(result["outcome"], "plain AssertionError fails the test").to_equal(
+            "failed"
+        )
+        expect(result["message"], "message includes the assertion text").to_contain(
+            "plain assert"
+        )
 
     @test(name="skipped marker")
     def test_skip_marker() -> None:
@@ -202,8 +210,10 @@ with describe("run_test outcomes"):
 
         fn.__dict__["__tryke_skip__"] = "not ready"
         result = _run_test_fn(fn)
-        expect(result["outcome"]).to_equal("skipped")
-        expect(result["reason"]).to_equal("not ready")
+        expect(result["outcome"], "skip marker yields skipped outcome").to_equal(
+            "skipped"
+        )
+        expect(result["reason"], "skip reason is preserved").to_equal("not ready")
 
     @test(name="todo marker")
     def test_todo_marker() -> None:
@@ -212,8 +222,10 @@ with describe("run_test outcomes"):
 
         fn.__dict__["__tryke_todo__"] = "implement later"
         result = _run_test_fn(fn)
-        expect(result["outcome"]).to_equal("todo")
-        expect(result["description"]).to_equal("implement later")
+        expect(result["outcome"], "todo marker yields todo outcome").to_equal("todo")
+        expect(result["description"], "todo description is preserved").to_equal(
+            "implement later"
+        )
 
     @test(name="xfail that fails returns xfailed")
     def test_xfail_fails() -> None:
@@ -222,8 +234,10 @@ with describe("run_test outcomes"):
             raise ValueError(msg)
 
         result = _run_test_fn(fn, xfail="known bug")
-        expect(result["outcome"]).to_equal("xfailed")
-        expect(result["reason"]).to_equal("known bug")
+        expect(result["outcome"], "expected failure reports xfailed").to_equal(
+            "xfailed"
+        )
+        expect(result["reason"], "xfail reason is preserved").to_equal("known bug")
 
     @test(name="xfail that passes returns xpassed")
     def test_xfail_passes() -> None:
@@ -231,7 +245,7 @@ with describe("run_test outcomes"):
             pass
 
         result = _run_test_fn(fn, xfail="should fail")
-        expect(result["outcome"]).to_equal("xpassed")
+        expect(result["outcome"], "unexpected pass reports xpassed").to_equal("xpassed")
 
     @test(name="xfail via marker attribute")
     def test_xfail_marker() -> None:
@@ -241,8 +255,12 @@ with describe("run_test outcomes"):
 
         fn.__dict__["__tryke_xfail__"] = "marker reason"
         result = _run_test_fn(fn)
-        expect(result["outcome"]).to_equal("xfailed")
-        expect(result["reason"]).to_equal("marker reason")
+        expect(result["outcome"], "xfail marker yields xfailed outcome").to_equal(
+            "xfailed"
+        )
+        expect(result["reason"], "xfail marker reason is preserved").to_equal(
+            "marker reason"
+        )
 
     @test(name="unittest.SkipTest returns skipped")
     def test_unittest_skip() -> None:
@@ -251,8 +269,12 @@ with describe("run_test outcomes"):
             raise unittest.SkipTest(msg)
 
         result = _run_test_fn(fn)
-        expect(result["outcome"]).to_equal("skipped")
-        expect(result["reason"]).to_equal("conditional")
+        expect(result["outcome"], "unittest.SkipTest yields skipped outcome").to_equal(
+            "skipped"
+        )
+        expect(result["reason"], "skip reason from SkipTest is preserved").to_equal(
+            "conditional"
+        )
 
     @test(name="async test executes correctly")
     def test_async_test() -> None:
@@ -260,7 +282,7 @@ with describe("run_test outcomes"):
             await asyncio.sleep(0)
 
         result = _run_test_fn(fn)
-        expect(result["outcome"]).to_equal("passed")
+        expect(result["outcome"], "async test passes").to_equal("passed")
 
     @test(name="stdout and stderr are captured")
     def test_output_capture() -> None:
@@ -269,8 +291,12 @@ with describe("run_test outcomes"):
             print("hello stderr", file=sys.stderr)  # noqa: T201
 
         result = _run_test_fn(fn)
-        expect(result["stdout"]).to_contain("hello stdout")
-        expect(result["stderr"]).to_contain("hello stderr")
+        expect(result["stdout"], "captured stdout includes printed text").to_contain(
+            "hello stdout"
+        )
+        expect(result["stderr"], "captured stderr includes printed text").to_contain(
+            "hello stderr"
+        )
 
     @test(name="import error returns failed with traceback")
     def test_import_error() -> None:
@@ -282,13 +308,17 @@ with describe("run_test outcomes"):
             ),
         )
         # Should be a successful RPC response (result, not error)
-        expect("result" in resp).to_be_truthy()
-        expect("error" in resp).to_be_falsy()
+        expect("result" in resp, "response carries a result").to_be_truthy()
+        expect("error" in resp, "response carries no error").to_be_falsy()
         result = resp["result"]
-        expect(result["outcome"]).to_equal("failed")
-        expect(result["message"]).to_contain("ModuleNotFoundError")
-        expect(result["traceback"]).to_be_truthy()
-        expect(result["traceback"]).to_contain("ModuleNotFoundError")
+        expect(result["outcome"], "import error fails the test").to_equal("failed")
+        expect(result["message"], "message names ModuleNotFoundError").to_contain(
+            "ModuleNotFoundError"
+        )
+        expect(result["traceback"], "traceback is populated").to_be_truthy()
+        expect(result["traceback"], "traceback names ModuleNotFoundError").to_contain(
+            "ModuleNotFoundError"
+        )
 
     @test(name="attribute error returns failed with traceback")
     def test_attribute_error() -> None:
@@ -305,11 +335,13 @@ with describe("run_test outcomes"):
         worker._modules["_tw_attr"] = mod  # noqa: SLF001
         worker.run()
         resp = json.loads(output_buf.getvalue().strip())
-        expect("result" in resp).to_be_truthy()
+        expect("result" in resp, "response carries a result").to_be_truthy()
         result = resp["result"]
-        expect(result["outcome"]).to_equal("failed")
-        expect(result["message"]).to_contain("AttributeError")
-        expect(result["traceback"]).to_be_truthy()
+        expect(result["outcome"], "missing function fails the test").to_equal("failed")
+        expect(result["message"], "message names AttributeError").to_contain(
+            "AttributeError"
+        )
+        expect(result["traceback"], "traceback is populated").to_be_truthy()
 
     @test(name="fd 1 writes during import don't corrupt the channel")
     def test_fd1_import_noise() -> None:
@@ -339,14 +371,15 @@ with describe("run_test outcomes"):
                 sys.path.remove(tmpdir)
                 sys.modules.pop("_tw_fd1_fail", None)
 
-        expect("result" in resp).to_be_truthy()
+        expect("result" in resp, "fd 1 noise didn't corrupt the channel").to_be_truthy()
         result = resp["result"]
-        expect(result["outcome"]).to_equal("failed")
-        expect(result["message"]).to_contain("OSError")
-        expect(result["message"]).to_contain("cannot load library libfoo")
-
-
-# -- run_doctest --------------------------------------------------------------
+        expect(result["outcome"], "import-time OSError fails the test").to_equal(
+            "failed"
+        )
+        expect(result["message"], "message names OSError").to_contain("OSError")
+        expect(result["message"], "message includes the OS error text").to_contain(
+            "cannot load library libfoo"
+        )
 
 
 def _add(a: int, b: int) -> int:
@@ -387,7 +420,7 @@ with describe("run_doctest"):
     @test(name="passing doctest")
     def test_doctest_pass() -> None:
         result = _run_doctest_fn(_add)
-        expect(result["outcome"]).to_equal("passed")
+        expect(result["outcome"], "doctest passes").to_equal("passed")
 
     @test(name="failing doctest")
     def test_doctest_fail() -> None:
@@ -405,7 +438,7 @@ with describe("run_doctest"):
         bad.__doc__ = ">>> bad()\n99\n"
         globs["bad"] = bad
         result = _run_doctest_fn(bad, fn_name="bad")
-        expect(result["outcome"]).to_equal("failed")
+        expect(result["outcome"], "wrong doctest output fails").to_equal("failed")
 
     @test(name="failing doctest does not leak summarize output to stdout")
     def test_doctest_fail_no_stdout_leak() -> None:
@@ -450,9 +483,11 @@ with describe("run_doctest"):
 
         raw = output_buf.getvalue()
         lines = [line for line in raw.splitlines() if line.strip()]
-        expect(len(lines)).to_equal(1)
+        expect(len(lines), "summarize did not leak extra lines").to_equal(1)
         resp = json.loads(lines[0])
-        expect(resp["result"]["outcome"]).to_equal("failed")
+        expect(resp["result"]["outcome"], "doctest still reports failed").to_equal(
+            "failed"
+        )
 
     @test(name="import error in doctest returns failed with traceback")
     def test_doctest_import_error() -> None:
@@ -463,12 +498,16 @@ with describe("run_doctest"):
                 object_path="Foo",
             ),
         )
-        expect("result" in resp).to_be_truthy()
-        expect("error" in resp).to_be_falsy()
+        expect("result" in resp, "response carries a result").to_be_truthy()
+        expect("error" in resp, "response carries no error").to_be_falsy()
         result = resp["result"]
-        expect(result["outcome"]).to_equal("failed")
-        expect(result["message"]).to_contain("ModuleNotFoundError")
-        expect(result["traceback"]).to_be_truthy()
+        expect(result["outcome"], "doctest import error fails the test").to_equal(
+            "failed"
+        )
+        expect(result["message"], "message names ModuleNotFoundError").to_contain(
+            "ModuleNotFoundError"
+        )
+        expect(result["traceback"], "traceback is populated").to_be_truthy()
 
     @test(name="attribute error in doctest returns failed with traceback")
     def test_doctest_attribute_error() -> None:
@@ -484,14 +523,15 @@ with describe("run_doctest"):
         worker._modules["_tw_dt_attr"] = mod  # noqa: SLF001
         worker.run()
         resp = json.loads(output_buf.getvalue().strip())
-        expect("result" in resp).to_be_truthy()
+        expect("result" in resp, "response carries a result").to_be_truthy()
         result = resp["result"]
-        expect(result["outcome"]).to_equal("failed")
-        expect(result["message"]).to_contain("AttributeError")
-        expect(result["traceback"]).to_be_truthy()
-
-
-# -- Assertion helpers --------------------------------------------------------
+        expect(result["outcome"], "missing doctest target fails the test").to_equal(
+            "failed"
+        )
+        expect(result["message"], "message names AttributeError").to_contain(
+            "AttributeError"
+        )
+        expect(result["traceback"], "traceback is populated").to_be_truthy()
 
 
 with describe("assertion helpers"):
@@ -511,13 +551,13 @@ with describe("assertion helpers"):
             received="2",
             frame=frame,
         )
-        expect(wire["expression"]).to_equal(
+        expect(wire["expression"], "wire carries the source expression").to_equal(
             "expect(x).to_equal(y)",
         )
-        expect(wire["expected"]).to_equal("1")
-        expect(wire["received"]).to_equal("2")
-        expect(wire["line"]).to_equal(42)
-        expect(wire["file"]).to_equal("test.py")
+        expect(wire["expected"], "wire carries the expected value").to_equal("1")
+        expect(wire["received"], "wire carries the received value").to_equal("2")
+        expect(wire["line"], "wire carries the frame line number").to_equal(42)
+        expect(wire["file"], "wire carries the frame filename").to_equal("test.py")
 
     @test(name="make_assertion_wire without frame omits location")
     def test_wire_no_frame() -> None:
@@ -526,9 +566,9 @@ with describe("assertion helpers"):
             expected="a",
             received="b",
         )
-        expect(wire["expected"]).to_equal("a")
-        expect("line" in wire).to_be_falsy()
-        expect("file" in wire).to_be_falsy()
+        expect(wire["expected"], "wire still carries expected value").to_equal("a")
+        expect("line" in wire, "no line key without a frame").to_be_falsy()
+        expect("file" in wire, "no file key without a frame").to_be_falsy()
 
     @test(name="extract_soft_failures with frame")
     def test_extract_with_frame() -> None:
@@ -547,10 +587,10 @@ with describe("assertion helpers"):
         result = _extract_soft_failures(
             [SoftFailure(err, frame)],
         )
-        expect(result).to_have_length(1)
-        expect(result[0]["expected"]).to_equal("1")
-        expect(result[0]["line"]).to_equal(10)
-        expect(result[0]["expression"]).to_equal(
+        expect(result, "one extracted failure").to_have_length(1)
+        expect(result[0]["expected"], "expected value extracted").to_equal("1")
+        expect(result[0]["line"], "line number extracted from frame").to_equal(10)
+        expect(result[0]["expression"], "expression extracted from frame").to_equal(
             "expect(1).to_equal(2)",
         )
 
@@ -564,10 +604,10 @@ with describe("assertion helpers"):
         result = _extract_soft_failures(
             [SoftFailure(err, None)],
         )
-        expect(result).to_have_length(1)
-        expect(result[0]["expression"]).to_equal("")
-        expect("line" in result[0]).to_be_falsy()
-        expect("file" in result[0]).to_be_falsy()
+        expect(result, "one extracted failure").to_have_length(1)
+        expect(result[0]["expression"], "expression empty without a frame").to_equal("")
+        expect("line" in result[0], "no line key without a frame").to_be_falsy()
+        expect("file" in result[0], "no file key without a frame").to_be_falsy()
 
     @test(name="is_user_frame identifies user frames")
     def test_user_frame() -> None:
@@ -577,7 +617,9 @@ with describe("assertion helpers"):
             "fn",
             lookup_line=False,
         )
-        expect(_is_user_frame(frame)).to_be_truthy()
+        expect(
+            _is_user_frame(frame), "user file recognized as user frame"
+        ).to_be_truthy()
 
     @test(name="is_user_frame excludes tryke frames")
     def test_tryke_frame() -> None:
@@ -587,4 +629,4 @@ with describe("assertion helpers"):
             "fn",
             lookup_line=False,
         )
-        expect(_is_user_frame(frame)).to_be_falsy()
+        expect(_is_user_frame(frame), "tryke internal frame is excluded").to_be_falsy()

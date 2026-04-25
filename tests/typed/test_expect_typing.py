@@ -46,15 +46,15 @@ with describe("to_be_instance_of typing"):
 
     @test(name="single-class form accepts exact type")
     def single_class_exact() -> None:
-        expect(42).to_be_instance_of(int)
-        expect("hi").to_be_instance_of(str)
+        expect(42, "42 is int").to_be_instance_of(int)
+        expect("hi", "'hi' is str").to_be_instance_of(str)
 
     @test(name="single-class form accepts covariant downcast")
     def single_class_downcast() -> None:
         value: _Base = _Derived()
-        expect(value).to_be_instance_of(_Derived)
+        expect(value, "Base value is a Derived at runtime").to_be_instance_of(_Derived)
 
     @test(name="tuple form accepts unrelated types")
     def tuple_any_of() -> None:
-        expect("hi").to_be_instance_of((bytes, str))
-        expect(b"x").to_be_instance_of((bytes, str))
+        expect("hi", "str matches (bytes, str)").to_be_instance_of((bytes, str))
+        expect(b"x", "bytes matches (bytes, str)").to_be_instance_of((bytes, str))

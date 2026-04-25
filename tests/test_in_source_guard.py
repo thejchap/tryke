@@ -22,7 +22,7 @@ with describe("tryke_guard"):
 
     @test
     def worker_sees_testing_true() -> None:
-        expect(__TRYKE_TESTING__).to_be_truthy()
+        expect(__TRYKE_TESTING__, "testing flag is true in worker").to_be_truthy()
 
     if __TRYKE_TESTING__:
         # This block only executes when running under tryke. Its sole purpose
@@ -31,7 +31,7 @@ with describe("tryke_guard"):
         # round-trip is healthy.
         @test
         def test_inside_guard_runs() -> None:
-            expect(1 + 1).to_equal(2)
+            expect(1 + 1, "guarded test body runs").to_equal(2)
 
     @test
     def subprocess_defaults_to_production_mode() -> None:
@@ -43,7 +43,7 @@ with describe("tryke_guard"):
             ],
             text=True,
         ).strip()
-        expect(out).to_equal("False")
+        expect(out, "subprocess sees testing flag false by default").to_equal("False")
 
     @test
     def subprocess_opts_in_with_env_var() -> None:
@@ -56,4 +56,4 @@ with describe("tryke_guard"):
             text=True,
             env={**os.environ, "TRYKE_TESTING": "1"},
         ).strip()
-        expect(out).to_equal("True")
+        expect(out, "subprocess with TRYKE_TESTING=1 sees true").to_equal("True")

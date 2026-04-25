@@ -44,7 +44,7 @@ from tryke import expect, test
     test.case("ten", n=10, expected=100),
 )
 def square(n: int, expected: int) -> None:
-    expect(n * n).to_equal(expected)
+    expect(n * n, "n squared matches expected").to_equal(expected)
 
 
 @test.cases(
@@ -52,4 +52,4 @@ def square(n: int, expected: int) -> None:
     test.case("2 + 3", name="world", upper="WORLD"),
 )
 def upper(name: str, upper: str) -> None:
-    expect(name.upper()).to_equal(upper)
+    expect(name.upper(), "uppercased name matches").to_equal(upper)

@@ -218,6 +218,21 @@ def finds_user(table: Table = Depends(fresh_table)):
 
 `Depends()` is typed — type checkers see `Depends(db)` as returning `Connection`. At runtime, the framework resolves the dependency chain and passes the values as keyword arguments.
 
+You can also place `Depends()` inside an `Annotated[...]` type, FastAPI-style. The two forms are equivalent — pick whichever reads better:
+
+```python
+from typing import Annotated
+
+from tryke import fixture, test, expect, Depends
+
+@test
+def finds_user(table: Annotated[Table, Depends(fresh_table)]):
+    table.insert({"name": "alice"})
+    expect(table.count()).to_equal(1)
+```
+
+If a parameter has both a default-form and an `Annotated`-form `Depends()` (an unusual pattern), the default-form wins.
+
 ### `per="scope"` — run once, reuse across tests
 
 `@fixture(per="scope")` fixtures run once for their lexical scope. The return value is cached and shared across all tests in that scope:

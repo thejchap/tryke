@@ -542,7 +542,8 @@ fn is_tryke_fixture_decorator(
     }
 }
 
-/// Extract function names from `Depends(name)` calls in parameter defaults.
+/// Extract function names from `Depends(name)` calls in parameter
+/// defaults *or* `Annotated[..., Depends(name), ...]` annotations.
 ///
 /// Malformed `Depends(...)` forms (attribute access, calls, no argument)
 /// push a human-readable diagnostic into `errors` rather than being
@@ -559,23 +560,23 @@ fn extract_depends_from_params(
 ) -> Vec<String> {
     let mut deps = Vec::new();
     for param in func.parameters.iter_non_variadic_params() {
-        let Some(default) = &param.default else {
-            continue;
-        };
-        let Expr::Call(call) = default.as_ref() else {
-            continue;
-        };
-        let is_depends = match call.func.as_ref() {
-            Expr::Name(n) => is_bare_tryke_symbol(n.id.as_str(), "Depends", top_body, aliases),
-            Expr::Attribute(a) => {
-                a.attr.id.as_str() == "Depends"
-                    && matches!(&*a.value, Expr::Name(n) if aliases.is_module(n.id.as_str()))
-            }
-            _ => false,
-        };
-        if !is_depends {
-            continue;
-        }
+        // Default-value form takes precedence over the Annotated form,
+        // matching the runtime resolver's behaviour.
+        let call = param
+            .default
+            .as_deref()
+            .and_then(|d| match d {
+                Expr::Call(c) if is_depends_call(&c.func, top_body, aliases) => Some(c),
+                _ => None,
+            })
+            .or_else(|| {
+                param
+                    .parameter
+                    .annotation
+                    .as_deref()
+                    .and_then(|a| find_depends_in_annotated(a, top_body, aliases))
+            });
+        let Some(call) = call else { continue };
         let line = u32::try_from(line_index.line_index(call.range.start()).get()).unwrap_or(0);
         let display_file = file.strip_prefix(root).unwrap_or(file).display();
         let param_name = param.parameter.name.id.as_str();
@@ -604,6 +605,65 @@ fn extract_depends_from_params(
         }
     }
     deps
+}
+
+/// Is `func` a reference to tryke's `Depends`? Recognises both bare
+/// (`Depends(...)`) and qualified (`tryke.Depends(...)`) forms,
+/// honouring import aliases tracked in `TrykeAliases`.
+fn is_depends_call(func: &Expr, top_body: &[Stmt], aliases: &TrykeAliases) -> bool {
+    match func {
+        Expr::Name(n) => is_bare_tryke_symbol(n.id.as_str(), "Depends", top_body, aliases),
+        Expr::Attribute(a) => {
+            a.attr.id.as_str() == "Depends"
+                && matches!(&*a.value, Expr::Name(n) if aliases.is_module(n.id.as_str()))
+        }
+        _ => false,
+    }
+}
+
+/// If `annotation` is `Annotated[T, ..., Depends(name), ...]`, return
+/// the `Depends(...)` call expression. The actual type sits in the
+/// first slice element; metadata follows. We accept the bare
+/// `Annotated` name plus `typing.Annotated` / `typing_extensions.Annotated`
+/// without tracking imports — Annotated has no other meaning in tryke
+/// fixtures, and being permissive here matches `FastAPI`'s behaviour.
+fn find_depends_in_annotated<'a>(
+    annotation: &'a Expr,
+    top_body: &[Stmt],
+    aliases: &TrykeAliases,
+) -> Option<&'a ruff_python_ast::ExprCall> {
+    let Expr::Subscript(sub) = annotation else {
+        return None;
+    };
+    if !is_annotated_marker(&sub.value) {
+        return None;
+    }
+    let elements: &[Expr] = match sub.slice.as_ref() {
+        Expr::Tuple(t) => &t.elts,
+        single => std::slice::from_ref(single),
+    };
+    // Skip the first element (the actual type); only metadata args can
+    // carry a Depends() marker.
+    elements.iter().skip(1).find_map(|meta| match meta {
+        Expr::Call(call) if is_depends_call(&call.func, top_body, aliases) => Some(call),
+        _ => None,
+    })
+}
+
+/// Recognises `Annotated`, `typing.Annotated`, and
+/// `typing_extensions.Annotated` as the subscripted value.
+fn is_annotated_marker(expr: &Expr) -> bool {
+    match expr {
+        Expr::Name(n) => n.id.as_str() == "Annotated",
+        Expr::Attribute(a) => {
+            a.attr.id.as_str() == "Annotated"
+                && matches!(
+                    &*a.value,
+                    Expr::Name(n) if matches!(n.id.as_str(), "typing" | "typing_extensions"),
+                )
+        }
+        _ => false,
+    }
 }
 
 /// Short, human-readable label for an AST expression kind. Used in
@@ -3316,6 +3376,142 @@ def test_add():
         assert_eq!(svc.depends_on, vec!["db"]);
         assert_eq!(parsed.errors.len(), 1);
         assert!(parsed.errors[0].contains("Depends(attribute)"));
+    }
+
+    #[test]
+    fn extracts_depends_from_annotated_param() {
+        let source = "\
+from typing import Annotated\n\
+@fixture(per=\"scope\")\ndef db(): pass\n\
+@fixture\ndef table(conn: Annotated[str, Depends(db)]): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
+        let table = parsed
+            .hooks
+            .iter()
+            .find(|h| h.name == "table")
+            .expect("table fixture");
+        assert_eq!(table.depends_on, vec!["db"]);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    }
+
+    #[test]
+    fn extracts_depends_from_qualified_typing_annotated() {
+        let source = "\
+import typing\n\
+@fixture(per=\"scope\")\ndef db(): pass\n\
+@fixture\ndef table(conn: typing.Annotated[str, Depends(db)]): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
+        let table = parsed
+            .hooks
+            .iter()
+            .find(|h| h.name == "table")
+            .expect("table fixture");
+        assert_eq!(table.depends_on, vec!["db"]);
+    }
+
+    #[test]
+    fn annotated_with_extra_metadata_after_depends_still_extracts() {
+        let source = "\
+from typing import Annotated\n\
+@fixture(per=\"scope\")\ndef db(): pass\n\
+@fixture\ndef table(conn: Annotated[str, Depends(db), \"extra\"]): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
+        let table = parsed
+            .hooks
+            .iter()
+            .find(|h| h.name == "table")
+            .expect("table fixture");
+        assert_eq!(table.depends_on, vec!["db"]);
+    }
+
+    #[test]
+    fn annotated_with_metadata_before_depends_still_extracts() {
+        let source = "\
+from typing import Annotated\n\
+@fixture(per=\"scope\")\ndef db(): pass\n\
+@fixture\ndef table(conn: Annotated[str, \"first\", Depends(db)]): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
+        let table = parsed
+            .hooks
+            .iter()
+            .find(|h| h.name == "table")
+            .expect("table fixture");
+        assert_eq!(table.depends_on, vec!["db"]);
+    }
+
+    #[test]
+    fn annotated_without_depends_extracts_nothing() {
+        let source = "\
+from typing import Annotated\n\
+@fixture\ndef table(conn: Annotated[str, \"meta\"]): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
+        assert_eq!(parsed.hooks.len(), 1);
+        assert!(parsed.hooks[0].depends_on.is_empty());
+        assert!(parsed.errors.is_empty());
+    }
+
+    #[test]
+    fn annotated_depends_with_attribute_arg_is_a_discovery_error() {
+        let source = "\
+from typing import Annotated\n\
+@fixture\ndef svc(x: Annotated[int, Depends(mod.fn)]): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
+        assert_eq!(parsed.hooks.len(), 1);
+        assert!(parsed.hooks[0].depends_on.is_empty());
+        assert_eq!(parsed.errors.len(), 1);
+        assert!(parsed.errors[0].contains("Depends(attribute)"));
+    }
+
+    #[test]
+    fn default_depends_takes_precedence_over_annotated_depends() {
+        let source = "\
+from typing import Annotated\n\
+@fixture(per=\"scope\")\ndef db(): pass\n\
+@fixture(per=\"scope\")\ndef cache(): pass\n\
+@fixture\ndef svc(x: Annotated[int, Depends(cache)] = Depends(db)): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
+        let svc = parsed
+            .hooks
+            .iter()
+            .find(|h| h.name == "svc")
+            .expect("svc fixture");
+        assert_eq!(svc.depends_on, vec!["db"]);
+        assert!(parsed.errors.is_empty());
+    }
+
+    #[test]
+    fn mixed_default_and_annotated_depends_in_same_function() {
+        // The Annotated parameter has no default, so it must come first
+        // to satisfy Python's argument-order rules.
+        let source = "\
+from typing import Annotated\n\
+@fixture(per=\"scope\")\ndef db(): pass\n\
+@fixture(per=\"scope\")\ndef cache(): pass\n\
+@fixture\ndef svc(c: Annotated[int, Depends(cache)], d=Depends(db)): pass\n";
+        let (dir, file) = write_source(source);
+        let parsed =
+            parse_tests_from_source(dir.path(), &[dir.path().to_path_buf()], &file, source);
+        let svc = parsed
+            .hooks
+            .iter()
+            .find(|h| h.name == "svc")
+            .expect("svc fixture");
+        assert_eq!(svc.depends_on, vec!["cache", "db"]);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
     }
 
     #[test]

@@ -55,23 +55,7 @@ impl WorkerProcess {
         // as "tryke hangs at finalize_hooks". Spawn a drainer that
         // keeps the pipe empty for the worker's lifetime.
         let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
-        {
-            let buf = Arc::clone(&stderr_buf);
-            tokio::spawn(async move {
-                let mut reader = stderr;
-                let mut chunk = [0u8; 8192];
-                loop {
-                    match reader.read(&mut chunk).await {
-                        Ok(0) => break,
-                        Ok(n) => append_stderr(&buf, &chunk[..n]),
-                        Err(e) => {
-                            trace!("stderr drainer: read error: {e}");
-                            break;
-                        }
-                    }
-                }
-            });
-        }
+        spawn_stderr_drainer(stderr, Arc::clone(&stderr_buf))?;
 
         Ok(Self {
             child,
@@ -223,10 +207,17 @@ impl WorkerProcess {
 
     /// Snapshot the buffered worker stderr and clear the buffer.
     ///
+    /// Kept `async` to preserve the pre-fix public signature; the body
+    /// is purely synchronous.
+    ///
     /// # Panics
     /// Panics only if the stderr-drainer task panicked while holding the
     /// internal mutex (poisoning it). That task does no fallible work.
-    pub fn drain_stderr(&mut self) -> String {
+    #[expect(
+        clippy::unused_async,
+        reason = "Preserves pre-fix public async signature"
+    )]
+    pub async fn drain_stderr(&mut self) -> String {
         let bytes = {
             let mut g = self
                 .stderr_buf
@@ -249,6 +240,37 @@ impl Drop for WorkerProcess {
         // the synchronous variant — safe to call on already-dead processes.
         let _ = self.child.start_kill();
     }
+}
+
+/// Spawn a tokio task that continuously reads `stderr` into `buf` until
+/// EOF or a read error, capping the buffer at `STDERR_RETAIN_BYTES`.
+///
+/// Returns an error if no Tokio runtime is currently entered, rather than
+/// panicking the way `tokio::spawn` would. This keeps the synchronous
+/// `WorkerProcess::spawn` API safe to call from any context — callers in
+/// non-async code receive a structured error instead of a panic.
+fn spawn_stderr_drainer(
+    stderr: tokio::process::ChildStderr,
+    buf: Arc<Mutex<Vec<u8>>>,
+) -> Result<()> {
+    let handle = tokio::runtime::Handle::try_current().map_err(|e| {
+        anyhow!("WorkerProcess::spawn requires an active tokio runtime: {e}")
+    })?;
+    handle.spawn(async move {
+        let mut reader = stderr;
+        let mut chunk = [0u8; 8192];
+        loop {
+            match reader.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => append_stderr(&buf, &chunk[..n]),
+                Err(e) => {
+                    trace!("stderr drainer: read error: {e}");
+                    break;
+                }
+            }
+        }
+    });
+    Ok(())
 }
 
 fn append_stderr(buf: &Mutex<Vec<u8>>, data: &[u8]) {
@@ -712,36 +734,29 @@ mod tests {
     /// and it stops responding to RPCs. The drainer task spawned in
     /// `WorkerProcess::spawn` must keep the pipe empty so RPC flow is
     /// unaffected.
+    ///
+    /// Uses `python3` (already a project dependency) for portability and
+    /// routes through the same `spawn_stderr_drainer` helper as
+    /// `WorkerProcess::spawn`, so a regression in the production drainer
+    /// path would deadlock this test too.
     #[tokio::test]
     async fn worker_continues_after_large_stderr_write() {
-        // Use a shell child as a stand-in for the python worker. It writes
-        // 1 MiB to stderr (well past the pipe buffer) and then echoes a
-        // line on stdout. If the drainer is wired correctly, the stdout
-        // line arrives promptly.
-        let mut child = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg("yes 'X' | head -c 1048576 1>&2; echo done")
+        let mut child = tokio::process::Command::new("python3")
+            .args([
+                "-c",
+                "import sys; sys.stderr.write('X' * (1 << 20)); \
+                 sys.stderr.flush(); print('done', flush=True)",
+            ])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .expect("spawn shell");
+            .expect("spawn python3");
 
         let stderr = child.stderr.take().expect("no stderr");
         let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-        {
-            let buf = Arc::clone(&stderr_buf);
-            tokio::spawn(async move {
-                let mut reader = stderr;
-                let mut chunk = [0u8; 8192];
-                while let Ok(n) = reader.read(&mut chunk).await {
-                    if n == 0 {
-                        break;
-                    }
-                    append_stderr(&buf, &chunk[..n]);
-                }
-            });
-        }
+        spawn_stderr_drainer(stderr, Arc::clone(&stderr_buf))
+            .expect("drainer requires tokio runtime");
 
         let mut stdout = BufReader::new(child.stdout.take().expect("no stdout"));
         let mut line = String::new();

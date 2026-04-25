@@ -231,15 +231,21 @@ impl Discoverer {
     /// the import-graph build (phase 5), since path-restricted runs
     /// don't drive change-based selection.
     ///
-    /// Mutates `self.results` / `self.inputs` only for files within the
-    /// walk roots. The caller is expected to use a fresh `Discoverer`
-    /// here — the long-lived `Discoverer` used by server/watch must not
-    /// see this method, since skipping import-graph maintenance would
-    /// corrupt their incremental state.
+    /// Resets `results`, `inputs`, and the import graph (incl.
+    /// `always_dirty`) up front so this method's "subset only" semantics
+    /// hold even if the `Discoverer` is accidentally reused across calls.
+    /// The long-lived `Discoverer` used by server/watch must not call
+    /// this method — skipping import-graph maintenance would corrupt
+    /// their incremental state.
     pub fn rediscover_restricted(&mut self, walk_roots: &[PathBuf]) -> Vec<TestItem> {
-        let mut paths =
-            crate::collect_python_files_restricted(&self.root, walk_roots, &self.excludes);
-        paths.sort();
+        // Defensive reset: if a non-fresh Discoverer reaches this method,
+        // stale entries here would leak into `tests()` / `hooks()` and
+        // `always_dirty` lookups for files outside `walk_roots`.
+        self.results.clear();
+        self.inputs.clear();
+        self.import_graph = ImportGraph::default();
+
+        let paths = crate::collect_python_files_restricted(&self.root, walk_roots, &self.excludes);
         debug!(
             "rediscover_restricted: found {} python files across {} walk roots",
             paths.len(),

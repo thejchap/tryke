@@ -81,13 +81,9 @@ pub(crate) fn collect_python_files_restricted(
     };
     let mut paths: Vec<PathBuf> = Vec::new();
     for walk_root in walk_roots {
-        if walk_root.is_file() {
-            // Single-file fast path: skip WalkBuilder entirely.
-            if walk_root.extension().is_some_and(|ext| ext == "py") && !is_excluded(walk_root) {
-                paths.push(walk_root.clone());
-            }
-            continue;
-        }
+        // `WalkBuilder::new(p)` works on either a directory or a single
+        // file; routing both through it keeps gitignore / .ignore / hidden
+        // semantics consistent with `collect_python_files`.
         for entry in WalkBuilder::new(walk_root).build().filter_map(Result::ok) {
             if !entry.file_type().is_some_and(|t| t.is_file()) {
                 continue;

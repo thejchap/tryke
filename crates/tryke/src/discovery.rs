@@ -199,10 +199,10 @@ fn resolve_walk_roots(root: &Path, path_specs: &[PathSpec]) -> Option<Vec<PathBu
             );
             return None;
         }
-        // `.py` files take the single-file fast path inside
-        // `collect_python_files_restricted`; directories trigger a walk;
-        // non-`.py` files yield no tests (the extension filter drops
-        // them) which mirrors the existing post-filter semantics.
+        // Both files and directories are walked via `WalkBuilder` inside
+        // `collect_python_files_restricted`; non-`.py` files yield no
+        // tests (the extension filter drops them) which mirrors the
+        // existing post-filter semantics.
         walk_roots.push(resolved);
     }
 

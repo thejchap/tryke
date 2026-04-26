@@ -1,0 +1,3 @@
+[profile.default]
+# Warn on tests slower than 30s. No terminate-after — that masks flakes.
+slow-timeout = { period = "30s" }

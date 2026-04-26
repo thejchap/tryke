@@ -103,7 +103,14 @@ impl FileSig {
 /// still flow through.
 #[derive(Debug, Default)]
 pub struct ChangeFilter {
-    last_seen: HashMap<PathBuf, FileSig>,
+    // `Option<FileSig>` rather than `FileSig` so we can distinguish
+    // "never seen" (key absent) from "seen and currently missing"
+    // (key present, value `None`). Without that distinction, the
+    // first-ever event for a path that's already been deleted would
+    // be silently dropped (`current == prior == None`), and the user
+    // would see no restart / no rediscovery for what is in fact a
+    // real change.
+    last_seen: HashMap<PathBuf, Option<FileSig>>,
 }
 
 impl ChangeFilter {
@@ -117,23 +124,20 @@ impl ChangeFilter {
     /// stamps for every returned path.
     ///
     /// `None` from `FileSig::from_path` (file deleted, unreadable)
-    /// is treated as a state — a transition between `Some` and `None`
-    /// counts as a change too, so a deletion is reported once and
-    /// then quiesces if no further action is taken on the path.
+    /// is treated as a real state — transitions between `Some` and
+    /// `None` count as changes (so deletions and re-creations both
+    /// flow through), and the first observation of a path is always
+    /// a change regardless of whether it currently exists.
     pub fn filter(&mut self, paths: &[PathBuf]) -> Vec<PathBuf> {
         let mut out = Vec::with_capacity(paths.len());
         for path in paths {
             let current = FileSig::from_path(path);
-            let prior = self.last_seen.get(path).copied();
-            if current != prior {
-                match current {
-                    Some(sig) => {
-                        self.last_seen.insert(path.clone(), sig);
-                    }
-                    None => {
-                        self.last_seen.remove(path);
-                    }
-                }
+            let changed = match self.last_seen.get(path) {
+                None => true,
+                Some(prior) => *prior != current,
+            };
+            if changed {
+                self.last_seen.insert(path.clone(), current);
                 out.push(path.clone());
             }
         }
@@ -336,6 +340,33 @@ mod tests {
         assert!(
             after_quiet.is_empty(),
             "second event on still-deleted path is a no-op, got {after_quiet:?}"
+        );
+    }
+
+    /// Regression: in a fresh `tryke watch` session, the first event
+    /// the filter sees for a path may be a deletion. Without
+    /// distinguishing "never seen" from "seen and currently missing",
+    /// `current == prior == None` would silently drop the event and
+    /// the discovery layer would never learn the file is gone.
+    #[test]
+    fn change_filter_first_event_deletion_is_reported() {
+        let dir = make_project();
+        let py = dir.path().join("a.py");
+        // The path never existed (or was deleted before the watcher
+        // started); ChangeFilter has never observed it.
+        assert!(!py.exists());
+
+        let mut f = ChangeFilter::new();
+        let result = f.filter(std::slice::from_ref(&py));
+        assert_eq!(
+            result,
+            vec![py.clone()],
+            "first observation of a missing path must be reported"
+        );
+        let again = f.filter(std::slice::from_ref(&py));
+        assert!(
+            again.is_empty(),
+            "second event on the same still-missing path must quiesce, got {again:?}"
         );
     }
 

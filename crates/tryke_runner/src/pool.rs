@@ -34,15 +34,26 @@ impl WorkerState {
 }
 
 enum WorkerMsg {
-    Ping(oneshot::Sender<()>),
     Unit(WorkUnit, mpsc::UnboundedSender<TestResult>),
-    Reload(Vec<String>, oneshot::Sender<()>),
     Shutdown,
+}
+
+/// Control messages delivered on a per-worker channel.
+///
+/// `Ping` and `Restart` are fan-out operations: every worker must
+/// receive exactly one. Routing them through the shared work-stealing
+/// channel would let a single fast worker grab all N messages while
+/// other workers remained on stale Python processes — defeating the
+/// guarantee that watch/server-mode reloads run on a fresh interpreter.
+/// A dedicated channel per worker eliminates that race.
+enum WorkerCtrl {
+    Ping(oneshot::Sender<()>),
+    Restart(oneshot::Sender<()>),
 }
 
 pub struct WorkerPool {
     work_tx: async_channel::Sender<WorkerMsg>,
-    size: usize,
+    ctrl_txs: Vec<mpsc::UnboundedSender<WorkerCtrl>>,
 }
 
 impl WorkerPool {
@@ -69,12 +80,21 @@ impl WorkerPool {
         let python_path = python_path.to_vec();
         let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         let (work_tx, work_rx) = async_channel::unbounded();
+        let mut ctrl_txs = Vec::with_capacity(size);
         for _ in 0..size {
             let bin = python_bin.to_owned();
-            let rx = work_rx.clone();
-            tokio::spawn(worker_task(bin, python_path.clone(), root.clone(), rx));
+            let work_rx = work_rx.clone();
+            let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
+            ctrl_txs.push(ctrl_tx);
+            tokio::spawn(worker_task(
+                bin,
+                python_path.clone(),
+                root.clone(),
+                work_rx,
+                ctrl_rx,
+            ));
         }
-        Self { work_tx, size }
+        Self { work_tx, ctrl_txs }
     }
 
     pub fn run(&self, units: Vec<WorkUnit>) -> impl Stream<Item = TestResult> + use<> {
@@ -89,40 +109,49 @@ impl WorkerPool {
         UnboundedReceiverStream::new(stream_rx)
     }
 
-    pub async fn reload(&self, modules: Vec<String>) {
-        // Reload must reach every worker, so we send N messages (one per worker)
-        // and wait for all acknowledgements.
-        let mut ack_rxs = Vec::with_capacity(self.size);
-        for _ in 0..self.size {
+    /// Send one ctrl message per worker and await every ack.
+    ///
+    /// `build` is the ctrl-variant constructor (e.g. `WorkerCtrl::Ping`)
+    /// — taking it as a function pointer lets `warm` and
+    /// `restart_workers` share this whole fan-out path.
+    ///
+    /// If a worker task has died (ctrl channel receiver dropped), its
+    /// `send` returns `Err`; we skip its ack rather than push a future
+    /// that will never resolve, which would hang the watcher/server.
+    async fn fanout_ctrl(&self, build: fn(oneshot::Sender<()>) -> WorkerCtrl) {
+        let mut ack_rxs = Vec::with_capacity(self.ctrl_txs.len());
+        for ctrl_tx in &self.ctrl_txs {
             let (ack_tx, ack_rx) = oneshot::channel();
-            let _ = self
-                .work_tx
-                .send(WorkerMsg::Reload(modules.clone(), ack_tx))
-                .await;
-            ack_rxs.push(ack_rx);
+            if ctrl_tx.send(build(ack_tx)).is_ok() {
+                ack_rxs.push(ack_rx);
+            }
         }
         for ack_rx in ack_rxs {
             let _ = ack_rx.await;
         }
+    }
+
+    /// Kill every worker subprocess and respawn a fresh one in its place.
+    ///
+    /// This is how watch and server mode pick up code changes: rather than
+    /// trying to mutate a live interpreter with `importlib.reload` (which is
+    /// brittle once classes/closures/decorator-bound state from the old
+    /// definitions are referenced from elsewhere), we drop the whole process
+    /// and let it re-import everything on the next `run_test`. The fresh
+    /// process replays cached `register_hooks` calls so fixtures keep
+    /// working — same path as crash recovery.
+    pub async fn restart_workers(&self) {
+        self.fanout_ctrl(WorkerCtrl::Restart).await;
     }
 
     /// Pre-spawn all worker processes in parallel so Python startup
     /// latency is not on the critical path of the first tests.
     pub async fn warm(&self) {
-        // Send one Ping per worker so each worker spawns its process.
-        let mut ack_rxs = Vec::with_capacity(self.size);
-        for _ in 0..self.size {
-            let (ack_tx, ack_rx) = oneshot::channel();
-            let _ = self.work_tx.send(WorkerMsg::Ping(ack_tx)).await;
-            ack_rxs.push(ack_rx);
-        }
-        for ack_rx in ack_rxs {
-            let _ = ack_rx.await;
-        }
+        self.fanout_ctrl(WorkerCtrl::Ping).await;
     }
 
     pub fn shutdown(self) {
-        for _ in 0..self.size {
+        for _ in 0..self.ctrl_txs.len() {
             let _ = self.work_tx.send_blocking(WorkerMsg::Shutdown);
         }
     }
@@ -275,63 +304,92 @@ async fn register_hooks_for_unit(
     }
 }
 
+async fn handle_ctrl(
+    state: &mut WorkerState,
+    python_bin: &str,
+    path_refs: &[&Path],
+    root: &Path,
+    ctrl: WorkerCtrl,
+) {
+    match ctrl {
+        WorkerCtrl::Ping(ack_tx) => {
+            trace!("worker_task: ping (pre-warm)");
+            let _ = ensure_worker(state, python_bin, path_refs, root).await;
+            let _ = ack_tx.send(());
+        }
+        WorkerCtrl::Restart(ack_tx) => {
+            trace!("worker_task: restart");
+            if let Some(mut w) = state.process.take() {
+                w.shutdown().await;
+            }
+            // Eagerly respawn so the next Unit doesn't pay Python startup
+            // latency. ensure_worker replays cached register_hooks against
+            // the fresh process, mirroring the crash-recovery path.
+            let _ = ensure_worker(state, python_bin, path_refs, root).await;
+            let _ = ack_tx.send(());
+        }
+    }
+}
+
+async fn handle_unit(
+    state: &mut WorkerState,
+    python_bin: &str,
+    path_refs: &[&Path],
+    root: &Path,
+    unit: WorkUnit,
+    result_tx: mpsc::UnboundedSender<TestResult>,
+) {
+    if !unit.hooks.is_empty() {
+        register_hooks_for_unit(state, python_bin, path_refs, root, &unit.hooks, &unit.tests).await;
+    }
+    let finalize_modules: std::collections::HashSet<String> = if unit.hooks.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        unit.tests.iter().map(|t| t.module_path.clone()).collect()
+    };
+    for test in unit.tests {
+        trace!("worker_task: running test {}", test.name);
+        run_single_test(state, python_bin, path_refs, root, test, &result_tx).await;
+    }
+    for module in finalize_modules {
+        if let Some(w) = state.process.as_mut()
+            && let Err(e) = w.finalize_hooks(module).await
+        {
+            debug!("worker_task: finalize_hooks failed: {e}");
+        }
+    }
+}
+
 async fn worker_task(
     python_bin: String,
     python_path: Vec<std::path::PathBuf>,
     root: PathBuf,
-    rx: async_channel::Receiver<WorkerMsg>,
+    work_rx: async_channel::Receiver<WorkerMsg>,
+    mut ctrl_rx: mpsc::UnboundedReceiver<WorkerCtrl>,
 ) {
     let path_refs: Vec<&Path> = python_path.iter().map(PathBuf::as_path).collect();
     let mut state = WorkerState::new();
 
-    while let Ok(msg) = rx.recv().await {
-        match msg {
-            WorkerMsg::Ping(ack_tx) => {
-                trace!("worker_task: ping (pre-warm)");
-                let _ = ensure_worker(&mut state, &python_bin, &path_refs, &root).await;
-                let _ = ack_tx.send(());
+    loop {
+        // `biased` guarantees control messages take priority once the
+        // current Unit (if any) finishes. Without it, `select!` could
+        // keep picking Units off the shared queue while a Restart sat
+        // in this worker's ctrl channel — leaving the worker on a stale
+        // interpreter for arbitrarily long.
+        tokio::select! {
+            biased;
+            ctrl = ctrl_rx.recv() => {
+                let Some(ctrl) = ctrl else { break };
+                handle_ctrl(&mut state, &python_bin, &path_refs, &root, ctrl).await;
             }
-            WorkerMsg::Unit(unit, result_tx) => {
-                if !unit.hooks.is_empty() {
-                    register_hooks_for_unit(
-                        &mut state,
-                        &python_bin,
-                        &path_refs,
-                        &root,
-                        &unit.hooks,
-                        &unit.tests,
-                    )
-                    .await;
-                }
-                let mut finalize_modules = std::collections::HashSet::new();
-                for test in &unit.tests {
-                    if !unit.hooks.is_empty() {
-                        finalize_modules.insert(test.module_path.clone());
+            msg = work_rx.recv() => {
+                match msg {
+                    Ok(WorkerMsg::Unit(unit, result_tx)) => {
+                        handle_unit(&mut state, &python_bin, &path_refs, &root, unit, result_tx)
+                            .await;
                     }
+                    Ok(WorkerMsg::Shutdown) | Err(_) => break,
                 }
-                for test in unit.tests {
-                    trace!("worker_task: running test {}", test.name);
-                    run_single_test(&mut state, &python_bin, &path_refs, &root, test, &result_tx)
-                        .await;
-                }
-                for module in finalize_modules {
-                    if let Some(w) = state.process.as_mut()
-                        && let Err(e) = w.finalize_hooks(module).await
-                    {
-                        debug!("worker_task: finalize_hooks failed: {e}");
-                    }
-                }
-            }
-            WorkerMsg::Reload(modules, ack_tx) => {
-                trace!("worker_task: reload {modules:?}");
-                if let Some(w) = state.process.as_mut() {
-                    let _ = w.reload(&modules).await;
-                }
-                let _ = ack_tx.send(());
-            }
-            WorkerMsg::Shutdown => {
-                trace!("worker_task: shutdown");
-                break;
             }
         }
     }
@@ -472,6 +530,108 @@ def test_third(n: int = Depends(counter)) -> None:
             1,
             "crashing test must run exactly once (no retry), got {count:?}"
         );
+
+        pool.shutdown();
+    }
+
+    /// Restarting the pool must yield a *fresh* Python interpreter — not
+    /// just an `importlib.reload`-mutated module. We prove this by
+    /// recording one tally mark per fresh import of the test module: the
+    /// module body increments a sidecar counter on every initial load.
+    /// Importlib.reload would re-run the body too, but in production it
+    /// leaves classes/closures bound to the old definitions in *other*
+    /// modules — the brittleness this rearchitecture exists to fix.
+    /// A second tally after `restart_workers` confirms a brand new
+    /// interpreter is in play.
+    #[tokio::test]
+    async fn restart_workers_runs_module_body_on_fresh_interpreter() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+
+        let counter_file = dir.path().join("IMPORT_COUNT");
+        let counter_escaped = counter_file.to_string_lossy().replace('\\', "\\\\");
+        let test_file = dir.path().join("test_restart_state.py");
+        let source = format!(
+            r#"from tryke import test, expect
+
+with open("{counter_escaped}", "a") as f:
+    f.write("x")
+    f.flush()
+
+@test
+def test_noop() -> None:
+    expect(1).to_equal(1)
+"#
+        );
+        std::fs::write(&test_file, source).expect("write test file");
+
+        let make_unit = || WorkUnit {
+            tests: vec![make_test_item(
+                "test_restart_state",
+                "test_noop",
+                &test_file,
+            )],
+            hooks: vec![],
+        };
+
+        let pool = WorkerPool::with_python_path(
+            1,
+            &test_python_bin(),
+            dir.path(),
+            &[dir.path().to_path_buf(), python_package_dir()],
+        );
+        pool.warm().await;
+
+        let r1: Vec<TestResult> = pool.run(vec![make_unit()]).collect().await;
+        assert_eq!(r1.len(), 1);
+        assert!(
+            matches!(r1[0].outcome, TestOutcome::Passed),
+            "first run should pass, got {:?}",
+            r1[0].outcome
+        );
+
+        pool.restart_workers().await;
+
+        let r2: Vec<TestResult> = pool.run(vec![make_unit()]).collect().await;
+        assert_eq!(r2.len(), 1);
+        assert!(
+            matches!(r2[0].outcome, TestOutcome::Passed),
+            "second run should pass on fresh interpreter, got {:?}",
+            r2[0].outcome
+        );
+
+        let count = std::fs::read_to_string(&counter_file).unwrap_or_default();
+        assert_eq!(
+            count.len(),
+            2,
+            "module body must run once per fresh interpreter \
+             (1 initial + 1 after restart_workers); got {count:?}"
+        );
+
+        pool.shutdown();
+    }
+
+    /// `restart_workers` on a pool that has not been warmed (no
+    /// processes spawned yet) must still ack. The handler eagerly
+    /// spawns a fresh process — same path as a normal restart — so the
+    /// next test run is not on the Python startup critical path. This
+    /// matters because the file watcher can fire before the user
+    /// triggers any test run, and the watcher awaits the ack.
+    #[tokio::test]
+    async fn restart_workers_with_no_live_processes_acks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+
+        let pool = WorkerPool::with_python_path(
+            2,
+            &test_python_bin(),
+            dir.path(),
+            &[dir.path().to_path_buf(), python_package_dir()],
+        );
+        // No warm() — workers are not yet spawned.
+        let restarted =
+            tokio::time::timeout(std::time::Duration::from_secs(10), pool.restart_workers()).await;
+        assert!(restarted.is_ok(), "restart_workers must ack within timeout");
 
         pool.shutdown();
     }

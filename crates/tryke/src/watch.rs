@@ -108,8 +108,33 @@ pub async fn run_watch(
 
     let (tx, rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
     let _debouncer = tryke_server::watcher::spawn_watcher(root, excludes, tx)?;
+    let mut change_filter = tryke_server::watcher::ChangeFilter::new();
 
-    for paths in &rx {
+    while let Ok(first) = rx.recv() {
+        // Coalesce any additional batches the watcher has already
+        // queued. A single editor save can produce events whose
+        // intermediate quiet windows fall just outside the watcher's
+        // debounce — so two batches arrive back-to-back. Without this
+        // drain, each batch triggers its own restart + test cycle,
+        // which the user perceives as a double-restart.
+        let mut paths = first;
+        while let Ok(more) = rx.try_recv() {
+            paths.extend(more);
+        }
+        paths.sort();
+        paths.dedup();
+
+        // Drop paths whose `(mtime, size)` is unchanged since the
+        // last batch we accepted. This is the deterministic answer
+        // to "did the file actually change" — drain only catches
+        // batches queued together; this catches tail events that
+        // arrive after the previous cycle has finished.
+        let paths = change_filter.filter(&paths);
+        if paths.is_empty() {
+            debug!("watch: file change batch had no real content changes — skipping");
+            continue;
+        }
+
         debug!(
             "watch: file change batch — {} path(s) changed: {}",
             paths.len(),
@@ -121,14 +146,14 @@ pub async fn run_watch(
         );
         let modules = discoverer.affected_modules(&paths);
         if modules.is_empty() {
-            debug!("watch: no modules affected by change — skipping pool.reload");
+            debug!("watch: no modules affected by change — skipping worker restart");
         } else {
             debug!(
-                "watch: reloading {} module(s) in worker pool: {}",
+                "watch: restarting worker pool to pick up changes in {} module(s): {}",
                 modules.len(),
                 modules.join(", ")
             );
-            pool.reload(modules).await;
+            pool.restart_workers().await;
         }
         discoverer.rediscover_changed(&paths);
         clear_if_tty();

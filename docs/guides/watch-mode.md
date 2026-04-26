@@ -12,9 +12,10 @@ Tryke watches all `.py` files in the project, respecting `.gitignore`. When a fi
 
 1. Identifies which modules were modified
 2. Walks the import graph to find all tests that depend on the changed modules
-3. Reruns only those tests
+3. Restarts the worker subprocesses so the next run loads the updated code in a fresh Python interpreter
+4. Reruns only the affected tests
 
-This gives you fast feedback without rerunning the entire suite.
+This gives you fast feedback without rerunning the entire suite. Restarting the workers (rather than calling `importlib.reload` in-process) avoids the classic reload pitfalls — stale class objects, captured closures, and decorator-bound state from the old definitions are all dropped because the interpreter itself is gone.
 
 ## How affected tests are determined
 
@@ -92,9 +93,11 @@ This is useful when:
 - You are debugging test ordering or flake issues and want a full run on
   every save.
 
-Module reload still happens for the changed files, so Python picks up the new
-code; only the test selection is broadened.
+Worker subprocesses are still restarted on every change so Python picks up
+the new code from a fresh interpreter; only the test selection is broadened.
 
-## Debouncing
+## Debouncing and change dedup
 
-File system events are debounced with a 200ms window. Rapid successive saves are coalesced into a single rerun.
+File system events are debounced with a 50ms quiet window — just long enough to coalesce the burst of inotify events the kernel emits for a single write syscall.
+
+On top of the debouncer, watch mode tracks each file's `(mtime, size)` signature and skips events that don't actually move it. Editor tail activity (atomic-rename metadata writes, swap-file cleanup, format-on-save that produces identical output, LSP re-saves) often produces a second batch of events outside the debounce window; without the signature check, that second batch would trigger a redundant restart for a single user save. With it, only batches that represent a real content change reach the worker pool — so we can keep the debounce tight without paying for it in spurious restarts.

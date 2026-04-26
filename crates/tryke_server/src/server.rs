@@ -70,8 +70,31 @@ impl Server {
         let disc_for_watcher = Arc::clone(&disc);
         let bcast_for_watcher = bcast_tx.clone();
         let pool_for_watcher = Arc::clone(&pool);
+        let mut change_filter = crate::watcher::ChangeFilter::new();
         tokio::spawn(async move {
-            while let Some(paths) = watcher_rx.recv().await {
+            while let Some(first) = watcher_rx.recv().await {
+                // Coalesce any additional batches already queued. A
+                // single editor save can produce events whose quiet
+                // windows straddle the watcher's debounce, yielding two
+                // back-to-back batches. Without this drain we would
+                // restart the worker pool twice for one save.
+                let mut paths = first;
+                while let Ok(more) = watcher_rx.try_recv() {
+                    paths.extend(more);
+                }
+                paths.sort();
+                paths.dedup();
+
+                // Drop paths whose `(mtime, size)` hasn't actually
+                // moved since the last accepted batch. Drain handles
+                // simultaneously-queued batches; this handles tail
+                // events that arrive after the previous cycle.
+                let paths = change_filter.filter(&paths);
+                if paths.is_empty() {
+                    debug!("server: file change batch had no real content changes — skipping");
+                    continue;
+                }
+
                 let (modules, tests) = {
                     let mut disc = disc_for_watcher.lock().await;
                     let modules = disc.affected_modules(&paths);
@@ -80,14 +103,14 @@ impl Server {
                     (modules, tests)
                 };
                 if modules.is_empty() {
-                    debug!("server: no modules affected by change — skipping pool.reload");
+                    debug!("server: no modules affected by change — skipping worker restart");
                 } else {
                     debug!(
-                        "server: reloading {} module(s) in worker pool: {}",
+                        "server: restarting worker pool to pick up changes in {} module(s): {}",
                         modules.len(),
                         modules.join(", ")
                     );
-                    pool_for_watcher.reload(modules).await;
+                    pool_for_watcher.restart_workers().await;
                 }
                 debug!("file change: {} affected tests", tests.len());
                 let notif = Notification {

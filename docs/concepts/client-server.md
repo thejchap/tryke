@@ -1,6 +1,6 @@
 # Client/server mode
 
-Tryke can run as a persistent server that keeps Python workers warm and caches test discovery. Clients connect over TCP to request test runs with minimal startup overhead.
+Tryke can run as a persistent server that keeps Python workers warm between file changes and caches test discovery. Clients connect over TCP to request test runs with minimal startup overhead.
 
 ## Starting the server
 
@@ -68,13 +68,14 @@ File changes trigger a `discover_complete` notification with the updated test li
 
 ## Filesystem watching
 
-The server watches all `.py` files in the project (respecting `.gitignore`) with a 200ms debounce. When files change:
+The server watches all `.py` files in the project (respecting `.gitignore`) with a 50ms debounce. When files change:
 
-1. The import graph is incrementally updated
-2. Affected modules are reloaded in the worker pool
-3. A `discover_complete` notification is broadcast to all connected clients
+1. The batch is dedup'd against each path's last-seen `(mtime, size)` so editor tail events that don't actually change the file (metadata fsync, swap-file cleanup, format-on-save with identical output) are dropped before any work happens
+2. The import graph is incrementally updated
+3. The worker subprocesses are restarted so the next run loads fresh code in a brand-new Python interpreter (no `importlib.reload`)
+4. A `discover_complete` notification is broadcast to all connected clients
 
-This means editors can keep their test explorer up to date in real time.
+This means editors can keep their test explorer up to date in real time without spurious double-restarts on a single save.
 
 ## Editor integration
 
@@ -97,6 +98,6 @@ See the [editor integration guide](../guides/editor-integration.md) for setup in
 
 Without the server, every `tryke test` invocation pays for Python startup and test discovery. With the server:
 
-- **Worker processes stay warm** — no Python startup per run
+- **Worker processes stay warm between file changes** — no Python startup per run; on a file change, workers are restarted and immediately re-warmed in parallel so the next run is still on warm interpreters
 - **Discovery is cached** — only changed files are re-scanned
 - **Multiple clients** — several editor windows or terminals can share one server

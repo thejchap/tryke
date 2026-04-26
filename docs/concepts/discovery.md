@@ -55,16 +55,16 @@ warning: tests/helpers/loader.py — dynamic imports found; this file will alway
 
 ### Effect on watch and server mode
 
-Tryke tracks which Python modules to reload between test cycles by following static
-import edges. Dynamic import edges are invisible to this graph. This means:
+Watch and server mode pick up code changes by restarting the worker subprocesses
+between cycles, so every cycle starts with an empty `sys.modules`. Both static
+and dynamic imports load the latest source on the first test that needs them —
+there is no stale-cache pitfall here.
 
-- If `helper.py` is only imported dynamically by `loader.py`, and `helper.py` changes,
-  the watch-mode worker may not reload `helper` during that cycle.
-- `loader.py` itself will always be reloaded (it is always-dirty), but when its code
-  re-executes `importlib.import_module("helper")`, it may receive the stale cached
-  version from `sys.modules`.
-- This can cause tests to pass or fail based on code that hasn't been reflected yet,
-  persisting until the watch session restarts.
+The static import graph still drives **test selection**: only tests that
+transitively import a changed file are rerun. A file with a dynamic import is
+marked always-dirty (the same rule as `--changed`), so any test that imports it
+will rerun on every change. To narrow watch reruns, prefer static imports — see
+the recommendations below.
 
 ## Recommendations
 
@@ -121,7 +121,7 @@ if TYPE_CHECKING:
 Python 3.15 introduces an explicit `lazy` keyword that defers a real import to the
 first use of the bound name. Tryke parses `lazy import` and `lazy from` exactly like
 their eager counterparts and adds them to the import graph, so deferring an import
-does **not** break `--changed` selection or watch-mode reloads:
+does **not** break `--changed` selection or watch-mode reruns:
 
 ```python
 # tracked just like a plain import
@@ -153,8 +153,7 @@ exclude = ["scripts/generate.py", "benchmarks/suites"]
 ### Accept the tradeoff when it's intentional
 
 If a file intentionally tests dynamic loading behavior — for example, a test that
-verifies your plugin loader works — that's fine. Just be aware that:
-
-- Those tests will always run with `--changed`
-- In watch/server mode, editing the dynamically-loaded target may require restarting
-  the watch session to pick up changes reliably
+verifies your plugin loader works — that's fine. Just be aware that those tests
+will always run with `--changed`, since the import graph cannot prove they aren't
+affected by an unrelated change. (Watch and server mode restart workers on every
+change, so the dynamically-loaded code itself is always reloaded fresh.)

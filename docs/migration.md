@@ -190,6 +190,19 @@ def comprehensive_check():
     expect(response.headers).to_contain("json")    # soft — runs regardless
 ```
 
+### Display names for tests and expectations
+
+Tryke surfaces human-readable labels in reporters where pytest only shows function names and source snippets. Take advantage of this while migrating — names typed once read every time a report is rendered:
+
+```python
+@test("returns the cached row on the second call")
+def hits_cache():
+    expect(rows[0], "first row id").to_equal(42)
+    expect(rows[0], "first row name").to_equal("alice")
+```
+
+`@test("...")` (or `@test(name="...")`) sets the test's display name; the second positional argument to `expect(value, "...")` labels the assertion. Both are static-only metadata — discovery extracts them at parse time, and they show up in `--reporter llm`, `--reporter junit`, and the default text reporter without any runtime cost.
+
 ### Fixtures → `@fixture` + `Depends()`
 
 pytest uses `@pytest.fixture` with implicit parameter-name matching. Tryke uses a single `@fixture` decorator with explicit `Depends()` wiring:

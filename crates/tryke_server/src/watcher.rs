@@ -64,6 +64,16 @@ pub fn spawn_watcher(
 /// disk cache uses (`tryke_discovery::cache::FileKey`) so that any
 /// file the discovery layer would treat as "unchanged" is also
 /// treated as "unchanged" here.
+///
+/// Limitation: on filesystems with coarse mtime resolution
+/// (FAT32 ~2s, HFS+ ~1s), two distinct saves of the same byte
+/// length within one tick can collide on `(mtime, size)` and the
+/// second save will be silently dropped here. Source trees are
+/// virtually never hosted on those filesystems in practice
+/// (ext4/xfs/btrfs/APFS/NTFS all have ≥100ns resolution), and
+/// the discovery cache already accepts the same trade-off — a
+/// stronger key would have to be adopted in both layers together
+/// to remain consistent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileSig {
     mtime_nanos: i128,

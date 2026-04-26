@@ -227,14 +227,13 @@ impl WorkerProcess {
         reason = "Preserves pre-fix public async signature"
     )]
     pub async fn drain_stderr(&mut self) -> String {
-        let deque = {
+        let bytes: Vec<u8> = {
             let mut g = self
                 .stderr_buf
                 .lock()
                 .expect("stderr buffer mutex poisoned");
-            std::mem::take(&mut *g)
+            std::mem::take(&mut *g).into_iter().collect()
         };
-        let bytes = Vec::from(deque);
         String::from_utf8_lossy(&bytes).into_owned()
     }
 

@@ -2125,7 +2125,7 @@ dependencies = [
 
 [[package]]
 name = "tryke"
-version = "0.0.23"
+version = "0.0.24"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2150,7 +2150,7 @@ dependencies = [
 
 [[package]]
 name = "tryke_config"
-version = "0.0.23"
+version = "0.0.24"
 dependencies = [
  "serde",
  "tempfile",
@@ -2159,14 +2159,14 @@ dependencies = [
 
 [[package]]
 name = "tryke_dev"
-version = "0.0.23"
+version = "0.0.24"
 dependencies = [
  "tryke",
 ]
 
 [[package]]
 name = "tryke_discovery"
-version = "0.0.23"
+version = "0.0.24"
 dependencies = [
  "ignore",
  "log",
@@ -2185,7 +2185,7 @@ dependencies = [
 
 [[package]]
 name = "tryke_reporter"
-version = "0.0.23"
+version = "0.0.24"
 dependencies = [
  "ctrlc",
  "miette",
@@ -2197,7 +2197,7 @@ dependencies = [
 
 [[package]]
 name = "tryke_runner"
-version = "0.0.23"
+version = "0.0.24"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -2214,7 +2214,7 @@ dependencies = [
 
 [[package]]
 name = "tryke_server"
-version = "0.0.23"
+version = "0.0.24"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2236,7 +2236,7 @@ dependencies = [
 
 [[package]]
 name = "tryke_types"
-version = "0.0.23"
+version = "0.0.24"
 dependencies = [
  "serde",
  "serde_json",

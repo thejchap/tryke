@@ -28,13 +28,13 @@ pub fn spawn_watcher(
     tx: mpsc::Sender<Vec<PathBuf>>,
 ) -> anyhow::Result<Debouncer<RecommendedWatcher>> {
     let gitignore = build_gitignore(root, excludes);
-    // 100ms is enough to coalesce the burst of inotify events the
-    // kernel emits for a single write syscall (typically sub-ms apart).
-    // We rely on `ChangeFilter` further downstream — not on a wide
-    // debounce window — to suppress duplicate restarts from editor
-    // tail activity that arrives after this window.
+    // 50ms is enough to coalesce the burst of inotify events the kernel
+    // emits for a single write syscall (typically sub-ms apart). We rely
+    // on `ChangeFilter` further downstream — not on a wide debounce
+    // window — to suppress duplicate restarts from editor tail activity
+    // that arrives after this window.
     let mut debouncer = new_debouncer(
-        Duration::from_millis(100),
+        Duration::from_millis(50),
         move |res: DebounceEventResult| {
             if let Ok(events) = res {
                 let paths: Vec<PathBuf> = events

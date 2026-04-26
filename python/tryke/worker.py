@@ -361,15 +361,9 @@ class Worker:
         self._hook_metadata: dict[str, list[object]] = {}
         # Hook executors cached per module.
         self._executors: dict[str, HookExecutor] = {}
-        # Coverage logic
         self._coverage: Coverage | None = None
 
     def run(self) -> None:
-        """Main worker loop
-
-        Handle IPC via JSON-RPC
-        """
-
         # TODO(thejchap): driven by config  # noqa: FIX002, TD003
         if True:
             self._coverage = Coverage()

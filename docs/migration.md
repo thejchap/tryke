@@ -309,6 +309,8 @@ Work in the phases below. **Do not advance to the next phase until the stated
 verification gate passes.** Stop and ask me if a gate fails and you cannot
 trivially explain the mismatch.
 
+For large test suites, consider using sub-agents to parallelize large batches of work.
+
 Create a `.migration/` directory at the repo root for baseline and comparison
 artifacts; add it to `.gitignore`. Keep a running `.migration/NOTES.md` of
 decisions and mismatches.
@@ -355,6 +357,17 @@ branch. Two reasons:
 If a PR is open, note its URL in `CURRENT.md` so the next session pushes
 to it automatically.
 
+## Phase -1 — Getting started
+
+Do a scan of the repo and understand the pytest patterns it uses,
+and how to convert them to tryke.
+
+If there are functionality gaps, code simple shims.
+
+Make a note of what you encounter and learn in `PATTERNS.md`.
+
+If there are conversion patterns you'd like input on, flag these to the user before moving forward.
+
 ## Phase 0 — Baseline capture (pytest)
 
 On a clean checkout, before any code changes:
@@ -391,37 +404,6 @@ it finds **zero** tests at this point — no files have been converted yet).
 Convert test files using the cheat sheet at
 <https://tryke.dev/migration.html>. Do one package / directory at a time and keep
 each conversion small enough to review.
-
-For each file:
-
-- Replace non-parametrized `def test_foo(...)` with `@test` + `def foo(...)`.
-- Replace `assert` with `expect(...).to_...()` per the assertions table.
-- Replace `pytest.raises(Exc, match=...)` with
-  `expect(lambda: ...).to_raise(Exc, match=...)` — **use the `match=` kwarg
-  verbatim**, do not rewrite the regex by eye.
-- Replace `@pytest.mark.parametrize` with `@test.cases(test.case("label", ...))`.
-  For parametrized tests, use `@test.cases(...)` **instead of** `@test` — the
-  two decorators are mutually exclusive on the same function and discovery
-  raises an error if both are present. Labels must be string literals (static
-  analysis constraint — see <https://tryke.dev/concepts/cases.html>). Each case
-  kwarg must match the function signature.
-- Replace `@pytest.mark.skip` / `skipif` / `xfail` with `@test.skip` /
-  `@test.skip_if` / `@test.xfail`.
-- Replace `@pytest.mark.asyncio` with plain `async def` under `@test`.
-- Replace `@pytest.fixture` with `@fixture`; wire dependencies with
-  `Depends(other_fixture)` instead of parameter-name matching. Fixtures are
-  lexically scoped — move them into the module that uses them and **delete
-  the `conftest.py` entry** rather than leaving both.
-
-Tryke discovery is **static** (Ruff-based AST parse). See
-<https://tryke.dev/concepts/discovery.html>. This has two consequences:
-
-- `importlib.import_module()` / `__import__()` at module scope will mark the
-  file always-dirty and defeat `--changed` mode. Replace with static imports
-  or isolate the dynamic logic in non-test code.
-- Tryke descends only into `with describe("..."):` and
-  `if __TRYKE_TESTING__:` blocks. Tests nested inside `if/for/while/try`
-  bodies (uncommon in pytest too) will not be discovered — flatten them.
 
 **Soft assertions — read this carefully.** Tryke assertions are soft by
 default: every `expect()` in a test runs even if an earlier one fails. See

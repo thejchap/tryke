@@ -121,7 +121,7 @@ if TYPE_CHECKING:
 Python 3.15 introduces an explicit `lazy` keyword that defers a real import to the
 first use of the bound name. Tryke parses `lazy import` and `lazy from` exactly like
 their eager counterparts and adds them to the import graph, so deferring an import
-does **not** break `--changed` selection or watch-mode reloads:
+does **not** break `--changed` selection or watch-mode reruns:
 
 ```python
 # tracked just like a plain import

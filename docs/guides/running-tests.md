@@ -113,4 +113,4 @@ tryke test --port
 tryke test --port 2337
 ```
 
-The server keeps Python workers warm and caches test discovery, so subsequent runs skip startup overhead.
+The server keeps Python workers warm between file changes and caches test discovery, so subsequent runs skip startup overhead. When a watched file changes, the workers are restarted (so the new code loads in a fresh interpreter) and immediately re-warmed in parallel.

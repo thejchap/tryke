@@ -108,6 +108,7 @@ pub async fn run_watch(
 
     let (tx, rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
     let _debouncer = tryke_server::watcher::spawn_watcher(root, excludes, tx)?;
+    let mut change_filter = tryke_server::watcher::ChangeFilter::new();
 
     while let Ok(first) = rx.recv() {
         // Coalesce any additional batches the watcher has already
@@ -122,6 +123,17 @@ pub async fn run_watch(
         }
         paths.sort();
         paths.dedup();
+
+        // Drop paths whose `(mtime, size)` is unchanged since the
+        // last batch we accepted. This is the deterministic answer
+        // to "did the file actually change" — drain only catches
+        // batches queued together; this catches tail events that
+        // arrive after the previous cycle has finished.
+        let paths = change_filter.filter(&paths);
+        if paths.is_empty() {
+            debug!("watch: file change batch had no real content changes — skipping");
+            continue;
+        }
 
         debug!(
             "watch: file change batch — {} path(s) changed: {}",

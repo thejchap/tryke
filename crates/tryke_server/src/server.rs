@@ -70,6 +70,7 @@ impl Server {
         let disc_for_watcher = Arc::clone(&disc);
         let bcast_for_watcher = bcast_tx.clone();
         let pool_for_watcher = Arc::clone(&pool);
+        let mut change_filter = crate::watcher::ChangeFilter::new();
         tokio::spawn(async move {
             while let Some(first) = watcher_rx.recv().await {
                 // Coalesce any additional batches already queued. A
@@ -83,6 +84,16 @@ impl Server {
                 }
                 paths.sort();
                 paths.dedup();
+
+                // Drop paths whose `(mtime, size)` hasn't actually
+                // moved since the last accepted batch. Drain handles
+                // simultaneously-queued batches; this handles tail
+                // events that arrive after the previous cycle.
+                let paths = change_filter.filter(&paths);
+                if paths.is_empty() {
+                    debug!("server: file change batch had no real content changes — skipping");
+                    continue;
+                }
 
                 let (modules, tests) = {
                     let mut disc = disc_for_watcher.lock().await;

@@ -68,7 +68,7 @@ File changes trigger a `discover_complete` notification with the updated test li
 
 ## Filesystem watching
 
-The server watches all `.py` files in the project (respecting `.gitignore`) with a 200ms debounce. When files change:
+The server watches all `.py` files in the project (respecting `.gitignore`) with a 100ms debounce. When files change:
 
 1. The batch is dedup'd against each path's last-seen `(mtime, size)` so editor tail events that don't actually change the file (metadata fsync, swap-file cleanup, format-on-save with identical output) are dropped before any work happens
 2. The import graph is incrementally updated

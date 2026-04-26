@@ -98,6 +98,6 @@ the new code from a fresh interpreter; only the test selection is broadened.
 
 ## Debouncing and change dedup
 
-File system events are debounced with a 200ms quiet window — rapid successive saves are coalesced into a single rerun.
+File system events are debounced with a 100ms quiet window — just long enough to coalesce the burst of inotify events the kernel emits for a single write syscall.
 
-On top of the debouncer, watch mode tracks each file's `(mtime, size)` signature and skips events that don't actually move it. Editor tail activity (atomic-rename metadata writes, swap-file cleanup, format-on-save that produces identical output, LSP re-saves) often produces a second batch of events outside the debounce window; without the signature check, that second batch would trigger a redundant restart for a single user save. With it, only batches that represent a real content change reach the worker pool.
+On top of the debouncer, watch mode tracks each file's `(mtime, size)` signature and skips events that don't actually move it. Editor tail activity (atomic-rename metadata writes, swap-file cleanup, format-on-save that produces identical output, LSP re-saves) often produces a second batch of events outside the debounce window; without the signature check, that second batch would trigger a redundant restart for a single user save. With it, only batches that represent a real content change reach the worker pool — so we can keep the debounce tight without paying for it in spurious restarts.

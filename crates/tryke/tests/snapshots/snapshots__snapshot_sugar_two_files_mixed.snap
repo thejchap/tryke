@@ -1,0 +1,19 @@
+---
+source: crates/tryke/tests/snapshots.rs
+expression: strip_ansi(&out)
+---
+tryke test v[VERSION]
+
+tests/a.py ✓✗                                                   66% [██████────]
+tests/b.py ✓                                                   100% [██████████]
+
+Failures:
+
+✗ b (tests/a.py)
+  boom
+
+ Test Files  2 ran (2)
+      Tests  1 failed | 2 passed (3)
+   Duration  10.00ms
+
+  FAIL

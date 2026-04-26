@@ -11,15 +11,21 @@ use tryke::execution::run_tests;
 use tryke::graph::{run_fixture_graph, run_graph};
 use tryke::watch::run_watch;
 use tryke_reporter::{
-    DotReporter, JSONReporter, JUnitReporter, LlmReporter, ProgressReporter, Reporter,
-    TextReporter, Verbosity,
+    DotReporter, JSONReporter, JUnitReporter, LlmReporter, NextReporter, ProgressReporter,
+    Reporter, SugarReporter, TextReporter, Verbosity,
 };
 use tryke_types::ChangedSelectionSummary;
 use tryke_types::filter::TestFilter;
 
 fn build_reporter(format: &ReporterFormat, verbosity: Verbosity) -> Box<dyn Reporter> {
     let use_progress = tryke_reporter::progress::supports_progress()
-        && matches!(format, ReporterFormat::Text | ReporterFormat::Dot);
+        && matches!(
+            format,
+            ReporterFormat::Text
+                | ReporterFormat::Dot
+                | ReporterFormat::Next
+                | ReporterFormat::Sugar
+        );
 
     if use_progress {
         // ProgressReporter emits OSC 9;4 "set progress" on every test
@@ -36,6 +42,14 @@ fn build_reporter(format: &ReporterFormat, verbosity: Verbosity) -> Box<dyn Repo
         ReporterFormat::Text => Box::new(TextReporter::with_verbosity(verbosity)),
         ReporterFormat::Dot if use_progress => Box::new(ProgressReporter::new(DotReporter::new())),
         ReporterFormat::Dot => Box::new(DotReporter::new()),
+        ReporterFormat::Next if use_progress => {
+            Box::new(ProgressReporter::new(NextReporter::new()))
+        }
+        ReporterFormat::Next => Box::new(NextReporter::new()),
+        ReporterFormat::Sugar if use_progress => {
+            Box::new(ProgressReporter::new(SugarReporter::new()))
+        }
+        ReporterFormat::Sugar => Box::new(SugarReporter::new()),
         ReporterFormat::Json => Box::new(JSONReporter::new()),
         ReporterFormat::Junit => Box::new(JUnitReporter::new()),
         ReporterFormat::Llm => Box::new(LlmReporter::new()),
@@ -309,6 +323,30 @@ mod tests {
             cli.command,
             Commands::Test {
                 reporter: ReporterFormat::Dot,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_reporter_next_flag_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "test", "--reporter", "next"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Test {
+                reporter: ReporterFormat::Next,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_reporter_sugar_flag_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "test", "--reporter", "sugar"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Test {
+                reporter: ReporterFormat::Sugar,
                 ..
             }
         ));

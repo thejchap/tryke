@@ -92,8 +92,8 @@ This is useful when:
 - You are debugging test ordering or flake issues and want a full run on
   every save.
 
-Module reload still happens for the changed files, so Python picks up the new
-code; only the test selection is broadened.
+Worker subprocesses are still restarted on every change so Python picks up
+the new code from a fresh interpreter; only the test selection is broadened.
 
 ## Debouncing
 

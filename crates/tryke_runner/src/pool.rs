@@ -36,7 +36,7 @@ impl WorkerState {
 enum WorkerMsg {
     Ping(oneshot::Sender<()>),
     Unit(WorkUnit, mpsc::UnboundedSender<TestResult>),
-    Reload(Vec<String>, oneshot::Sender<()>),
+    Restart(oneshot::Sender<()>),
     Shutdown,
 }
 
@@ -89,16 +89,22 @@ impl WorkerPool {
         UnboundedReceiverStream::new(stream_rx)
     }
 
-    pub async fn reload(&self, modules: Vec<String>) {
-        // Reload must reach every worker, so we send N messages (one per worker)
-        // and wait for all acknowledgements.
+    /// Kill every worker subprocess and respawn a fresh one in its place.
+    ///
+    /// This is how watch and server mode pick up code changes: rather than
+    /// trying to mutate a live interpreter with `importlib.reload` (which is
+    /// brittle once classes/closures/decorator-bound state from the old
+    /// definitions are referenced from elsewhere), we drop the whole process
+    /// and let it re-import everything on the next `run_test`. The fresh
+    /// process replays cached `register_hooks` calls so fixtures keep
+    /// working — same path as crash recovery.
+    pub async fn restart_workers(&self) {
+        // Restart must reach every worker, so we send N messages (one per
+        // worker) and wait for all acknowledgements.
         let mut ack_rxs = Vec::with_capacity(self.size);
         for _ in 0..self.size {
             let (ack_tx, ack_rx) = oneshot::channel();
-            let _ = self
-                .work_tx
-                .send(WorkerMsg::Reload(modules.clone(), ack_tx))
-                .await;
+            let _ = self.work_tx.send(WorkerMsg::Restart(ack_tx)).await;
             ack_rxs.push(ack_rx);
         }
         for ack_rx in ack_rxs {
@@ -322,11 +328,16 @@ async fn worker_task(
                     }
                 }
             }
-            WorkerMsg::Reload(modules, ack_tx) => {
-                trace!("worker_task: reload {modules:?}");
-                if let Some(w) = state.process.as_mut() {
-                    let _ = w.reload(&modules).await;
+            WorkerMsg::Restart(ack_tx) => {
+                trace!("worker_task: restart");
+                if let Some(mut w) = state.process.take() {
+                    w.shutdown().await;
                 }
+                // Eagerly respawn so the next Unit doesn't pay Python
+                // startup latency. ensure_worker replays cached
+                // register_hooks against the fresh process, mirroring
+                // the crash-recovery path.
+                let _ = ensure_worker(&mut state, &python_bin, &path_refs, &root).await;
                 let _ = ack_tx.send(());
             }
             WorkerMsg::Shutdown => {
@@ -472,6 +483,106 @@ def test_third(n: int = Depends(counter)) -> None:
             1,
             "crashing test must run exactly once (no retry), got {count:?}"
         );
+
+        pool.shutdown();
+    }
+
+    /// Restarting the pool must yield a *fresh* Python interpreter — not
+    /// just an `importlib.reload`-mutated module. We prove this by
+    /// recording one tally mark per fresh import of the test module: the
+    /// module body increments a sidecar counter on every initial load.
+    /// Importlib.reload would re-run the body too, but in production it
+    /// leaves classes/closures bound to the old definitions in *other*
+    /// modules — the brittleness this rearchitecture exists to fix.
+    /// A second tally after `restart_workers` confirms a brand new
+    /// interpreter is in play.
+    #[tokio::test]
+    async fn restart_workers_runs_module_body_on_fresh_interpreter() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+
+        let counter_file = dir.path().join("IMPORT_COUNT");
+        let counter_escaped = counter_file.to_string_lossy().replace('\\', "\\\\");
+        let test_file = dir.path().join("test_restart_state.py");
+        let source = format!(
+            r#"from tryke import test, expect
+
+with open("{counter_escaped}", "a") as f:
+    f.write("x")
+    f.flush()
+
+@test
+def test_noop() -> None:
+    expect(1).to_equal(1)
+"#
+        );
+        std::fs::write(&test_file, source).expect("write test file");
+
+        let make_unit = || WorkUnit {
+            tests: vec![make_test_item(
+                "test_restart_state",
+                "test_noop",
+                &test_file,
+            )],
+            hooks: vec![],
+        };
+
+        let pool = WorkerPool::with_python_path(
+            1,
+            &test_python_bin(),
+            dir.path(),
+            &[dir.path().to_path_buf(), python_package_dir()],
+        );
+        pool.warm().await;
+
+        let r1: Vec<TestResult> = pool.run(vec![make_unit()]).collect().await;
+        assert_eq!(r1.len(), 1);
+        assert!(
+            matches!(r1[0].outcome, TestOutcome::Passed),
+            "first run should pass, got {:?}",
+            r1[0].outcome
+        );
+
+        pool.restart_workers().await;
+
+        let r2: Vec<TestResult> = pool.run(vec![make_unit()]).collect().await;
+        assert_eq!(r2.len(), 1);
+        assert!(
+            matches!(r2[0].outcome, TestOutcome::Passed),
+            "second run should pass on fresh interpreter, got {:?}",
+            r2[0].outcome
+        );
+
+        let count = std::fs::read_to_string(&counter_file).unwrap_or_default();
+        assert_eq!(
+            count.len(),
+            2,
+            "module body must run once per fresh interpreter \
+             (1 initial + 1 after restart_workers); got {count:?}"
+        );
+
+        pool.shutdown();
+    }
+
+    /// `restart_workers` on a pool with no live workers (warm not called,
+    /// no tests run yet) must be a no-op that still acks. Hitting this
+    /// path matters because the file watcher can fire before the user
+    /// triggers any test run, and the watcher awaits the ack.
+    #[tokio::test]
+    async fn restart_workers_with_no_live_processes_acks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+
+        let pool = WorkerPool::with_python_path(
+            2,
+            &test_python_bin(),
+            dir.path(),
+            &[dir.path().to_path_buf(), python_package_dir()],
+        );
+        // No warm() — workers are not yet spawned.
+        let restarted =
+            tokio::time::timeout(std::time::Duration::from_secs(10), pool.restart_workers()).await;
+        assert!(restarted.is_ok(), "restart_workers must ack within timeout");
 
         pool.shutdown();
     }

@@ -121,14 +121,14 @@ pub async fn run_watch(
         );
         let modules = discoverer.affected_modules(&paths);
         if modules.is_empty() {
-            debug!("watch: no modules affected by change — skipping pool.reload");
+            debug!("watch: no modules affected by change — skipping worker restart");
         } else {
             debug!(
-                "watch: reloading {} module(s) in worker pool: {}",
+                "watch: restarting worker pool to pick up changes in {} module(s): {}",
                 modules.len(),
                 modules.join(", ")
             );
-            pool.reload(modules).await;
+            pool.restart_workers().await;
         }
         discoverer.rediscover_changed(&paths);
         clear_if_tty();

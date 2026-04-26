@@ -16,9 +16,13 @@
 //!    are resolved and injected before the test function runs.
 //! 3. `finalize_hooks`   — after the last test in a module, Rust sends
 //!    [`FinalizeHooksParams`] so `per="scope"` teardown runs.
-//! 4. `reload` (watch/server mode only) — [`ReloadParams`] tells the worker
-//!    to drop any cached import of the listed dotted module names and
-//!    invalidate their cached executors. Next test triggers a fresh import.
+//!
+//! Watch and server mode pick up code changes by killing each worker
+//! subprocess and respawning a fresh one (see
+//! [`crate::pool::WorkerPool::restart_workers`]) — there is no `reload` RPC.
+//! In-process `importlib.reload` is too brittle once classes/closures
+//! captured under the old definitions are referenced from elsewhere; a
+//! clean process is the only reliable way to drop that state.
 //!
 //! Because hooks are discovered statically by Ruff (not by importing), the
 //! runner knows every `@fixture` name and every `Depends(...)` reference
@@ -115,11 +119,6 @@ pub struct FinalizeHooksParams {
 pub struct RunDoctestParams {
     pub module: String,
     pub object_path: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ReloadParams {
-    pub modules: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

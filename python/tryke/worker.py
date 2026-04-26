@@ -18,14 +18,13 @@ Supported methods:
 - `finalize_hooks {module}` → `null`
 - `run_test    {module, function, xfail?, groups?}` → tagged outcome dict
 - `run_doctest {module, object_path}` → tagged outcome dict
-- `reload {modules: [...]}` → `null`  (watch/server mode only)
 
 The wire format mirrors `crates/tryke_runner/src/protocol.rs`. The
 TypedDicts below (`_AssertionWire`, `_PassedResult`, …) are the result
 shapes the runner decodes. The hook-related request shapes are handled
-at the dispatch boundary in `_register_hooks` / `_reload` — the Rust
-side statically discovered the fixture metadata with Ruff, so the
-worker just trusts the incoming list and does not re-parse source.
+at the dispatch boundary in `_register_hooks` — the Rust side
+statically discovered the fixture metadata with Ruff, so the worker
+just trusts the incoming list and does not re-parse source.
 
 ## Hook lifecycle
 
@@ -41,9 +40,11 @@ worker just trusts the incoming list and does not re-parse source.
    teardown callbacks. Result is cached in `self._executors[module]`.
 4. After every test in a module has run, the runner sends
    `finalize_hooks` and the executor runs `per="scope"` teardown.
-5. In watch/server mode, file changes trigger a `reload` which drops
-   `self._modules[name]` / `self._executors[name]` and calls
-   `importlib.reload(...)` so the next `run_test` gets a fresh import.
+5. In watch/server mode, file changes do not reach the worker over the
+   wire — the runner instead kills this subprocess and respawns it,
+   replaying `register_hooks` on the fresh process. `importlib.reload`
+   is not used; a clean interpreter is the only reliable way to drop
+   classes and closures captured under the old definitions.
 """
 
 from __future__ import annotations
@@ -97,9 +98,9 @@ if TYPE_CHECKING:
 _TRYKE_PKG = str(Path(__file__).resolve().parent)
 
 # Worker-side logger. Debug/trace output is useful when auditing module
-# reloads under watch/server mode; enable with `TRYKE_WORKER_LOG=DEBUG`
-# (or `TRACE`). Messages go to stderr so they don't corrupt the JSON-RPC
-# channel on stdout. Off by default.
+# import and dispatch; enable with `TRYKE_WORKER_LOG=DEBUG` (or `TRACE`).
+# Messages go to stderr so they don't corrupt the JSON-RPC channel on
+# stdout. Off by default.
 _log = logging.getLogger("tryke.worker")
 
 
@@ -478,12 +479,6 @@ class Worker:
                 self._require_str(params, "module", method),
                 str(params.get("object_path", "")),
             )
-        if method == "reload":
-            raw = params.get("modules", [])
-            if not isinstance(raw, list):
-                msg = "method 'reload' parameter 'modules' must be a list"
-                raise _InvalidParamsError(msg)
-            return self._reload([str(m) for m in raw])
         msg = f"unknown method: {method}"
         raise ValueError(msg)
 
@@ -525,7 +520,8 @@ class Worker:
 
         Any previously-cached :class:`HookExecutor` for this module is
         dropped so the next test rebuilds fixtures from the fresh
-        metadata — this matters after `reload` or re-registration.
+        metadata — this matters when the runner re-registers the same
+        module (e.g. after a worker respawn during watch/server mode).
         """
         if not isinstance(hooks, list):
             return
@@ -853,47 +849,6 @@ class Worker:
             )
         return _passed(ms, out, err)
 
-    def _reload(self, module_names: list[str]) -> None:
-        """Drop cached imports and executors for the given modules.
-
-        Called by the runner in watch/server mode when the file watcher
-        reports a change that affects these modules. We use
-        :func:`importlib.reload` rather than popping ``sys.modules`` so
-        classes/functions imported *elsewhere* under the old module
-        identity stay referencable — ``reload`` mutates the existing
-        module object in place instead of building a new one.
-
-        The cached :class:`HookExecutor` is always dropped, even if the
-        module was never imported in this worker, because a fresh
-        ``register_hooks`` from the runner may have arrived before the
-        next ``run_test``.
-        """
-        _log.debug("reload: requested modules=%s", module_names)
-        reloaded_count = 0
-        for name in module_names:
-            if name in sys.modules:
-                try:
-                    reloaded = importlib.reload(sys.modules[name])
-                except Exception:
-                    _log.exception("reload: importlib.reload failed for %s", name)
-                    raise
-                self._modules[name] = reloaded
-                reloaded_count += 1
-                _log.debug("reload: reloaded %s", name)
-            else:
-                _log.debug(
-                    "reload: %s not in sys.modules — skipping reload, "
-                    "executor will be rebuilt on next run_test",
-                    name,
-                )
-            # Clear cached executor so hooks are re-discovered on next run.
-            self._executors.pop(name, None)
-        _log.debug(
-            "reload: done — %d/%d module(s) actually reloaded",
-            reloaded_count,
-            len(module_names),
-        )
-
 
 def _configure_logging_from_env() -> None:
     """Opt-in worker logging via ``TRYKE_WORKER_LOG``.
@@ -901,8 +856,8 @@ def _configure_logging_from_env() -> None:
     Off by default so normal test runs don't emit anything on stderr.
     Set ``TRYKE_WORKER_LOG=DEBUG`` (or ``INFO`` / ``TRACE``) before
     invoking ``tryke test``/``tryke watch``/``tryke server`` to trace
-    module registration and reload behavior. Output goes to stderr so
-    it never contaminates the JSON-RPC stream on stdout.
+    module registration and dispatch. Output goes to stderr so it never
+    contaminates the JSON-RPC stream on stdout.
     """
     level_name = os.environ.get("TRYKE_WORKER_LOG", "").strip().upper()
     if not level_name:

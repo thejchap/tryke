@@ -71,7 +71,7 @@ File changes trigger a `discover_complete` notification with the updated test li
 The server watches all `.py` files in the project (respecting `.gitignore`) with a 200ms debounce. When files change:
 
 1. The import graph is incrementally updated
-2. Affected modules are reloaded in the worker pool
+2. The worker subprocesses are restarted so the next run loads fresh code
 3. A `discover_complete` notification is broadcast to all connected clients
 
 This means editors can keep their test explorer up to date in real time.

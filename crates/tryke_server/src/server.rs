@@ -80,14 +80,14 @@ impl Server {
                     (modules, tests)
                 };
                 if modules.is_empty() {
-                    debug!("server: no modules affected by change — skipping pool.reload");
+                    debug!("server: no modules affected by change — skipping worker restart");
                 } else {
                     debug!(
-                        "server: reloading {} module(s) in worker pool: {}",
+                        "server: restarting worker pool to pick up changes in {} module(s): {}",
                         modules.len(),
                         modules.join(", ")
                     );
-                    pool_for_watcher.reload(modules).await;
+                    pool_for_watcher.restart_workers().await;
                 }
                 debug!("file change: {} affected tests", tests.len());
                 let notif = Notification {

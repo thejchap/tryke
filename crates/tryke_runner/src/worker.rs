@@ -10,7 +10,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tryke_types::{Assertion, ExpectedAssertion, TestItem, TestOutcome, TestResult};
 
 use crate::protocol::{
-    AssertionWire, FinalizeHooksParams, RegisterHooksParams, ReloadParams, RpcRequest, RpcResponse,
+    AssertionWire, FinalizeHooksParams, RegisterHooksParams, RpcRequest, RpcResponse,
     RunDoctestParams, RunTestParams, RunTestResultWire,
 };
 
@@ -192,16 +192,6 @@ impl WorkerProcess {
         })?;
         let wire: RunTestResultWire = self.call("run_doctest", Some(params)).await?;
         Ok(convert_result(test.clone(), wire))
-    }
-
-    #[expect(clippy::missing_errors_doc)]
-    pub async fn reload(&mut self, modules: &[String]) -> Result<()> {
-        let params = serde_json::to_value(ReloadParams {
-            modules: modules.to_vec(),
-        })?;
-        self.call::<serde_json::Value>("reload", Some(params))
-            .await?;
-        Ok(())
     }
 
     #[expect(clippy::missing_errors_doc)]

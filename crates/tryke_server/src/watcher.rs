@@ -10,6 +10,13 @@ use log::debug;
 use notify::RecommendedWatcher;
 use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
 
+// 50ms is enough to coalesce the burst of inotify events the kernel emits
+// for a single write syscall (typically sub-ms apart). We rely on
+// `ChangeFilter` further downstream — not on a wide debounce window — to
+// suppress duplicate restarts from editor tail activity that arrives after
+// this window.
+const DEBOUNCE_DELAY: Duration = Duration::from_millis(50);
+
 fn build_gitignore(root: &Path, excludes: &[String]) -> Gitignore {
     let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let mut builder = GitignoreBuilder::new(&canonical);
@@ -28,32 +35,24 @@ pub fn spawn_watcher(
     tx: mpsc::Sender<Vec<PathBuf>>,
 ) -> anyhow::Result<Debouncer<RecommendedWatcher>> {
     let gitignore = build_gitignore(root, excludes);
-    // 50ms is enough to coalesce the burst of inotify events the kernel
-    // emits for a single write syscall (typically sub-ms apart). We rely
-    // on `ChangeFilter` further downstream — not on a wide debounce
-    // window — to suppress duplicate restarts from editor tail activity
-    // that arrives after this window.
-    let mut debouncer = new_debouncer(
-        Duration::from_millis(50),
-        move |res: DebounceEventResult| {
-            if let Ok(events) = res {
-                let paths: Vec<PathBuf> = events
-                    .iter()
-                    .filter(|e| e.path.extension().is_some_and(|ext| ext == "py"))
-                    .filter(|e| {
-                        !gitignore
-                            .matched_path_or_any_parents(&e.path, false)
-                            .is_ignore()
-                    })
-                    .map(|e| e.path.clone())
-                    .collect();
-                if !paths.is_empty() {
-                    debug!("file changes detected: {paths:?}");
-                    let _ = tx.send(paths);
-                }
+    let mut debouncer = new_debouncer(DEBOUNCE_DELAY, move |res: DebounceEventResult| {
+        if let Ok(events) = res {
+            let paths: Vec<PathBuf> = events
+                .iter()
+                .filter(|e| e.path.extension().is_some_and(|ext| ext == "py"))
+                .filter(|e| {
+                    !gitignore
+                        .matched_path_or_any_parents(&e.path, false)
+                        .is_ignore()
+                })
+                .map(|e| e.path.clone())
+                .collect();
+            if !paths.is_empty() {
+                debug!("file changes detected: {paths:?}");
+                let _ = tx.send(paths);
             }
-        },
-    )?;
+        }
+    })?;
     debouncer
         .watcher()
         .watch(root, notify::RecursiveMode::Recursive)?;
@@ -88,12 +87,13 @@ impl FileSig {
 
 /// Drops watcher events that don't reflect a real content change.
 ///
-/// `notify-debouncer-mini` coalesces inotify bursts within its 200ms
-/// quiet window, but a single editor save can still produce two batches
-/// when the editor's tail activity (metadata fsync, swap-file cleanup,
-/// format-on-save with identical output, LSP write) lands outside that
-/// window. Without dedup, each batch triggers its own restart cycle —
-/// the user perceives one save as two restarts.
+/// `notify-debouncer-mini` coalesces inotify bursts within its quiet
+/// window (see `DEBOUNCE_DELAY`), but a single editor save can still
+/// produce two batches when the editor's tail activity (metadata
+/// fsync, swap-file cleanup, format-on-save with identical output,
+/// LSP write) lands outside that window. Without dedup, each batch
+/// triggers its own restart cycle — the user perceives one save as
+/// two restarts.
 ///
 /// `ChangeFilter` answers the deterministic question: "did the file's
 /// `(mtime, size)` actually move since the last batch we accepted?"
@@ -188,7 +188,7 @@ mod tests {
         fs::write(&txt_file, "some text").expect("write txt file");
 
         assert!(
-            rx.recv_timeout(Duration::from_millis(500)).is_err(),
+            rx.recv_timeout(Duration::from_millis(400)).is_err(),
             "should not fire for non-py files"
         );
     }
@@ -210,7 +210,7 @@ mod tests {
         fs::write(&ignored_file, "x = 2").expect("update ignored py file");
 
         assert!(
-            rx.recv_timeout(Duration::from_millis(500)).is_err(),
+            rx.recv_timeout(Duration::from_millis(400)).is_err(),
             "should not fire for gitignored py files"
         );
     }

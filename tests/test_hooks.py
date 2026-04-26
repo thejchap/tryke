@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, assert_type
+from typing import TYPE_CHECKING, Annotated, assert_type
 
 import tryke
 from tryke import Depends, describe, expect, fixture, test
@@ -12,6 +12,7 @@ from tryke.hooks import (
     DependencyResolver,
     HookExecutor,
     _Depends,
+    _depends_from_annotation,
     _fixture_per,
 )
 
@@ -223,6 +224,135 @@ with describe("DependencyResolver"):
         expect(
             resolver.resolve_hook(per_scope), "per-scope preserved across clear"
         ).to_equal(1)
+
+
+# Module-level helpers used by the "Depends via Annotated" tests below.
+# These are deliberately *not* decorated with ``@fixture`` — they exist
+# purely to give the resolver something to chase, and module-level
+# ``per="scope"`` fixtures would force the whole file onto a single
+# worker. ``DependencyResolver`` defaults undecorated callables to
+# ``per="test"``. They're at module scope (not inside a test function)
+# so PEP-563 string annotations resolve via ``typing.get_type_hints``.
+def _annotated_db() -> str:
+    return "conn"
+
+
+def _annotated_cache() -> int:
+    return 7
+
+
+def _annotated_table(conn: Annotated[str, Depends(_annotated_db)]) -> str:
+    return f"{conn}/table"
+
+
+with describe("Depends via Annotated"):
+
+    @test(name="_depends_from_annotation extracts _Depends from Annotated metadata")
+    def test_extract_from_annotated_metadata() -> None:
+        def hook() -> int:
+            return 1
+
+        annotation = Annotated[int, Depends(hook)]
+        # ``_Depends`` is a frozen dataclass, so equality compares the
+        # wrapped callable by identity — no need to unwrap manually.
+        expect(
+            _depends_from_annotation(annotation),
+            "extracts the _Depends marker",
+        ).to_equal(_Depends(hook))
+
+    @test(name="_depends_from_annotation returns None for plain type")
+    def test_extract_from_plain_type() -> None:
+        expect(_depends_from_annotation(int), "no metadata on bare int").to_be_none()
+        expect(_depends_from_annotation(None), "None has no metadata").to_be_none()
+        expect(
+            _depends_from_annotation(Annotated[int, "no depends here"]),
+            "Annotated without _Depends metadata",
+        ).to_be_none()
+
+    @test(name="_depends_from_annotation picks the first _Depends in metadata")
+    def test_extract_picks_first_depends() -> None:
+        def hook_a() -> int:
+            return 1
+
+        def hook_b() -> int:
+            return 2
+
+        annotation = Annotated[int, Depends(hook_a), "extra", Depends(hook_b)]
+        expect(
+            _depends_from_annotation(annotation),
+            "first _Depends wins",
+        ).to_equal(_Depends(hook_a))
+
+    @test(name="resolver resolves Annotated[T, Depends(...)] params")
+    def test_resolver_handles_annotated_form() -> None:
+        resolver = DependencyResolver()
+        result = resolver.resolve(_annotated_table)
+        expect(result, "Annotated metadata is resolved").to_equal({"conn": "conn"})
+
+    @test(name="default-value Depends takes precedence over Annotated metadata")
+    def test_default_form_wins_over_annotated() -> None:
+        # Locally defined for runtime injection; closure types are fine
+        # because both Depends markers are runtime objects, not strings.
+        @fixture(per="scope")
+        def primary() -> str:
+            return "primary"
+
+        @fixture(per="scope")
+        def secondary() -> str:
+            return "secondary"
+
+        @fixture
+        def consumer(
+            x: Annotated[str, Depends(secondary)] = Depends(primary),
+        ) -> str:
+            return x
+
+        resolver = DependencyResolver()
+        result = resolver.resolve(consumer)
+        expect(result, "default Depends wins").to_equal({"x": "primary"})
+
+    @test(name="resolver mixes default and Annotated Depends in same function")
+    def test_mixed_default_and_annotated() -> None:
+        resolver = DependencyResolver()
+
+        # Use module-level fixtures so get_type_hints can resolve the
+        # Annotated form's string annotation against module globals.
+        def consumer(
+            conn: Annotated[str, Depends(_annotated_db)],
+            count: int = Depends(_annotated_cache),
+        ) -> tuple[str, int]:
+            return conn, count
+
+        result = resolver.resolve(consumer)
+        expect(result, "both forms resolved together").to_equal(
+            {"conn": "conn", "count": 7}
+        )
+
+    @test(name="resolver tolerates unresolvable annotations on local fixtures")
+    def test_resolver_ignores_unresolvable_annotation() -> None:
+        # Annotation references a local closure type that
+        # ``typing.get_type_hints`` cannot resolve under PEP 563. The
+        # resolver must fall back to the default-value form rather than
+        # raising NameError.
+        class Local:
+            pass
+
+        @fixture(per="scope")
+        def db() -> Local:
+            return Local()
+
+        @fixture
+        def consumer(value: Local = Depends(db)) -> Local:
+            return value
+
+        resolver = DependencyResolver()
+        result = resolver.resolve(consumer)
+        expect(set(result.keys()), "default-form Depends still resolves").to_equal(
+            {"value"}
+        )
+        expect(
+            isinstance(result["value"], Local), "value has the right type"
+        ).to_be_truthy()
 
 
 with describe("HookExecutor basics"):

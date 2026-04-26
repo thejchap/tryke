@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
+import typing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, NamedTuple, overload
 
@@ -58,7 +59,7 @@ class _Depends:
     and resolves them before calling the function.
     """
 
-    dependency: Callable[..., Any]
+    dependency: _FixtureFn
 
 
 if TYPE_CHECKING:
@@ -73,10 +74,28 @@ if TYPE_CHECKING:
     def Depends[T](dep: Callable[..., T], /) -> T: ...
 
 
-def Depends(dep: Callable[..., Any], /) -> Any:  # noqa: N802 - matches FastAPI convention
+def _depends_from_annotation(annotation: object) -> _Depends | None:
+    """Return the first ``_Depends`` in an ``Annotated[...]`` annotation.
+
+    ``typing.Annotated`` exposes its metadata tuple as ``__metadata__``;
+    every other annotation form returns ``None``. Multiple ``Depends()``
+    markers in the same ``Annotated`` are not meaningful — the first one
+    wins, mirroring how FastAPI consumes ``Annotated`` metadata.
+    """
+    metadata = getattr(annotation, "__metadata__", None)
+    if metadata is None:
+        return None
+    for meta in metadata:
+        if isinstance(meta, _Depends):
+            return meta
+    return None
+
+
+def Depends(dep: _FixtureFn, /) -> Any:  # noqa: N802, ANN401 - matches FastAPI convention
     """Declare a dependency on another fixture.
 
-    Used in function signatures to request a resolved value::
+    Used in function signatures to request a resolved value, either as
+    a default value or as ``Annotated`` metadata::
 
         @fixture(per="scope")
         def db() -> Connection:
@@ -84,6 +103,12 @@ def Depends(dep: Callable[..., Any], /) -> Any:  # noqa: N802 - matches FastAPI 
 
         @test
         def my_test(conn: Connection = Depends(db)):
+            ...
+
+        from typing import Annotated
+
+        @test
+        def my_other_test(conn: Annotated[Connection, Depends(db)]):
             ...
 
     Type checkers see ``Depends(db)`` as returning ``Connection``. At
@@ -236,16 +261,39 @@ class DependencyResolver:
             loop.close()
 
     def resolve(self, fn: _FixtureFn) -> dict[str, Any]:
-        """Inspect *fn*'s signature and resolve all ``Depends()`` defaults.
+        """Inspect *fn*'s signature and resolve all ``Depends()`` markers.
+
+        Recognises both forms::
+
+            def fn(x = Depends(other)):           # default-value form
+                ...
+
+            def fn(x: Annotated[T, Depends(other)]):  # Annotated form
+                ...
 
         Returns a dict of ``{param_name: resolved_value}`` suitable for
-        passing as keyword arguments.
+        passing as keyword arguments. The default-value form takes
+        precedence if both are present on the same parameter.
         """
         kwargs: dict[str, Any] = {}
         sig = inspect.signature(fn)
+        # ``get_type_hints`` evaluates string annotations (PEP 563) and
+        # preserves ``Annotated`` metadata when ``include_extras=True``.
+        # Locally-defined fixtures may reference closure types that
+        # cannot be resolved from ``fn.__globals__``; in that case we
+        # silently fall back to the default-value form only.
+        try:
+            hints = typing.get_type_hints(fn, include_extras=True)
+        except Exception:  # noqa: BLE001 - any eval failure means no Annotated info
+            hints = {}
         for name, param in sig.parameters.items():
             if isinstance(param.default, _Depends):
                 kwargs[name] = self.resolve_hook(param.default.dependency)
+                continue
+            annotation = hints.get(name, param.annotation)
+            dep = _depends_from_annotation(annotation)
+            if dep is not None:
+                kwargs[name] = self.resolve_hook(dep.dependency)
         return kwargs
 
     def resolve_hook(self, fn: _FixtureFn) -> Any:  # noqa: ANN401

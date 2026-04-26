@@ -30,6 +30,21 @@ virtualenv so you can import and test the python bindings locally.
 
 run `cargo run test` to test tryke's own python code, using tryke
 
+## rust tests
+
+we use [`cargo-nextest`](https://nexte.st) for the rust test suite. install it
+once:
+
+```bash
+cargo install cargo-nextest --locked
+```
+
+then run the suite with:
+
+```bash
+cargo nextest run --workspace --all-features
+```
+
 ## updating CLI docs
 
 run `cargo run -p tryke_dev --bin generate-cli-docs --` after changing the Rust CLI definitions
@@ -51,7 +66,7 @@ to validate the generated benchmark docs without rewriting files, run
 
 ## updating snapshot tests
 
-1. run `cargo test` — new or changed snapshots are written to
+1. run `cargo nextest run` — new or changed snapshots are written to
 `crates/tryke/tests/snapshots/` as `.snap.new` files
 2. review pending snapshots: `cargo insta review` (interactive) or accept all:
 `cargo insta accept`

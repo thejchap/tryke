@@ -190,6 +190,19 @@ def comprehensive_check():
     expect(response.headers).to_contain("json")    # soft — runs regardless
 ```
 
+### Display names for tests and expectations
+
+Tryke surfaces human-readable labels in reporters where pytest only shows function names and source snippets. Take advantage of this while migrating — names typed once read every time a report is rendered:
+
+```python
+@test("returns the cached row on the second call")
+def hits_cache():
+    expect(rows[0], "first row id").to_equal(42)
+    expect(rows[0], "first row name").to_equal("alice")
+```
+
+`@test("...")` (or `@test(name="...")`) sets the test's display name; the second positional argument to `expect(value, "...")` labels the assertion. Both are static-only metadata — discovery extracts them at parse time, and they show up in `--reporter llm`, `--reporter junit`, and the default text reporter without any runtime cost.
+
 ### Fixtures → `@fixture` + `Depends()`
 
 pytest uses `@pytest.fixture` with implicit parameter-name matching. Tryke uses a single `@fixture` decorator with explicit `Depends()` wiring:
@@ -218,6 +231,8 @@ def test_query(table):
 **Tryke:**
 
 ```python
+from typing import Annotated
+
 from tryke import test, expect, fixture, Depends
 
 @fixture(per="scope")
@@ -225,12 +240,12 @@ def db() -> Connection:
     return create_connection()
 
 @fixture
-def managed_conn(conn: Connection = Depends(db)):
+def managed_conn(conn: Annotated[Connection, Depends(db)]):
     yield conn
     conn.execute("DELETE FROM users")
 
 @test
-def query(conn: Connection = Depends(managed_conn)):
+def query(conn: Annotated[Connection, Depends(managed_conn)]):
     conn.execute("INSERT INTO users (name) VALUES ('alice')")
     expect(conn.execute("SELECT count(*) FROM users")).to_equal(1)
 ```
@@ -404,6 +419,12 @@ it finds **zero** tests at this point — no files have been converted yet).
 Convert test files using the cheat sheet at
 <https://tryke.dev/migration.html>. Do one package / directory at a time and keep
 each conversion small enough to review.
+
+**Display names — use them.** Lift one-line docstrings (or derive a short
+phrase from the function name) into `@test("...")`, and label assertions
+with `expect(value, "...")` as you go. Tryke surfaces both in every
+reporter and discovery extracts them statically — they cost nothing at
+runtime, but retrofitting them later is a separate pass over every test.
 
 **Soft assertions — read this carefully.** Tryke assertions are soft by
 default: every `expect()` in a test runs even if an earlier one fails. See

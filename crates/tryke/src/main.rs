@@ -4,7 +4,9 @@ use anyhow::Result;
 use clap::Parser;
 use log::debug;
 use tryke::cli::{Cli, Commands, ReporterFormat};
-use tryke::discovery::{discover_tests, discover_tests_changed_first, resolved_excludes};
+use tryke::discovery::{
+    discover_tests, discover_tests_changed_first, discover_tests_for_paths, resolved_excludes,
+};
 use tryke::execution::run_tests;
 use tryke::graph::{run_fixture_graph, run_graph};
 use tryke::watch::run_watch;
@@ -105,7 +107,13 @@ fn main() -> Result<()> {
                 .map_err(|e| anyhow::anyhow!(e))?;
 
             let discovery_start = Instant::now();
-            let discovered = if *changed_first {
+            // Fast path: explicit paths without change-based selection
+            // skip the full project walk and import-graph build. The
+            // post-filter (`test_filter.apply` below) still runs to
+            // honor `:line` specs, `--filter`, and `--markers`.
+            let discovered = if !paths.is_empty() && !*changed && !*changed_first {
+                discover_tests_for_paths(root_path, &test_filter.path_specs, &excludes)
+            } else if *changed_first {
                 discover_tests_changed_first(root_path, base_branch.as_deref(), &excludes)
             } else {
                 discover_tests(root_path, *changed, base_branch.as_deref(), &excludes)

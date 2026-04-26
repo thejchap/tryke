@@ -105,6 +105,8 @@ def Depends(dep: _FixtureFn, /) -> Any:  # noqa: N802, ANN401 - matches FastAPI 
         def my_test(conn: Connection = Depends(db)):
             ...
 
+        from typing import Annotated
+
         @test
         def my_other_test(conn: Annotated[Connection, Depends(db)]):
             ...

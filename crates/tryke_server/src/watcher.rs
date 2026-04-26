@@ -9,6 +9,13 @@ use log::debug;
 use notify::RecommendedWatcher;
 use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
 
+// Tests use a shorter delay so the suite doesn't pay 200ms per watcher case;
+// the real watcher needs 200ms to coalesce bursty editor saves.
+#[cfg(not(test))]
+const DEBOUNCE_DELAY: Duration = Duration::from_millis(200);
+#[cfg(test)]
+const DEBOUNCE_DELAY: Duration = Duration::from_millis(50);
+
 fn build_gitignore(root: &Path, excludes: &[String]) -> Gitignore {
     let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let mut builder = GitignoreBuilder::new(&canonical);
@@ -27,27 +34,24 @@ pub fn spawn_watcher(
     tx: mpsc::Sender<Vec<PathBuf>>,
 ) -> anyhow::Result<Debouncer<RecommendedWatcher>> {
     let gitignore = build_gitignore(root, excludes);
-    let mut debouncer = new_debouncer(
-        Duration::from_millis(200),
-        move |res: DebounceEventResult| {
-            if let Ok(events) = res {
-                let paths: Vec<PathBuf> = events
-                    .iter()
-                    .filter(|e| e.path.extension().is_some_and(|ext| ext == "py"))
-                    .filter(|e| {
-                        !gitignore
-                            .matched_path_or_any_parents(&e.path, false)
-                            .is_ignore()
-                    })
-                    .map(|e| e.path.clone())
-                    .collect();
-                if !paths.is_empty() {
-                    debug!("file changes detected: {paths:?}");
-                    let _ = tx.send(paths);
-                }
+    let mut debouncer = new_debouncer(DEBOUNCE_DELAY, move |res: DebounceEventResult| {
+        if let Ok(events) = res {
+            let paths: Vec<PathBuf> = events
+                .iter()
+                .filter(|e| e.path.extension().is_some_and(|ext| ext == "py"))
+                .filter(|e| {
+                    !gitignore
+                        .matched_path_or_any_parents(&e.path, false)
+                        .is_ignore()
+                })
+                .map(|e| e.path.clone())
+                .collect();
+            if !paths.is_empty() {
+                debug!("file changes detected: {paths:?}");
+                let _ = tx.send(paths);
             }
-        },
-    )?;
+        }
+    })?;
     debouncer
         .watcher()
         .watch(root, notify::RecursiveMode::Recursive)?;
@@ -101,7 +105,7 @@ mod tests {
         fs::write(&txt_file, "some text").expect("write txt file");
 
         assert!(
-            rx.recv_timeout(Duration::from_millis(500)).is_err(),
+            rx.recv_timeout(Duration::from_millis(400)).is_err(),
             "should not fire for non-py files"
         );
     }
@@ -123,7 +127,7 @@ mod tests {
         fs::write(&ignored_file, "x = 2").expect("update ignored py file");
 
         assert!(
-            rx.recv_timeout(Duration::from_millis(500)).is_err(),
+            rx.recv_timeout(Duration::from_millis(400)).is_err(),
             "should not fire for gitignored py files"
         );
     }

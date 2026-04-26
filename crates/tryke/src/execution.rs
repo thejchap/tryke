@@ -214,7 +214,7 @@ pub async fn report_cycle(
 
 #[cfg(test)]
 mod tests {
-    use std::{env, path::PathBuf};
+    use std::path::PathBuf;
 
     use tryke_discovery::Discoverer;
     use tryke_reporter::{DotReporter, JSONReporter, JUnitReporter, TextReporter};
@@ -229,10 +229,6 @@ mod tests {
             .canonicalize()
             .expect("workspace root");
         tryke_runner::resolve_python(&root)
-    }
-
-    fn cwd() -> PathBuf {
-        env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     }
 
     async fn run_cycle(
@@ -253,16 +249,18 @@ mod tests {
         .await
     }
 
-    #[tokio::test]
-    async fn test_command_text() {
-        let mut reporter = TextReporter::with_writer(Vec::new());
-        let root = cwd();
-        let excludes = resolved_excludes(&root, &[], &[]);
-        let tests = discover_tests(&root, false, None, &excludes).tests;
-        // ignore pass/fail result — this test verifies the reporter doesn't panic
+    /// Smoke-test a reporter against the full `run_tests` pipeline using an
+    /// empty project. Exercises check_python_version, pool init/teardown, and
+    /// the reporter's run_start/run_summary callbacks without doing real work.
+    /// Snapshot tests in `tests/snapshots.rs` cover per-test rendering.
+    async fn smoke_run_tests(reporter: &mut dyn Reporter) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        let excludes = resolved_excludes(dir.path(), &[], &[]);
+        let tests = discover_tests(dir.path(), false, None, &excludes).tests;
         let _ = run_tests(
-            &mut reporter,
-            &root,
+            reporter,
+            dir.path(),
             tests,
             &[],
             None,
@@ -272,66 +270,30 @@ mod tests {
             None,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_command_text() {
+        let mut reporter = TextReporter::with_writer(Vec::new());
+        smoke_run_tests(&mut reporter).await;
     }
 
     #[tokio::test]
     async fn test_command_json() {
         let mut reporter = JSONReporter::with_writer(Vec::new());
-        let root = cwd();
-        let excludes = resolved_excludes(&root, &[], &[]);
-        let tests = discover_tests(&root, false, None, &excludes).tests;
-        let _ = run_tests(
-            &mut reporter,
-            &root,
-            tests,
-            &[],
-            None,
-            None,
-            DistMode::Test,
-            None,
-            None,
-        )
-        .await;
+        smoke_run_tests(&mut reporter).await;
     }
 
     #[tokio::test]
     async fn test_command_dot() {
         let mut reporter = DotReporter::with_writer(Vec::new());
-        let root = cwd();
-        let excludes = resolved_excludes(&root, &[], &[]);
-        let tests = discover_tests(&root, false, None, &excludes).tests;
-        let _ = run_tests(
-            &mut reporter,
-            &root,
-            tests,
-            &[],
-            None,
-            None,
-            DistMode::Test,
-            None,
-            None,
-        )
-        .await;
+        smoke_run_tests(&mut reporter).await;
     }
 
     #[tokio::test]
     async fn test_command_junit() {
         let mut reporter = JUnitReporter::with_writer(Vec::new());
-        let root = cwd();
-        let excludes = resolved_excludes(&root, &[], &[]);
-        let tests = discover_tests(&root, false, None, &excludes).tests;
-        let _ = run_tests(
-            &mut reporter,
-            &root,
-            tests,
-            &[],
-            None,
-            None,
-            DistMode::Test,
-            None,
-            None,
-        )
-        .await;
+        smoke_run_tests(&mut reporter).await;
     }
 
     #[tokio::test]

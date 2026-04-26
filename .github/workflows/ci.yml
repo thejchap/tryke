@@ -70,8 +70,11 @@ jobs:
           allow-prereleases: true
       - run: rustup show
       - uses: Swatinem/rust-cache@v2.8.2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
       - run: cargo build --verbose
-      - run: cargo test --verbose
+      - run: cargo nextest run --workspace --all-features
       - run: cargo run -- test
 
   ci:

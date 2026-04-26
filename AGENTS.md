@@ -13,6 +13,15 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo run test --reporter llm
 ```
 
+## running rust tests
+
+we use [`cargo-nextest`](https://nexte.st) — install once with
+`cargo install cargo-nextest --locked`, then:
+
+```bash
+cargo nextest run --workspace --all-features
+```
+
 ## dev guidelines
 
 - all changes must be tested. if you're not testing your changes, you're not done.

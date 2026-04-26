@@ -22,7 +22,6 @@ type HitLocation = tuple[
 class Coverage:
     def __init__(self) -> None:
         self._hits: set[HitLocation] = set()
-        self._in_scope: dict[str, bool] = {}
 
     def register(self) -> None:
         existing_tool = mon.get_tool(TOOL_ID)

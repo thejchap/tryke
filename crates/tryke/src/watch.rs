@@ -109,7 +109,20 @@ pub async fn run_watch(
     let (tx, rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
     let _debouncer = tryke_server::watcher::spawn_watcher(root, excludes, tx)?;
 
-    for paths in &rx {
+    while let Ok(first) = rx.recv() {
+        // Coalesce any additional batches the watcher has already
+        // queued. A single editor save can produce events whose
+        // intermediate quiet windows fall just outside the watcher's
+        // debounce — so two batches arrive back-to-back. Without this
+        // drain, each batch triggers its own restart + test cycle,
+        // which the user perceives as a double-restart.
+        let mut paths = first;
+        while let Ok(more) = rx.try_recv() {
+            paths.extend(more);
+        }
+        paths.sort();
+        paths.dedup();
+
         debug!(
             "watch: file change batch — {} path(s) changed: {}",
             paths.len(),

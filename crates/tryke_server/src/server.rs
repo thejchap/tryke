@@ -71,7 +71,19 @@ impl Server {
         let bcast_for_watcher = bcast_tx.clone();
         let pool_for_watcher = Arc::clone(&pool);
         tokio::spawn(async move {
-            while let Some(paths) = watcher_rx.recv().await {
+            while let Some(first) = watcher_rx.recv().await {
+                // Coalesce any additional batches already queued. A
+                // single editor save can produce events whose quiet
+                // windows straddle the watcher's debounce, yielding two
+                // back-to-back batches. Without this drain we would
+                // restart the worker pool twice for one save.
+                let mut paths = first;
+                while let Ok(more) = watcher_rx.try_recv() {
+                    paths.extend(more);
+                }
+                paths.sort();
+                paths.dedup();
+
                 let (modules, tests) = {
                     let mut disc = disc_for_watcher.lock().await;
                     let modules = disc.affected_modules(&paths);

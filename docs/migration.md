@@ -410,6 +410,19 @@ each conversion small enough to review.
 For each file:
 
 - Replace non-parametrized `def test_foo(...)` with `@test` + `def foo(...)`.
+- **Add a human-readable display name** to each test — `@test("returns 200
+  for known users")` (or `@test(name="...")`) — derived from the test's
+  docstring or its function name. Tryke surfaces this label in every
+  reporter where pytest only shows the function identifier; setting it
+  during the migration is far cheaper than retrofitting later. If a test
+  body has a one-line docstring, lift it into the decorator and delete
+  the docstring.
+- **Label each `expect(...)`** with a short description of what is being
+  checked: `expect(rows[0], "first row id").to_equal(42)`. The label is
+  static-only metadata — it costs nothing at runtime and shows up in
+  `--reporter llm`, JUnit, and the default text reporter, which makes
+  failure triage substantially faster. Skip the label only when the
+  expression is already self-explanatory.
 - Replace `assert` with `expect(...).to_...()` per the assertions table.
 - Replace `pytest.raises(Exc, match=...)` with
   `expect(lambda: ...).to_raise(Exc, match=...)` — **use the `match=` kwarg

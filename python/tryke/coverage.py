@@ -22,7 +22,7 @@ type HitLocation = tuple[
 class Coverage:
     def __init__(self) -> None:
         self._hits: set[HitLocation] = set()
-        self._in_scope: dict[str, bool]
+        self._in_scope: dict[str, bool] = {}
 
     def register(self) -> None:
         existing_tool = mon.get_tool(TOOL_ID)
@@ -36,6 +36,5 @@ class Coverage:
             mon.set_events(TOOL_ID, mon.events.LINE)
 
     def _line_callback(self, code: CodeType, line_number: int) -> object:
-        _ = code
-        _ = line_number
+        self._hits.add((code.co_filename, line_number))
         return mon.DISABLE

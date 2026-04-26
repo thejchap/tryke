@@ -32,6 +32,7 @@ pub struct NextReporter<W: Write = io::Stdout> {
     left_col_width: usize,
     start: Instant,
     subcommand_label: &'static str,
+    watch_hint: Option<String>,
 }
 
 impl NextReporter {
@@ -50,6 +51,7 @@ impl NextReporter {
             left_col_width: 0,
             start: Instant::now(),
             subcommand_label: "tryke test",
+            watch_hint: None,
         }
     }
 }
@@ -76,6 +78,7 @@ impl<W: Write> NextReporter<W> {
             left_col_width: 0,
             start: Instant::now(),
             subcommand_label: "tryke test",
+            watch_hint: None,
         }
     }
 
@@ -243,11 +246,15 @@ impl<W: Write> Reporter for NextReporter<W> {
 
     fn on_run_complete(&mut self, run_summary: &RunSummary) {
         self.bar.clear();
-        summary::write_summary(&mut self.writer, run_summary);
+        summary::write_summary_with_hint(&mut self.writer, run_summary, self.watch_hint.as_deref());
     }
 
     fn set_subcommand_label(&mut self, label: &'static str) {
         self.subcommand_label = label;
+    }
+
+    fn set_watch_hint(&mut self, hint: Option<String>) {
+        self.watch_hint = hint;
     }
 }
 

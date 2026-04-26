@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -25,7 +26,7 @@ pub struct WorkerProcess {
     /// Continuously-drained worker stderr. A background task reads the
     /// child's stderr pipe into this buffer so the pipe never fills and
     /// the worker can't block on a stderr write mid-RPC.
-    stderr_buf: Arc<Mutex<Vec<u8>>>,
+    stderr_buf: Arc<Mutex<VecDeque<u8>>>,
     next_id: u64,
 }
 
@@ -54,7 +55,7 @@ impl WorkerProcess {
         // fills — and the worker stops responding to RPCs, surfacing
         // as "tryke hangs at finalize_hooks". Spawn a drainer that
         // keeps the pipe empty for the worker's lifetime.
-        let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let stderr_buf = Arc::new(Mutex::new(VecDeque::<u8>::new()));
         if let Err(err) = spawn_stderr_drainer(stderr, Arc::clone(&stderr_buf)) {
             if let Err(kill_err) = child.start_kill() {
                 debug!(
@@ -226,13 +227,14 @@ impl WorkerProcess {
         reason = "Preserves pre-fix public async signature"
     )]
     pub async fn drain_stderr(&mut self) -> String {
-        let bytes = {
+        let deque = {
             let mut g = self
                 .stderr_buf
                 .lock()
                 .expect("stderr buffer mutex poisoned");
             std::mem::take(&mut *g)
         };
+        let bytes = Vec::from(deque);
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
@@ -259,7 +261,7 @@ impl Drop for WorkerProcess {
 /// non-async code receive a structured error instead of a panic.
 fn spawn_stderr_drainer(
     stderr: tokio::process::ChildStderr,
-    buf: Arc<Mutex<Vec<u8>>>,
+    buf: Arc<Mutex<VecDeque<u8>>>,
 ) -> Result<()> {
     let handle = tokio::runtime::Handle::try_current()
         .map_err(|e| anyhow!("WorkerProcess::spawn requires an active tokio runtime: {e}"))?;
@@ -280,19 +282,24 @@ fn spawn_stderr_drainer(
     Ok(())
 }
 
-fn append_stderr(buf: &Mutex<Vec<u8>>, data: &[u8]) {
+/// Append `data` to `buf`, capping it at `STDERR_RETAIN_BYTES` by
+/// dropping the oldest bytes. `VecDeque::drain` removes from the front
+/// in `O(excess)` time, making steady-state appends `O(data.len())`
+/// rather than `O(STDERR_RETAIN_BYTES)` as a contiguous `Vec` would require.
+fn append_stderr(buf: &Mutex<VecDeque<u8>>, data: &[u8]) {
     let mut g = buf.lock().expect("stderr buffer mutex poisoned");
     if data.len() >= STDERR_RETAIN_BYTES {
         // A single chunk already fills the cap; keep only its tail.
         g.clear();
-        g.extend_from_slice(&data[data.len() - STDERR_RETAIN_BYTES..]);
+        g.extend(data[data.len() - STDERR_RETAIN_BYTES..].iter().copied());
         return;
     }
     let total = g.len() + data.len();
     if total > STDERR_RETAIN_BYTES {
-        g.drain(..total - STDERR_RETAIN_BYTES);
+        let excess = total - STDERR_RETAIN_BYTES;
+        g.drain(..excess);
     }
-    g.extend_from_slice(data);
+    g.extend(data.iter().copied());
 }
 
 fn build_pythonpath(extra: &[&Path]) -> String {
@@ -711,28 +718,29 @@ mod tests {
 
     #[test]
     fn append_stderr_caps_at_retain_bytes() {
-        let buf = Mutex::new(Vec::<u8>::new());
+        let buf = Mutex::new(VecDeque::<u8>::new());
         // Fill with a recognisable head sequence, then push past the cap.
         let head = vec![b'A'; STDERR_RETAIN_BYTES];
         append_stderr(&buf, &head);
         let tail = vec![b'B'; 1024];
         append_stderr(&buf, &tail);
 
-        let g = buf.lock().unwrap();
+        let mut g = buf.lock().unwrap();
         assert_eq!(g.len(), STDERR_RETAIN_BYTES);
         // Oldest A's are dropped; tail B's retained.
-        assert_eq!(&g[g.len() - tail.len()..], &tail[..]);
-        assert_eq!(g[0], b'A');
+        let bytes = g.make_contiguous();
+        assert_eq!(&bytes[bytes.len() - tail.len()..], &tail[..]);
+        assert_eq!(bytes[0], b'A');
     }
 
     #[test]
     fn append_stderr_handles_single_oversized_write() {
-        let buf = Mutex::new(Vec::<u8>::new());
+        let buf = Mutex::new(VecDeque::<u8>::new());
         let big = vec![b'X'; STDERR_RETAIN_BYTES + 4096];
         append_stderr(&buf, &big);
-        let g = buf.lock().unwrap();
+        let mut g = buf.lock().unwrap();
         assert_eq!(g.len(), STDERR_RETAIN_BYTES);
-        assert!(g.iter().all(|b| *b == b'X'));
+        assert!(g.make_contiguous().iter().all(|b| *b == b'X'));
     }
 
     /// Reproducer for the "tryke hangs at `finalize_hooks`" bug: when the
@@ -761,7 +769,7 @@ mod tests {
             .expect("spawn python3");
 
         let stderr = child.stderr.take().expect("no stderr");
-        let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let stderr_buf: Arc<Mutex<VecDeque<u8>>> = Arc::new(Mutex::new(VecDeque::new()));
         spawn_stderr_drainer(stderr, Arc::clone(&stderr_buf))
             .expect("drainer requires tokio runtime");
 

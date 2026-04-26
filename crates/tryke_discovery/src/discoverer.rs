@@ -318,7 +318,7 @@ impl Discoverer {
         // surface for the discovered subset.
         let dynamic_paths: Vec<PathBuf> = path_set
             .iter()
-            .filter(|p| self.results.get(p).is_some_and(|r| r.dynamic_imports))
+            .filter(|p| self.results.get(*p).is_some_and(|r| r.dynamic_imports))
             .cloned()
             .collect();
         for path in dynamic_paths {
@@ -333,8 +333,10 @@ impl Discoverer {
         }
 
         // Collect tests only from the restricted set so the return is
-        // independent of any prior state on `self.results`.
-        let tests: Vec<TestItem> = path_set
+        // independent of any prior state on `self.results`. Iterate the
+        // sorted `paths` Vec (not the HashSet) so the output order is
+        // deterministic across runs.
+        let tests: Vec<TestItem> = paths
             .iter()
             .filter_map(|p| self.results.get(p))
             .flat_map(|r| r.parsed.tests.clone())

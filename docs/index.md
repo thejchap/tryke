@@ -49,6 +49,8 @@ A Rust-based Python test runner with a Jest-style API.
 ## Getting started
 
 ```python
+from typing import Annotated
+
 import tryke as t
 
 
@@ -66,7 +68,7 @@ with t.describe("users"):
     # By default, fixtures run per-test
     # Fixtures can be composed by requesting other fixtures
     @t.fixture
-    def users(database: dict[str, dict[str, str]] = t.Depends(database)):
+    def users(database: Annotated[dict[str, dict[str, str]], t.Depends(database)]):
         database["users"] = {}
         return database["users"]
 
@@ -74,14 +76,14 @@ with t.describe("users"):
         # Define display labels for tests
         # Async tests are supported
         @t.test("returns a stored user")
-        async def test_get(users: dict[str, str] = t.Depends(users)):
+        async def test_get(users: Annotated[dict[str, str], t.Depends(users)]):
             users["alice"] = "alice@example.com"
             t.expect(users["alice"]).to_equal("alice@example.com")
 
     with t.describe("set"):
 
         @t.test("stores a new user")
-        async def test_set(users: dict[str, str] = t.Depends(users)):
+        async def test_set(users: Annotated[dict[str, str], t.Depends(users)]):
             users["bob"] = "bob@example.com"
             t.expect(users["bob"]).to_equal("bob@example.com")
 

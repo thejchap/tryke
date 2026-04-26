@@ -98,16 +98,18 @@ If your tests modify global state that other tests depend on, consider whether t
 Cross-worker isolation does not extend to tests *within the same worker*. When `@fixture(per="scope")` caches a value, every test in that scope running on that worker receives **the same object by reference**. Mutating it is observable by subsequent tests in the scope, exactly as if it were a module-level global.
 
 ```python
+from typing import Annotated
+
 @fixture(per="scope")
 def config() -> dict[str, str]:
     return {"env": "test"}
 
 @test
-def first(cfg: dict[str, str] = Depends(config)) -> None:
+def first(cfg: Annotated[dict[str, str], Depends(config)]) -> None:
     cfg["env"] = "mutated"  # Leaks to later tests in this scope.
 
 @test
-def second(cfg: dict[str, str] = Depends(config)) -> None:
+def second(cfg: Annotated[dict[str, str], Depends(config)]) -> None:
     # Sees {"env": "mutated"} if first() ran on the same worker.
     ...
 ```

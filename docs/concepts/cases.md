@@ -49,9 +49,11 @@ with describe("arithmetic"):
 
 ### With `@fixture` and `Depends()`
 
-Case kwargs and fixture-injected kwargs are merged at call time. Declare fixture params with `Depends()` defaults alongside case params:
+Case kwargs and fixture-injected kwargs are merged at call time. Declare fixture params with `Depends()` alongside case params:
 
 ```python
+from typing import Annotated
+
 from tryke import Depends, expect, fixture, test
 
 @fixture
@@ -62,7 +64,7 @@ def multiplier() -> int:
     test.case("small", n=1, expected=10),
     test.case("big", n=9, expected=90),
 )
-def scaled(n: int, expected: int, factor: int = Depends(multiplier)):
+def scaled(n: int, expected: int, factor: Annotated[int, Depends(multiplier)]):
     expect(n * factor).to_equal(expected)
 ```
 

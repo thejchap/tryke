@@ -218,6 +218,8 @@ def test_query(table):
 **Tryke:**
 
 ```python
+from typing import Annotated
+
 from tryke import test, expect, fixture, Depends
 
 @fixture(per="scope")
@@ -225,12 +227,12 @@ def db() -> Connection:
     return create_connection()
 
 @fixture
-def managed_conn(conn: Connection = Depends(db)):
+def managed_conn(conn: Annotated[Connection, Depends(db)]):
     yield conn
     conn.execute("DELETE FROM users")
 
 @test
-def query(conn: Connection = Depends(managed_conn)):
+def query(conn: Annotated[Connection, Depends(managed_conn)]):
     conn.execute("INSERT INTO users (name) VALUES ('alice')")
     expect(conn.execute("SELECT count(*) FROM users")).to_equal(1)
 ```

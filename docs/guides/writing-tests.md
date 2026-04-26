@@ -196,9 +196,11 @@ def fresh_user():
 
 ### Sharing state with `Depends()`
 
-Fixtures that produce values share them with tests via `Depends()` in function signatures:
+Fixtures that produce values share them with tests via `Depends()` in function signatures, FastAPI-style:
 
 ```python
+from typing import Annotated
+
 from tryke import fixture, test, expect, Depends
 
 @fixture(per="scope")
@@ -206,24 +208,9 @@ def db() -> Connection:
     return create_connection("test.db")
 
 @fixture
-def fresh_table(conn: Connection = Depends(db)) -> Table:
+def fresh_table(conn: Annotated[Connection, Depends(db)]) -> Table:
     conn.execute("DELETE FROM users")
     return conn.table("users")
-
-@test
-def finds_user(table: Table = Depends(fresh_table)):
-    table.insert({"name": "alice"})
-    expect(table.count()).to_equal(1)
-```
-
-`Depends()` is typed — type checkers see `Depends(db)` as returning `Connection`. At runtime, the framework resolves the dependency chain and passes the values as keyword arguments.
-
-You can also place `Depends()` inside an `Annotated[...]` type, FastAPI-style. The two forms are equivalent — pick whichever reads better:
-
-```python
-from typing import Annotated
-
-from tryke import fixture, test, expect, Depends
 
 @test
 def finds_user(table: Annotated[Table, Depends(fresh_table)]):
@@ -231,7 +218,9 @@ def finds_user(table: Annotated[Table, Depends(fresh_table)]):
     expect(table.count()).to_equal(1)
 ```
 
-If a parameter has both a default-form and an `Annotated`-form `Depends()` (an unusual pattern), the default-form wins.
+`Depends()` is typed — type checkers see `Depends(db)` as returning `Connection`. At runtime, the framework resolves the dependency chain and passes the values as keyword arguments.
+
+The default-value form (`conn: Connection = Depends(db)`) is also supported and behaves identically. The two forms can be mixed in the same signature; if both appear on the same parameter the default-value form wins.
 
 ### `per="scope"` — run once, reuse across tests
 
@@ -244,12 +233,12 @@ def db() -> Connection:
     return create_connection("test.db")
 
 @test
-def first_query(conn: Connection = Depends(db)):
+def first_query(conn: Annotated[Connection, Depends(db)]):
     # Gets the cached connection
     ...
 
 @test
-def second_query(conn: Connection = Depends(db)):
+def second_query(conn: Annotated[Connection, Depends(db)]):
     # Same connection instance as first_query
     ...
 ```
@@ -261,16 +250,18 @@ def second_query(conn: Connection = Depends(db)):
 Use `yield` to express teardown. Code before `yield` is setup; code after is teardown. Works for both `per="test"` and `per="scope"`:
 
 ```python
+from typing import Annotated
+
 from tryke import fixture, test, expect, Depends
 
 @fixture
-def with_transaction(conn: Connection = Depends(db)):
+def with_transaction(conn: Annotated[Connection, Depends(db)]):
     tx = conn.begin()
     yield tx
     tx.rollback()         # runs after the test
 
 @test
-def modifies_data(tx: Transaction = Depends(with_transaction)):
+def modifies_data(tx: Annotated[Transaction, Depends(with_transaction)]):
     tx.execute("INSERT INTO users (name) VALUES ('alice')")
     expect(tx.query("SELECT count(*) FROM users")).to_equal(1)
     # Transaction rolls back after test — no cleanup needed
@@ -281,6 +272,8 @@ def modifies_data(tx: Transaction = Depends(with_transaction)):
 Fixtures defined inside a `describe` block only apply to tests in that block:
 
 ```python
+from typing import Annotated
+
 from tryke import fixture, test, expect, describe, Depends
 
 @fixture(per="scope")
@@ -289,18 +282,18 @@ def api() -> TestClient:
 
 with describe("GET /users"):
     @fixture
-    def seed_users(client: TestClient = Depends(api)):
+    def seed_users(client: Annotated[TestClient, Depends(api)]):
         client.post("/users", json={"name": "alice"})
 
     @test
-    def returns_users(client: TestClient = Depends(api)):
+    def returns_users(client: Annotated[TestClient, Depends(api)]):
         resp = client.get("/users")
         expect(resp.status_code).to_equal(200)
 
 with describe("POST /users"):
     # seed_users does NOT run here — it's scoped to "GET /users"
     @test
-    def creates_user(client: TestClient = Depends(api)):
+    def creates_user(client: Annotated[TestClient, Depends(api)]):
         resp = client.post("/users", json={"name": "bob"})
         expect(resp.status_code).to_equal(201)
 ```
@@ -322,8 +315,8 @@ with describe("users"):
 
         @test
         def inserts_row(
-            repo: UserRepo = Depends(repo),
-            payload: dict[str, str] = Depends(payload),
+            repo: Annotated[UserRepo, Depends(repo)],
+            payload: Annotated[dict[str, str], Depends(payload)],
         ):
             repo.create(payload)
             expect(repo.count()).to_equal(1)
@@ -344,17 +337,17 @@ def config() -> AppConfig:
     return AppConfig.from_env("test")
 
 @fixture(per="scope")
-def db(cfg: AppConfig = Depends(config)) -> Database:
+def db(cfg: Annotated[AppConfig, Depends(config)]) -> Database:
     return Database(cfg.db_url)
 
 @fixture(per="scope")
-def cache(cfg: AppConfig = Depends(config)) -> RedisCache:
+def cache(cfg: Annotated[AppConfig, Depends(config)]) -> RedisCache:
     return RedisCache(cfg.redis_url)
 
 @fixture
 def service(
-    db: Database = Depends(db),
-    cache: RedisCache = Depends(cache),
+    db: Annotated[Database, Depends(db)],
+    cache: Annotated[RedisCache, Depends(cache)],
 ) -> UserService:
     return UserService(db, cache)
 ```

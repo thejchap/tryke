@@ -385,6 +385,7 @@ dependencies = [
  "encode_unicode",
  "libc",
  "once_cell",
+ "unicode-width 0.2.2",
  "windows-sys 0.59.0",
 ]
 
@@ -2132,6 +2133,7 @@ dependencies = [
  "clap",
  "clap-verbosity-flag",
  "clearscreen",
+ "console",
  "env_logger",
  "insta",
  "log",

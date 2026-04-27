@@ -28,6 +28,7 @@ pub struct TextReporter<W: io::Write = io::Stdout> {
     current_groups: Vec<String>,
     verbosity: Verbosity,
     subcommand_label: &'static str,
+    watch_hint: Option<String>,
 }
 
 impl TextReporter {
@@ -39,6 +40,7 @@ impl TextReporter {
             current_groups: Vec::new(),
             verbosity: Verbosity::Normal,
             subcommand_label: "tryke test",
+            watch_hint: None,
         }
     }
 
@@ -50,6 +52,7 @@ impl TextReporter {
             current_groups: Vec::new(),
             verbosity,
             subcommand_label: "tryke test",
+            watch_hint: None,
         }
     }
 }
@@ -68,6 +71,7 @@ impl<W: io::Write> TextReporter<W> {
             current_groups: Vec::new(),
             verbosity: Verbosity::Normal,
             subcommand_label: "tryke test",
+            watch_hint: None,
         }
     }
 
@@ -78,6 +82,7 @@ impl<W: io::Write> TextReporter<W> {
             current_groups: Vec::new(),
             verbosity,
             subcommand_label: "tryke test",
+            watch_hint: None,
         }
     }
 
@@ -408,7 +413,11 @@ impl<W: io::Write> Reporter for TextReporter<W> {
     }
 
     fn on_run_complete(&mut self, summary: &RunSummary) {
-        crate::summary::write_summary(&mut self.writer, summary);
+        crate::summary::write_summary_with_hint(
+            &mut self.writer,
+            summary,
+            self.watch_hint.as_deref(),
+        );
     }
 
     fn on_discovery_error(&mut self, error: &DiscoveryError) {
@@ -423,6 +432,10 @@ impl<W: io::Write> Reporter for TextReporter<W> {
 
     fn set_subcommand_label(&mut self, label: &'static str) {
         self.subcommand_label = label;
+    }
+
+    fn set_watch_hint(&mut self, hint: Option<String>) {
+        self.watch_hint = hint;
     }
 
     fn on_discovery_warning(&mut self, warning: &DiscoveryWarning) {

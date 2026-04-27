@@ -22,8 +22,16 @@ fn format_duration(d: Duration) -> String {
 //
 //  PASS
 
-#[expect(clippy::too_many_lines)]
 pub fn write_summary<W: io::Write>(writer: &mut W, summary: &RunSummary) {
+    write_summary_with_hint(writer, summary, None);
+}
+
+#[expect(clippy::too_many_lines)]
+pub fn write_summary_with_hint<W: io::Write>(
+    writer: &mut W,
+    summary: &RunSummary,
+    watch_hint: Option<&str>,
+) {
     let total = summary.passed
         + summary.failed
         + summary.skipped
@@ -151,7 +159,11 @@ pub fn write_summary<W: io::Write>(writer: &mut W, summary: &RunSummary) {
     };
 
     let _ = writeln!(writer);
-    let _ = writeln!(writer, " {badge}");
+    if let Some(hint) = watch_hint {
+        let _ = writeln!(writer, " {badge} {}", hint.dimmed());
+    } else {
+        let _ = writeln!(writer, " {badge}");
+    }
 }
 
 #[cfg(test)]
@@ -537,6 +549,57 @@ mod tests {
             changed_selection: None,
         });
         assert!(!out.contains("Start at"));
+    }
+
+    #[test]
+    fn watch_hint_appended_to_pass_badge() {
+        let mut buf = Vec::new();
+        write_summary_with_hint(
+            &mut buf,
+            &RunSummary {
+                passed: 1,
+                failed: 0,
+                skipped: 0,
+                errors: 0,
+                xfailed: 0,
+                todo: 0,
+                duration: Duration::from_millis(10),
+                discovery_duration: None,
+                test_duration: None,
+                file_count: 0,
+                start_time: None,
+                changed_selection: None,
+            },
+            Some("Waiting for file changes... press q to quit"),
+        );
+        let out = String::from_utf8(buf).expect("utf-8");
+        assert!(out.contains("PASS"));
+        assert!(out.contains("Waiting for file changes... press q to quit"));
+        // Hint should be on the same line as the badge.
+        let badge_line = out
+            .lines()
+            .find(|l| l.contains("PASS"))
+            .expect("badge line");
+        assert!(badge_line.contains("Waiting"));
+    }
+
+    #[test]
+    fn no_watch_hint_when_none() {
+        let out = render(&RunSummary {
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            errors: 0,
+            xfailed: 0,
+            todo: 0,
+            duration: Duration::from_millis(10),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
+            changed_selection: None,
+        });
+        assert!(!out.contains("Waiting"));
     }
 
     #[test]

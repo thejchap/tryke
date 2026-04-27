@@ -7,6 +7,7 @@ use crate::Reporter;
 
 pub struct DotReporter<W: io::Write = io::Stdout> {
     writer: W,
+    watch_hint: Option<String>,
 }
 
 impl DotReporter {
@@ -14,6 +15,7 @@ impl DotReporter {
     pub fn new() -> Self {
         Self {
             writer: io::stdout(),
+            watch_hint: None,
         }
     }
 }
@@ -26,7 +28,10 @@ impl Default for DotReporter {
 
 impl<W: io::Write> DotReporter<W> {
     pub fn with_writer(writer: W) -> Self {
-        Self { writer }
+        Self {
+            writer,
+            watch_hint: None,
+        }
     }
 
     pub fn into_writer(self) -> W {
@@ -61,7 +66,15 @@ impl<W: io::Write> Reporter for DotReporter<W> {
 
     fn on_run_complete(&mut self, summary: &RunSummary) {
         let _ = writeln!(self.writer);
-        crate::summary::write_summary(&mut self.writer, summary);
+        crate::summary::write_summary_with_hint(
+            &mut self.writer,
+            summary,
+            self.watch_hint.as_deref(),
+        );
+    }
+
+    fn set_watch_hint(&mut self, hint: Option<String>) {
+        self.watch_hint = hint;
     }
 }
 

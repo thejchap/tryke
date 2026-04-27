@@ -144,7 +144,7 @@ Options:
           Reporter format to use for output
 
           [default: text]
-          [possible values: text, json, dot, junit, llm]
+          [possible values: text, json, dot, junit, llm, next, sugar]
 
       --root <ROOT>
           Project root used for discovery and execution
@@ -210,7 +210,7 @@ Options:
           Reporter format to use for output
 
           [default: text]
-          [possible values: text, json, dot, junit, llm]
+          [possible values: text, json, dot, junit, llm, next, sugar]
 
   -v, --verbose...
           Increase logging verbosity

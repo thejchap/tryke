@@ -55,6 +55,47 @@ A format optimized for consumption by large language models. Concise, structured
 tryke test --reporter llm
 ```
 
+## `next`
+
+A cargo-nextest-style reporter. One line per completed test with a status badge, duration, and `file_stem :: test_name` identifier; a live status bar at the bottom of the terminal tracks progress through the run.
+
+```bash
+tryke test --reporter next
+```
+
+Sample output:
+
+```text
+PASS  [  0.009s] test_one :: test_alpha
+FAIL  [  0.123s] test_one :: test_beta
+  expected 1, got 2
+PASS  [  0.004s] test_two :: test_gamma
+```
+
+The status bar (`Running [00:00:02] [█████-------] 423/523 — 422 passed, 1 failed`) is drawn to stderr and only appears when stderr is a TTY, so redirecting output to a file or piping into another command produces clean per-test lines.
+
+## `sugar`
+
+A pytest-sugar-style reporter. One line per test file showing inline check/cross marks for each test in the file, plus a percentage and small bar on the right. Failures are deferred to a recap at the end of the run, so the per-file output isn't interrupted.
+
+```bash
+tryke test --reporter sugar
+```
+
+Sample output:
+
+```text
+tests/a.py ✓✗                                                   66% [██████────]
+tests/b.py ✓                                                   100% [██████████]
+
+Failures:
+
+✗ b (tests/a.py)
+  boom
+```
+
+Like `next`, the live status bar is only drawn on TTY stderr.
+
 ## Using reporters with other modes
 
 The `--reporter` flag works with [watch mode](watch-mode.md) too:

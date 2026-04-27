@@ -1,9 +1,15 @@
 use std::{
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::RecvTimeoutError,
+    },
     time::{Duration, Instant},
 };
 
 use anyhow::Result;
+use console::{Key, Term};
 use log::debug;
 use tryke_discovery::Discoverer;
 use tryke_reporter::Reporter;
@@ -11,6 +17,33 @@ use tryke_runner::{DistMode, WorkerPool, check_python_version, resolve_python};
 use tryke_types::{DiscoveryWarning, DiscoveryWarningKind, HookItem, filter::TestFilter};
 
 use crate::execution::{report_cycle, worker_pool_size};
+
+/// How often the watch loop wakes up to check the quit flag while
+/// waiting for file events. Short enough that `q` feels responsive,
+/// long enough to avoid burning CPU on a tight poll.
+const QUIT_POLL_INTERVAL: Duration = Duration::from_millis(150);
+
+/// Spawn a thread that reads single keypresses from stdin and flips
+/// `quit` to `true` when the user presses `q` (or `Q`, or Escape).
+/// No-op when stdin isn't a TTY (CI, piped input).
+fn spawn_quit_listener(quit: Arc<AtomicBool>) {
+    let term = Term::stdout();
+    if !term.is_term() {
+        return;
+    }
+    std::thread::spawn(move || {
+        loop {
+            match term.read_key() {
+                Ok(Key::Char('q' | 'Q') | Key::Escape) => {
+                    quit.store(true, Ordering::SeqCst);
+                    break;
+                }
+                Err(_) => break,
+                Ok(_) => continue,
+            }
+        }
+    });
+}
 
 fn clear_if_tty() {
     use std::io::IsTerminal;
@@ -110,7 +143,18 @@ pub async fn run_watch(
     let _debouncer = tryke_server::watcher::spawn_watcher(root, excludes, tx)?;
     let mut change_filter = tryke_server::watcher::ChangeFilter::new();
 
-    while let Ok(first) = rx.recv() {
+    let quit = Arc::new(AtomicBool::new(false));
+    spawn_quit_listener(Arc::clone(&quit));
+
+    loop {
+        if quit.load(Ordering::SeqCst) {
+            break;
+        }
+        let first = match rx.recv_timeout(QUIT_POLL_INTERVAL) {
+            Ok(paths) => paths,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
         // Coalesce any additional batches the watcher has already
         // queued. A single editor save can produce events whose
         // intermediate quiet windows fall just outside the watcher's

@@ -26,11 +26,21 @@ fn emit_osc(state: u8, value: u8) {
 /// mid-run, and Ghostty/Windows Terminal/ConEmu leave the tab's
 /// progress bar stuck at its last value.
 ///
+/// Also restores the cursor and clears the current line, so reporters
+/// that hide the cursor while drawing an in-terminal status bar (next,
+/// sugar) don't leave the user's terminal in a hidden-cursor state.
+///
 /// Idempotent: `ctrlc::set_handler` errors if called twice, which we
 /// ignore.
 pub fn install_cleanup_handler() {
     let _ = ctrlc::set_handler(|| {
         emit_osc(0, 0);
+        let stderr = io::stderr();
+        let mut handle = stderr.lock();
+        // \r\x1b[2K clears the in-terminal status bar line; \x1b[?25h
+        // shows the cursor in case it was hidden by LiveBar.
+        let _ = write!(handle, "\r\x1b[2K\x1b[?25h");
+        let _ = handle.flush();
         // 128 + SIGINT(2). Matches the exit status of an un-handled
         // Ctrl+C so wrappers (shells, make, uv run) see the usual signal.
         std::process::exit(130);

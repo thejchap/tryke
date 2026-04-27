@@ -66,17 +66,17 @@ tryke test --reporter next
 Sample output:
 
 ```text
-PASS  [  0.009s] test_one :: test_alpha
-FAIL  [  0.123s] test_one :: test_beta
+     PASS  [  0.009s] test_one :: test_alpha
+     FAIL  [  0.123s] test_one :: test_beta
   expected 1, got 2
-PASS  [  0.004s] test_two :: test_gamma
+     PASS  [  0.004s] test_two :: test_gamma
 ```
 
-The status bar (`Running [00:00:02] [█████-------] 423/523 — 422 passed, 1 failed`) is drawn to stderr and only appears when stderr is a TTY, so redirecting output to a file or piping into another command produces clean per-test lines.
+The status bar (`Running [00:00:02] [████████░░░░░░░░░░░░] 423/523 422 passed, 1 failed`) is drawn at the bottom of the terminal and only appears when both stdout and stderr are TTYs, so redirecting output to a file or piping into another command produces clean per-test lines with no escape codes.
 
 ## `sugar`
 
-A pytest-sugar-style reporter. One line per test file showing inline check/cross marks for each test in the file, plus a percentage and small bar on the right. Failures are deferred to a recap at the end of the run, so the per-file output isn't interrupted.
+A pytest-sugar-style reporter. One line per test file showing inline check/cross marks for each test in the file, plus a count, percentage, and a small bar on the right. Failures are deferred to a recap at the end of the run, so the per-file output isn't interrupted.
 
 ```bash
 tryke test --reporter sugar
@@ -85,16 +85,16 @@ tryke test --reporter sugar
 Sample output:
 
 ```text
-tests/a.py ✓✗                                                   66% [██████────]
-tests/b.py ✓                                                   100% [██████████]
+ tests/a.py ✓ ✗                                              2  66% ████████░░░░
+ tests/b.py ✓                                                1 100% ████████████
 
-Failures:
+Failures
 
 ✗ b (tests/a.py)
   boom
 ```
 
-Like `next`, the live status bar is only drawn on TTY stderr.
+Like `next`, the live status bar is only drawn when both stdout and stderr are TTYs; redirecting either falls back to plain per-file lines with no escape codes.
 
 ## Using reporters with other modes
 

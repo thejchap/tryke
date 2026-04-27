@@ -307,8 +307,8 @@ impl<W: Write> Reporter for SugarReporter<W> {
             // Pytest-sugar-style failures header — red bold underline.
             let header = format!("{}", "Failures".red().bold().underline());
             self.live.println(&mut self.writer, &header);
-            for fail in self.failures.clone() {
-                write_failure(&self.live, &mut self.writer, &fail);
+            for fail in &self.failures {
+                write_failure(&self.live, &mut self.writer, fail);
             }
         }
 

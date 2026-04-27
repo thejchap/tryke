@@ -27,10 +27,11 @@ const QUIT_POLL_INTERVAL: Duration = Duration::from_millis(150);
 /// `quit` to `true` when the user presses `q` (or `Q`, or Escape).
 /// No-op when stdin isn't a TTY (CI, piped input).
 fn spawn_quit_listener(quit: Arc<AtomicBool>) {
-    let term = Term::stdout();
-    if !term.is_term() {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
         return;
     }
+    let term = Term::stdout();
     std::thread::spawn(move || {
         loop {
             match term.read_key() {

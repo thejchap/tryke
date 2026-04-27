@@ -132,6 +132,10 @@ impl<R: Reporter> Reporter for ProgressReporter<R> {
     fn set_subcommand_label(&mut self, label: &'static str) {
         self.inner.set_subcommand_label(label);
     }
+
+    fn set_watch_hint(&mut self, hint: Option<String>) {
+        self.inner.set_watch_hint(hint);
+    }
 }
 
 #[cfg(test)]

@@ -3,6 +3,10 @@
 //! end. Tests inside a file arrive in one batch (the execution layer
 //! flushes per-file), so a sugar line is rendered fully-formed when a
 //! file completes.
+//!
+//! Per-file rows and the bottom progress bar both flow through a shared
+//! [`LiveArea`], so each `println` clears the bar, prints above it, and
+//! redraws atomically.
 
 use std::collections::HashSet;
 use std::io::{self, Write};
@@ -14,20 +18,40 @@ use tryke_types::{RunSummary, TestItem, TestOutcome, TestResult};
 
 use crate::Reporter;
 use crate::diagnostic::{render_assertions, render_error_message, render_failure_message};
-use crate::live::{LiveBar, format_elapsed, render_bar, supports_live};
+use crate::live::{LiveArea, render_bar};
 use crate::summary;
 
-const BAR_WIDTH: usize = 20;
-const FILE_LINE_TARGET_WIDTH: usize = 80;
+const SUFFIX_BAR_WIDTH: usize = 12;
+
+/// Bar template — pytest-sugar-style pipe-bracketed bar with a green
+/// fill. We swap to `red_bar_template` once a failure is observed.
+fn green_bar_template() -> String {
+    format!(
+        "   {} |{{bar:30.green/dim}}| {{percent:>3}}% \x1b[2m·\x1b[0m \
+         {{pos}}/{{len}} tests \x1b[2m·\x1b[0m {{prefix}} files \
+         \x1b[2m·\x1b[0m {{elapsed_precise:.dim}}",
+        "Progress:".bold(),
+    )
+}
+
+fn red_bar_template() -> String {
+    format!(
+        "   {} |{{bar:30.red/dim}}| {{percent:>3}}% \x1b[2m·\x1b[0m \
+         {{pos}}/{{len}} tests \x1b[2m·\x1b[0m {{prefix}} files \
+         \x1b[2m·\x1b[0m {{elapsed_precise:.dim}}",
+        "Progress:".bold(),
+    )
+}
 
 pub struct SugarReporter<W: Write = io::Stdout> {
     writer: W,
-    bar: LiveBar,
-    enabled: bool,
-    total_tests: usize,
-    completed_tests: usize,
-    total_files: usize,
-    completed_files: usize,
+    live: LiveArea,
+    started: bool,
+    failure_seen: bool,
+    total_tests: u64,
+    completed_tests: u64,
+    total_files: u64,
+    completed_files: u64,
     current_file: Option<PathBuf>,
     current_marks: Vec<String>,
     failures: Vec<TestResult>,
@@ -39,11 +63,11 @@ pub struct SugarReporter<W: Write = io::Stdout> {
 impl SugarReporter {
     #[must_use]
     pub fn new() -> Self {
-        let enabled = supports_live();
         Self {
             writer: io::stdout(),
-            bar: LiveBar::new(enabled),
-            enabled,
+            live: LiveArea::new(),
+            started: false,
+            failure_seen: false,
             total_tests: 0,
             completed_tests: 0,
             total_files: 0,
@@ -68,8 +92,9 @@ impl<W: Write> SugarReporter<W> {
     pub fn with_writer(writer: W) -> Self {
         Self {
             writer,
-            bar: LiveBar::new(false),
-            enabled: false,
+            live: LiveArea::hidden(),
+            started: false,
+            failure_seen: false,
             total_tests: 0,
             completed_tests: 0,
             total_files: 0,
@@ -87,23 +112,27 @@ impl<W: Write> SugarReporter<W> {
         self.writer
     }
 
-    fn draw_bar(&mut self) {
-        if !self.enabled {
+    fn ensure_bar_started(&mut self) {
+        if self.started {
             return;
         }
-        let bar = render_bar(self.completed_tests, self.total_tests, BAR_WIDTH);
-        let elapsed = format_elapsed(self.start.elapsed());
-        let line = format!(
-            "{} [{}] [{}] {}/{} files — {}/{} tests",
-            "Running".bold(),
-            elapsed.dimmed(),
-            bar,
-            self.completed_files,
-            self.total_files,
-            self.completed_tests,
-            self.total_tests,
-        );
-        self.bar.redraw(&line);
+        self.live.start(self.total_tests, &green_bar_template());
+        self.live
+            .set_prefix(format!("{}/{}", self.completed_files, self.total_files));
+        self.started = true;
+    }
+
+    fn refresh_bar(&self) {
+        self.live.set_position(self.completed_tests);
+        self.live
+            .set_prefix(format!("{}/{}", self.completed_files, self.total_files));
+    }
+
+    fn note_failure(&mut self) {
+        if !self.failure_seen {
+            self.failure_seen = true;
+            self.live.set_template(&red_bar_template());
+        }
     }
 
     fn commit_current_file(&mut self) {
@@ -114,36 +143,74 @@ impl<W: Write> SugarReporter<W> {
         self.completed_files += 1;
 
         let path_str = file.display().to_string();
-        let marks_plain_len: usize = marks
-            .iter()
-            .map(|m| strip_ansi_count_chars(m))
-            .sum::<usize>();
+        let term_width = self.live.width().max(40);
 
         let pct = if self.total_tests == 0 {
             0
         } else {
             (self.completed_tests * 100) / self.total_tests
         };
-        let bar = render_bar(self.completed_tests, self.total_tests, BAR_WIDTH / 2);
-        let suffix = format!(" {pct:>3}% [{bar}]");
-
-        let used = path_str.chars().count() + 1 + marks_plain_len + suffix.chars().count();
-        let pad = FILE_LINE_TARGET_WIDTH.saturating_sub(used);
-        let pad_str = " ".repeat(pad);
-
-        let mut joined_marks = String::new();
-        for m in &marks {
-            joined_marks.push_str(m);
-        }
-
-        let _ = writeln!(
-            self.writer,
-            "{} {}{}{}",
-            path_str.bold(),
-            joined_marks,
-            pad_str,
-            suffix
+        let bar = render_bar(
+            usize::try_from(self.completed_tests).unwrap_or(usize::MAX),
+            usize::try_from(self.total_tests).unwrap_or(usize::MAX),
+            SUFFIX_BAR_WIDTH,
         );
+
+        let count_str = marks.len().to_string();
+        let pct_str = format!("{pct:>3}%");
+        // Plain (ANSI-stripped) rendering of the suffix for width math.
+        let suffix_plain_len =
+            2 + count_str.chars().count() + 1 + pct_str.chars().count() + 1 + bar.chars().count();
+        let suffix_styled = format!(
+            "  {} {} {}",
+            count_str.bold(),
+            pct_str.bold(),
+            if self.failure_seen {
+                format!("{}", bar.red())
+            } else {
+                format!("{}", bar.green())
+            }
+        );
+
+        // Single-space-separated marks (matches sugar's actual render).
+        let marks_joined = marks
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let marks_plain_len: usize = marks
+            .iter()
+            .map(|m| strip_ansi_count_chars(m))
+            .sum::<usize>()
+            + marks.len().saturating_sub(1);
+
+        let path_plain_len = path_str.chars().count();
+        // " <path> <marks>" prefix length, plain (no ANSI).
+        let prefix_plain_len = 1 + path_plain_len + 1 + marks_plain_len;
+
+        let line = if prefix_plain_len + suffix_plain_len <= term_width {
+            // Single-line layout: pad between marks and suffix so the
+            // suffix sits flush at the right edge of the terminal.
+            let pad = term_width - prefix_plain_len - suffix_plain_len;
+            format!(
+                " {} {marks_joined}{}{suffix_styled}",
+                path_str.bold(),
+                " ".repeat(pad)
+            )
+        } else {
+            // Marks overflowed the terminal width: drop the suffix to a
+            // continuation line, right-aligned.
+            let pad = term_width.saturating_sub(suffix_plain_len);
+            format!(
+                " {} {marks_joined}\n{}{suffix_styled}",
+                path_str.bold(),
+                " ".repeat(pad)
+            )
+        };
+
+        for row in line.split('\n') {
+            self.live.println(&mut self.writer, row);
+        }
     }
 }
 
@@ -180,38 +247,39 @@ fn strip_ansi_count_chars(s: &str) -> usize {
 
 impl<W: Write> Reporter for SugarReporter<W> {
     fn on_run_start(&mut self, tests: &[TestItem]) {
-        self.total_tests = tests.len();
+        self.total_tests = tests.len() as u64;
         self.completed_tests = 0;
         self.total_files = tests
             .iter()
             .filter_map(|t| t.file_path.as_ref())
             .collect::<HashSet<_>>()
-            .len();
+            .len() as u64;
         self.completed_files = 0;
         self.current_file = None;
         self.current_marks.clear();
         self.failures.clear();
         self.start = Instant::now();
+        self.started = false;
+        self.failure_seen = false;
 
-        let _ = writeln!(
-            self.writer,
+        let header = format!(
             "{} {}",
             self.subcommand_label.bold(),
             format!("v{}", env!("CARGO_PKG_VERSION")).dimmed()
         );
-        let _ = writeln!(self.writer);
-
-        self.draw_bar();
+        self.live.println(&mut self.writer, &header);
+        self.live.println(&mut self.writer, "");
     }
 
     fn on_test_complete(&mut self, result: &TestResult) {
-        // File transition: commit the previous file's line and start
-        // accumulating for the new one. The execution layer guarantees
-        // a file's tests arrive contiguously, so a change in
+        self.ensure_bar_started();
+
+        // File transition: commit the previous file's accumulated marks
+        // as a single row, then start fresh. The execution layer
+        // guarantees a file's tests arrive contiguously, so a change in
         // `file_path` reliably means "previous file done."
         let new_file = result.test.file_path.clone();
         if new_file != self.current_file {
-            self.bar.clear();
             self.commit_current_file();
             self.current_file = new_file;
         }
@@ -224,21 +292,23 @@ impl<W: Write> Reporter for SugarReporter<W> {
             TestOutcome::Failed { .. } | TestOutcome::Error { .. } | TestOutcome::XPassed
         ) {
             self.failures.push(result.clone());
+            self.note_failure();
         }
 
-        self.draw_bar();
+        self.refresh_bar();
     }
 
     fn on_run_complete(&mut self, run_summary: &RunSummary) {
-        // Commit the final file (which won't see a transition).
-        self.bar.clear();
         self.commit_current_file();
+        self.live.finish_and_clear();
 
         if !self.failures.is_empty() {
-            let _ = writeln!(self.writer);
-            let _ = writeln!(self.writer, "{}", "Failures:".red().bold());
+            self.live.println(&mut self.writer, "");
+            // Pytest-sugar-style failures header — red bold underline.
+            let header = format!("{}", "Failures".red().bold().underline());
+            self.live.println(&mut self.writer, &header);
             for fail in self.failures.clone() {
-                write_failure(&mut self.writer, &fail);
+                write_failure(&self.live, &mut self.writer, &fail);
             }
         }
 
@@ -254,50 +324,50 @@ impl<W: Write> Reporter for SugarReporter<W> {
     }
 }
 
-fn write_failure<W: Write>(writer: &mut W, fail: &TestResult) {
+fn write_failure<W: Write>(live: &LiveArea, writer: &mut W, fail: &TestResult) {
     let location = fail.test.file_path.as_deref().map_or_else(
         || fail.test.module_path.clone(),
         |p| p.display().to_string(),
     );
-    let _ = writeln!(writer);
-    let _ = writeln!(
-        writer,
+    live.println(writer, "");
+    let header = format!(
         "{} {} {}",
         "✗".red().bold(),
         fail.test.display_label(),
         format!("({location})").dimmed()
     );
+    live.println(writer, &header);
+
     let test_file = fail
         .test
         .file_path
         .as_deref()
         .map(|p| p.to_string_lossy().into_owned());
-    match &fail.outcome {
+    let detail = match &fail.outcome {
         TestOutcome::Failed {
             message,
             traceback,
             assertions,
             ..
         } => {
+            let mut buf = String::new();
             if !assertions.is_empty() {
-                let mut buf = String::new();
                 render_assertions(test_file.as_deref(), assertions, &mut buf);
-                let _ = writer.write_all(buf.as_bytes());
             } else if !message.is_empty() {
-                let mut buf = String::new();
                 render_failure_message(message, traceback.as_deref(), false, &mut buf);
-                let _ = writer.write_all(buf.as_bytes());
             }
+            buf
         }
         TestOutcome::Error { message } => {
             let mut buf = String::new();
             render_error_message(message, &mut buf);
-            let _ = writer.write_all(buf.as_bytes());
+            buf
         }
-        TestOutcome::XPassed => {
-            let _ = writeln!(writer, "  XPASS (unexpected pass)");
-        }
-        _ => {}
+        TestOutcome::XPassed => "  XPASS (unexpected pass)\n".to_string(),
+        _ => String::new(),
+    };
+    for line in detail.lines() {
+        live.println(writer, line);
     }
 }
 
@@ -388,7 +458,6 @@ mod tests {
             .lines()
             .find(|l| l.contains("tests/x.py"))
             .expect("file line");
-        // Two ✓ marks on the file line.
         assert_eq!(line.matches('✓').count(), 2, "line: {line}");
     }
 
@@ -445,16 +514,13 @@ mod tests {
             changed_selection: None,
         });
         let out = output(r);
-        let failures_idx = out.find("Failures:").expect("Failures section present");
+        let failures_idx = out.find("Failures").expect("Failures section present");
         let summary_idx = out.find("FAIL").expect("summary badge present");
-        // The "Failures:" recap should appear before the final summary badge.
         assert!(failures_idx < summary_idx);
         assert!(out.contains("boom"), "should include failure message");
-        // The file line should have one ✓ and one ✗.
         let line = out
             .lines()
-            .find(|l| l.starts_with("tests/x.py"))
-            .or_else(|| out.lines().find(|l| l.contains("tests/x.py")))
+            .find(|l| l.contains("tests/x.py"))
             .expect("file line");
         assert!(line.contains('✓'));
         assert!(line.contains('✗'));
@@ -504,7 +570,6 @@ mod tests {
             changed_selection: None,
         });
         let out = output(r);
-        // No file lines, but the summary should still print.
         assert!(out.contains("PASS"));
     }
 

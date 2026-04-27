@@ -4,10 +4,10 @@ expression: strip_ansi(&out)
 ---
 tryke test v[VERSION]
 
-tests/a.py ✓✗                                                   66% [██████────]
-tests/b.py ✓                                                   100% [██████████]
+ tests/a.py ✓ ✗                                              2  66% ████████░░░░
+ tests/b.py ✓                                                1 100% ████████████
 
-Failures:
+Failures
 
 ✗ b (tests/a.py)
   boom

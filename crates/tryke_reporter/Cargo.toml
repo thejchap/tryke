@@ -10,7 +10,9 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+console = { workspace = true }
 ctrlc = { workspace = true }
+indicatif = { workspace = true }
 miette = { workspace = true }
 owo-colors = { workspace = true }
 serde = { workspace = true }

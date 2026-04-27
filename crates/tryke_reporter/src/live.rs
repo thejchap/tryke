@@ -1,26 +1,50 @@
 //! Terminal-control primitives for the `next` and `sugar` reporters.
 //!
-//! The `LiveBar` redraws a single line at the current cursor position on
-//! stderr, leaving stdout (the reporter's writer) free for the per-test
-//! lines and end-of-run summary. Splitting them across streams keeps
-//! snapshot tests over the writer free of cursor escapes.
+//! `LiveArea` is a thin wrapper over [`indicatif::MultiProgress`] +
+//! [`indicatif::ProgressBar`]. It owns a single bottom bar and exposes a
+//! `println` channel that atomically clears the bar, prints a line above
+//! it, and redraws — solving the stdout/stderr cursor-desync class of
+//! bug we'd hit if we tried to interleave a hand-rolled bar with raw
+//! `writeln!` calls.
 //!
-//! When `enabled` is false (non-TTY, redirect, CI), every method is a
-//! no-op so callers don't need to branch on terminal capability.
+//! When `enabled` is false (non-TTY, redirect, snapshot tests) every
+//! method falls back to writing directly through the caller's writer,
+//! so the per-test/per-file rows still land in tests' captured output
+//! and stay free of ANSI escapes.
 
+use std::borrow::Cow;
 use std::io::{self, IsTerminal, Write};
 use std::time::Duration;
 
-/// Returns true if stderr is a terminal — looser than
-/// `progress::supports_progress` (which gates OSC 9;4 to specific
-/// emulators). `\r` + clear-line work on every TTY.
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
+
+const FALLBACK_WIDTH: usize = 80;
+const DRAW_HZ: u8 = 60;
+
+/// Returns true when both stdout and stderr are terminals. Gates the
+/// live bar: if the user redirects either stream we fall back to plain
+/// line writes so the redirect target gets clean text and we don't
+/// strand rows on stderr while the summary goes to a captured stdout.
 #[must_use]
 pub fn supports_live() -> bool {
-    io::stderr().is_terminal()
+    io::stdout().is_terminal() && io::stderr().is_terminal()
 }
 
-/// Render a single-row progress bar of `width` cells.
-/// Pure: no I/O, no ANSI. Caller composes color/styling.
+/// Format `d` as `HH:MM:SS`, capped at 99:59:59. Used by callers that
+/// build bar segments outside of indicatif's template (e.g. a frozen
+/// elapsed value rendered in the summary).
+#[must_use]
+pub fn format_elapsed(d: Duration) -> String {
+    let secs = d.as_secs();
+    let hours = (secs / 3600).min(99);
+    let minutes = (secs / 60) % 60;
+    let seconds = secs % 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+/// Render a single-row progress bar of `width` cells. Pure: no I/O.
+/// Used for sugar's per-file mini-bar suffix, which is composed inline
+/// rather than via indicatif.
 #[must_use]
 pub fn render_bar(filled: usize, total: usize, width: usize) -> String {
     if width == 0 {
@@ -37,94 +61,144 @@ pub fn render_bar(filled: usize, total: usize, width: usize) -> String {
         out.push('█');
     }
     for _ in 0..(width - cells) {
-        out.push('─');
+        out.push('░');
     }
     out
 }
 
-/// Format `d` as `HH:MM:SS`, capped at 99:59:59.
-#[must_use]
-pub fn format_elapsed(d: Duration) -> String {
-    let secs = d.as_secs();
-    let hours = (secs / 3600).min(99);
-    let minutes = (secs / 60) % 60;
-    let seconds = secs % 60;
-    format!("{hours:02}:{minutes:02}:{seconds:02}")
-}
-
-/// Hides and restores the cursor, redraws a line in place. Writes
-/// nothing when `enabled` is false.
-///
-/// Callers are responsible for calling [`Self::clear`] before dropping
-/// (typically from `on_run_complete`). On Ctrl+C, the cleanup handler
-/// installed by [`crate::progress::install_cleanup_handler`] also
-/// emits the cursor-restore + line-clear escapes, so terminals don't
-/// get stuck with a hidden cursor.
-pub struct LiveBar<W: Write = io::Stderr> {
-    writer: W,
+/// Live bottom-of-screen status area. One bar, plus a `println` channel
+/// for per-test/per-file rows.
+pub struct LiveArea {
     enabled: bool,
-    cursor_hidden: bool,
-    drawn: bool,
+    multi: Option<MultiProgress>,
+    bar: Option<ProgressBar>,
+    width: usize,
 }
 
-impl LiveBar {
-    /// Default: writes to stderr.
+impl LiveArea {
+    /// Real-terminal mode: bar drawn on stderr at ~60fps.
     #[must_use]
-    pub fn new(enabled: bool) -> Self {
+    pub fn new() -> Self {
+        let enabled = supports_live();
+        let multi = if enabled {
+            Some(MultiProgress::with_draw_target(
+                ProgressDrawTarget::stderr_with_hz(DRAW_HZ),
+            ))
+        } else {
+            None
+        };
+        let (_, cols) = console::Term::stderr().size();
+        let width = if cols == 0 {
+            FALLBACK_WIDTH
+        } else {
+            cols as usize
+        };
         Self {
-            writer: io::stderr(),
             enabled,
-            cursor_hidden: false,
-            drawn: false,
+            multi,
+            bar: None,
+            width,
+        }
+    }
+
+    /// Disabled (snapshot tests, non-TTY). All bar methods become
+    /// no-ops; `println` forwards to the caller's writer.
+    #[must_use]
+    pub fn hidden() -> Self {
+        Self {
+            enabled: false,
+            multi: None,
+            bar: None,
+            width: FALLBACK_WIDTH,
+        }
+    }
+
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    #[must_use]
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// Lazily start the bar with `total` ticks and a custom indicatif
+    /// template. Idempotent — second call replaces style + length.
+    pub fn start(&mut self, total: u64, template: &str) {
+        let Some(multi) = self.multi.as_ref() else {
+            return;
+        };
+        let style = ProgressStyle::with_template(template)
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
+            .progress_chars("█░ ");
+        if let Some(existing) = self.bar.as_ref() {
+            existing.set_style(style);
+            existing.set_length(total);
+            return;
+        }
+        let bar = multi.add(ProgressBar::new(total));
+        bar.set_style(style);
+        // Steady tick keeps {elapsed_precise} animating between actual
+        // position updates so the bar feels alive on slow/quiet runs.
+        bar.enable_steady_tick(Duration::from_millis(1000 / u64::from(DRAW_HZ)));
+        self.bar = Some(bar);
+    }
+
+    /// Replace the bar's template (e.g. switch to a red-fill variant
+    /// when the first failure arrives).
+    pub fn set_template(&self, template: &str) {
+        if let Some(bar) = self.bar.as_ref() {
+            let style = ProgressStyle::with_template(template)
+                .unwrap_or_else(|_| ProgressStyle::default_bar())
+                .progress_chars("█░ ");
+            bar.set_style(style);
+        }
+    }
+
+    pub fn set_position(&self, pos: u64) {
+        if let Some(bar) = self.bar.as_ref() {
+            bar.set_position(pos);
+        }
+    }
+
+    pub fn set_message<S: Into<Cow<'static, str>>>(&self, msg: S) {
+        if let Some(bar) = self.bar.as_ref() {
+            bar.set_message(msg);
+        }
+    }
+
+    pub fn set_prefix<S: Into<Cow<'static, str>>>(&self, prefix: S) {
+        if let Some(bar) = self.bar.as_ref() {
+            bar.set_prefix(prefix);
+        }
+    }
+
+    /// Print a line above the bar atomically. When disabled, writes
+    /// directly to `w`. A trailing newline is always emitted (single,
+    /// even if `line` already ended with one).
+    pub fn println<W: Write>(&self, w: &mut W, line: &str) {
+        let trimmed = line.strip_suffix('\n').unwrap_or(line);
+        if let Some(multi) = self.multi.as_ref() {
+            let _ = multi.println(trimmed);
+        } else {
+            let _ = writeln!(w, "{trimmed}");
+        }
+    }
+
+    /// Final cleanup: removes the bar from the live area. Idempotent.
+    /// `MultiProgress`'s own `Drop` covers cursor restore if this isn't
+    /// called (panic, abort).
+    pub fn finish_and_clear(&mut self) {
+        if let Some(bar) = self.bar.take() {
+            bar.finish_and_clear();
         }
     }
 }
 
-impl<W: Write> LiveBar<W> {
-    pub fn with_writer(writer: W, enabled: bool) -> Self {
-        Self {
-            writer,
-            enabled,
-            cursor_hidden: false,
-            drawn: false,
-        }
-    }
-
-    /// Replace the previously-drawn line with `line`. The line should
-    /// not contain newlines or ANSI cursor-control codes (color SGR is
-    /// fine).
-    pub fn redraw(&mut self, line: &str) {
-        if !self.enabled {
-            return;
-        }
-        if !self.cursor_hidden {
-            let _ = self.writer.write_all(b"\x1b[?25l");
-            self.cursor_hidden = true;
-        }
-        let _ = self.writer.write_all(b"\r\x1b[2K");
-        let _ = self.writer.write_all(line.as_bytes());
-        let _ = self.writer.flush();
-        self.drawn = true;
-    }
-
-    /// Erase the current line and restore the cursor. Idempotent.
-    pub fn clear(&mut self) {
-        if !self.enabled {
-            return;
-        }
-        if self.drawn {
-            let _ = self.writer.write_all(b"\r\x1b[2K");
-            self.drawn = false;
-        }
-        if self.cursor_hidden {
-            let _ = self.writer.write_all(b"\x1b[?25h");
-            self.cursor_hidden = false;
-        }
-        let _ = self.writer.flush();
-    }
-
-    pub fn into_writer(self) -> W {
-        self.writer
+impl Default for LiveArea {
+    fn default() -> Self {
+        Self::hidden()
     }
 }
 
@@ -134,12 +208,12 @@ mod tests {
 
     #[test]
     fn render_bar_empty() {
-        assert_eq!(render_bar(0, 100, 10), "──────────");
+        assert_eq!(render_bar(0, 100, 10), "░░░░░░░░░░");
     }
 
     #[test]
     fn render_bar_half() {
-        assert_eq!(render_bar(50, 100, 10), "█████─────");
+        assert_eq!(render_bar(50, 100, 10), "█████░░░░░");
     }
 
     #[test]
@@ -149,8 +223,7 @@ mod tests {
 
     #[test]
     fn render_bar_zero_total() {
-        // No divide-by-zero, no fill.
-        assert_eq!(render_bar(0, 0, 10), "──────────");
+        assert_eq!(render_bar(0, 0, 10), "░░░░░░░░░░");
     }
 
     #[test]
@@ -160,7 +233,6 @@ mod tests {
 
     #[test]
     fn render_bar_overfill_clamps() {
-        // Filled > total shouldn't panic or overflow the cell count.
         assert_eq!(render_bar(150, 100, 10), "██████████");
     }
 
@@ -188,58 +260,48 @@ mod tests {
     }
 
     #[test]
-    fn livebar_redraw_writes_clear_then_content() {
-        let mut bar = LiveBar::with_writer(Vec::<u8>::new(), true);
-        bar.redraw("hello");
-        let out = bar.into_writer();
-        // Should contain hide-cursor + clear-line + content.
-        let s = String::from_utf8_lossy(&out);
-        assert!(s.contains("\x1b[?25l"));
-        assert!(s.contains("\r\x1b[2K"));
-        assert!(s.contains("hello"));
+    fn hidden_println_writes_to_writer() {
+        let area = LiveArea::hidden();
+        let mut buf = Vec::<u8>::new();
+        area.println(&mut buf, "hello");
+        assert_eq!(String::from_utf8(buf).expect("utf-8"), "hello\n");
     }
 
     #[test]
-    fn livebar_disabled_writes_nothing() {
-        let mut bar = LiveBar::with_writer(Vec::<u8>::new(), false);
-        bar.redraw("hello");
-        bar.clear();
-        let out = bar.into_writer();
-        assert!(out.is_empty());
+    fn hidden_println_strips_trailing_newline() {
+        let area = LiveArea::hidden();
+        let mut buf = Vec::<u8>::new();
+        area.println(&mut buf, "hello\n");
+        // Exactly one trailing newline, regardless of input.
+        assert_eq!(String::from_utf8(buf).expect("utf-8"), "hello\n");
     }
 
     #[test]
-    fn livebar_clear_is_idempotent() {
-        let mut bar = LiveBar::with_writer(Vec::<u8>::new(), true);
-        bar.redraw("first");
-        bar.clear();
-        bar.clear();
-        let out = bar.into_writer();
-        let s = String::from_utf8_lossy(&out);
-        // Show-cursor escape should appear exactly once.
-        assert_eq!(s.matches("\x1b[?25h").count(), 1);
+    fn hidden_bar_methods_are_no_ops() {
+        let mut area = LiveArea::hidden();
+        area.start(10, "{bar}");
+        area.set_template("{bar}");
+        area.set_position(5);
+        area.set_message("hi");
+        area.set_prefix("pfx");
+        area.finish_and_clear();
+        let mut buf = Vec::<u8>::new();
+        area.println(&mut buf, "line");
+        assert_eq!(String::from_utf8(buf).expect("utf-8"), "line\n");
     }
 
     #[test]
-    fn livebar_clear_restores_cursor() {
-        let mut bar = LiveBar::with_writer(Vec::<u8>::new(), true);
-        bar.redraw("x");
-        bar.clear();
-        let out = bar.into_writer();
-        let s = String::from_utf8_lossy(&out);
-        assert!(s.contains("\x1b[?25h"));
+    fn hidden_width_falls_back_to_default() {
+        assert_eq!(LiveArea::hidden().width(), FALLBACK_WIDTH);
     }
 
     #[test]
-    fn livebar_drop_clears() {
-        let buf: Vec<u8> = {
-            let mut bar = LiveBar::with_writer(Vec::<u8>::new(), true);
-            bar.redraw("about to drop");
-            bar.into_writer()
-        };
-        // We can't observe drop's clear() effect through `into_writer`
-        // because that consumes the bar before drop. This test just
-        // verifies drop doesn't panic.
-        drop(buf);
+    fn hidden_is_not_enabled() {
+        assert!(!LiveArea::hidden().enabled());
+    }
+
+    #[test]
+    fn default_is_hidden() {
+        assert!(!LiveArea::default().enabled());
     }
 }

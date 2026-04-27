@@ -401,7 +401,7 @@ dev = [
 dev = [
     { name = "mkdocstrings-python", specifier = ">=1.16.12" },
     { name = "ruff", specifier = "~=0.15.4" },
-    { name = "tryke" },
+    { name = "tryke", editable = "." },
     { name = "ty", specifier = "~=0.0.29" },
     { name = "zensical", specifier = ">=0.0.26" },
 ]

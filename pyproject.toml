@@ -71,8 +71,8 @@ include = [{ path = "python/tryke_guard.py", format = ["sdist", "wheel"] }]
 requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
-[tool.uv.build-backend]
-module-root = "python/tryke"
+[tool.uv.sources]
+tryke = { workspace = true }
 
 [dependency-groups]
 dev = [

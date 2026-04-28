@@ -33,6 +33,11 @@ pub struct Cli {
 
     #[command(flatten)]
     pub verbose: LogVerbosity<WarnLevel>,
+
+    /// Disable the terminal's native graphical progress bar (Ghostty,
+    /// Windows Terminal, ConEmu, WezTerm, iTerm2 OSC 9;4)
+    #[arg(long = "no-progress", global = true)]
+    pub no_progress: bool,
 }
 
 #[derive(Clone, Debug, ValueEnum)]

@@ -23,6 +23,9 @@ Options:
   -q, --quiet...
           Decrease logging verbosity
 
+      --no-progress
+          Disable the terminal's native graphical progress bar (Ghostty, Windows Terminal, ConEmu, WezTerm, iTerm2 OSC 9;4)
+
   -h, --help
           Print help
 
@@ -67,6 +70,9 @@ Options:
       --fixtures
           Print the fixture (`@fixture` + `Depends()`) dependency graph instead of the import graph
 
+      --no-progress
+          Disable the terminal's native graphical progress bar (Ghostty, Windows Terminal, ConEmu, WezTerm, iTerm2 OSC 9;4)
+
   -h, --help
           Print help
 ```
@@ -100,6 +106,9 @@ Options:
 
   -q, --quiet...
           Decrease logging verbosity
+
+      --no-progress
+          Disable the terminal's native graphical progress bar (Ghostty, Windows Terminal, ConEmu, WezTerm, iTerm2 OSC 9;4)
 
   -h, --help
           Print help
@@ -145,6 +154,9 @@ Options:
 
           [default: text]
           [possible values: text, json, dot, junit, llm]
+
+      --no-progress
+          Disable the terminal's native graphical progress bar (Ghostty, Windows Terminal, ConEmu, WezTerm, iTerm2 OSC 9;4)
 
       --root <ROOT>
           Project root used for discovery and execution
@@ -220,6 +232,9 @@ Options:
 
       --root <ROOT>
           Project root used for discovery and execution
+
+      --no-progress
+          Disable the terminal's native graphical progress bar (Ghostty, Windows Terminal, ConEmu, WezTerm, iTerm2 OSC 9;4)
 
   -x, --fail-fast
           Stop after first failure

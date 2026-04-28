@@ -23,13 +23,28 @@ const BADGE_WIDTH: usize = 5;
 const SLOW_TEST_THRESHOLD: Duration = Duration::from_secs(1);
 const VERY_SLOW_TEST_THRESHOLD: Duration = Duration::from_secs(5);
 
-/// Bar template — cargo-nextest cyan "Running" prefix, dimmed
-/// brackets, cyan-on-dim 20-cell bar, right-padded counters, and a
-/// reporter-built `{msg}` segment for the colored "N passed, M failed"
-/// counters. Five-space left margin aligns the bar with the indented
-/// `PASS`/`FAIL` badge column on per-test rows.
-const BAR_TEMPLATE: &str = "     {prefix:.cyan.bold} [{elapsed_precise:.dim}] \
-    [{bar:20.cyan/dim}] {pos:>4}/{len:<4} {msg}";
+/// Plain-text length of the non-content chrome on a per-test row:
+/// 5-space indent, 5-char badge, 4-char `[ ] ` around the duration,
+/// 8-char duration body, 1 space after duration, 1 space before `::`,
+/// 2-char `::`, 1 space after `::`. Used to decide whether to skip the
+/// left-column alignment padding on narrow terminals.
+const ROW_CHROME_WIDTH: usize = 5 + 5 + 1 + 1 + 8 + 1 + 1 + 1 + 2 + 1;
+
+/// Build the bar template at runtime so the bar width tracks the
+/// actual terminal width. Wide terminals get the full 20-cell bar
+/// matching cargo-nextest; narrow ones shrink down to 5 cells before
+/// indicatif would start truncating the line.
+fn build_bar_template(term_width: usize) -> String {
+    // Reserve room for: 5-space indent + "Running" (7) + " [HH:MM:SS] " (12)
+    // + " [...] " around the bar (4) + " {pos}/{len} " (~10) + ~12 chars of {msg}.
+    // Anything left over goes to the bar itself.
+    let reserved = 5 + 7 + 12 + 4 + 10 + 12;
+    let bar_width = term_width.saturating_sub(reserved).clamp(5, 20);
+    format!(
+        "     {{prefix:.cyan.bold}} [{{elapsed_precise:.dim}}] \
+         [{{bar:{bar_width}.cyan/dim}}] {{pos:>4}}/{{len:<4}} {{msg}}"
+    )
+}
 
 pub struct NextReporter<W: Write = io::Stdout> {
     writer: W,
@@ -100,7 +115,8 @@ impl<W: Write> NextReporter<W> {
         if self.started {
             return;
         }
-        self.live.start(self.total, BAR_TEMPLATE);
+        let template = build_bar_template(self.live.width());
+        self.live.start(self.total, &template);
         self.live.set_prefix("Running");
         self.started = true;
     }
@@ -145,6 +161,7 @@ fn format_test_duration(d: Duration) -> String {
     }
 }
 
+/// Plain (no ANSI) form of the left column. Used for width math.
 fn left_label(test: &TestItem) -> String {
     let stem = test
         .file_path
@@ -163,6 +180,32 @@ fn left_label(test: &TestItem) -> String {
 
 fn left_label_plain_len(test: &TestItem) -> usize {
     left_label(test).chars().count()
+}
+
+/// Styled left column — file stem in cyan-bold to make the path
+/// stand out (matching nextest's crate-name highlighting), groups in
+/// cyan, ` > ` separators dimmed.
+fn styled_left_label(test: &TestItem) -> String {
+    let stem = test
+        .file_path
+        .as_deref()
+        .and_then(Path::file_stem)
+        .map_or_else(
+            || test.module_path.clone(),
+            |s| s.to_string_lossy().into_owned(),
+        );
+    if test.groups.is_empty() {
+        format!("{}", stem.cyan().bold())
+    } else {
+        let sep = format!(" {} ", ">".dimmed());
+        let groups_styled = test
+            .groups
+            .iter()
+            .map(|g| format!("{}", g.cyan()))
+            .collect::<Vec<_>>()
+            .join(&sep);
+        format!("{}{sep}{groups_styled}", stem.cyan().bold())
+    }
 }
 
 impl<W: Write> Reporter for NextReporter<W> {
@@ -216,9 +259,10 @@ impl<W: Write> Reporter for NextReporter<W> {
         debug_assert_eq!(raw_badge.len(), BADGE_WIDTH);
 
         let dur = format_test_duration(result.duration);
-        let left = left_label(&result.test);
-        let pad = self.left_col_width.saturating_sub(left.chars().count());
+        let left_plain_len = left_label(&result.test).chars().count();
+        let left_styled = styled_left_label(&result.test);
         let display = result.test.display_label();
+        let display_len = display.chars().count();
 
         let suffix_text = match &result.outcome {
             TestOutcome::Skipped {
@@ -232,13 +276,25 @@ impl<W: Write> Reporter for NextReporter<W> {
             } => Some(desc.as_str()),
             _ => None,
         };
+        let suffix_plain_len = suffix_text.map_or(0, |t| 3 + t.chars().count()); // " (text)"
         let suffix =
             suffix_text.map_or_else(String::new, |t| format!(" {}", format!("({t})").dimmed()));
 
+        // Skip the left-column alignment padding when the row would
+        // overflow the terminal — better to wrap once than to wrap
+        // twice with a wall of leading spaces.
+        let term_width = self.live.width();
+        let max_pad = self.left_col_width.saturating_sub(left_plain_len);
+        let row_min_len = ROW_CHROME_WIDTH + left_plain_len + display_len + suffix_plain_len;
+        let pad = if row_min_len + max_pad <= term_width {
+            max_pad
+        } else {
+            0
+        };
+
         let row = format!(
-            "     {badge} [{}] {}{} {} {display}{suffix}",
+            "     {badge} [{}] {left_styled}{} {} {display}{suffix}",
             dur.dimmed(),
-            left.bold(),
             " ".repeat(pad),
             "::".dimmed(),
         );

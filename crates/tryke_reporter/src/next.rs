@@ -23,26 +23,21 @@ const BADGE_WIDTH: usize = 5;
 const SLOW_TEST_THRESHOLD: Duration = Duration::from_secs(1);
 const VERY_SLOW_TEST_THRESHOLD: Duration = Duration::from_secs(5);
 
-/// Plain-text length of the non-content chrome on a per-test row:
-/// 5-space indent, 5-char badge, 4-char `[ ] ` around the duration,
-/// 8-char duration body, 1 space after duration, 1 space before `::`,
-/// 2-char `::`, 1 space after `::`. Used to decide whether to skip the
-/// left-column alignment padding on narrow terminals.
-const ROW_CHROME_WIDTH: usize = 5 + 5 + 1 + 1 + 8 + 1 + 1 + 1 + 2 + 1;
-
-/// Build the bar template at runtime so the bar width tracks the
-/// actual terminal width. Wide terminals get the full 20-cell bar
-/// matching cargo-nextest; narrow ones shrink down to 5 cells before
-/// indicatif would start truncating the line.
+/// Build the bar template at runtime so the bar fills whatever
+/// horizontal space the terminal offers — wide terminals get a wide
+/// white bar, narrow ones still leave at least 5 cells before
+/// indicatif would truncate. White matches the user's request and
+/// stays neutral against any 256-color terminal scheme.
 fn build_bar_template(term_width: usize) -> String {
-    // Reserve room for: 5-space indent + "Running" (7) + " [HH:MM:SS] " (12)
-    // + " [...] " around the bar (4) + " {pos}/{len} " (~10) + ~12 chars of {msg}.
-    // Anything left over goes to the bar itself.
-    let reserved = 5 + 7 + 12 + 4 + 10 + 12;
-    let bar_width = term_width.saturating_sub(reserved).clamp(5, 20);
+    // Reserved plain-text overhead: 5-space indent + "Running" (7) +
+    // " [" (2) + "HH:MM:SS" (8) + "] [" (3) + "] " (2) + "{pos:>4}/
+    // {len:<4}" (9) + 1 trailing space + ~25 chars allowance for the
+    // colored `{msg}` tail. Whatever's left over goes to the bar.
+    let reserved = 5 + 7 + 2 + 8 + 3 + 2 + 9 + 1 + 25;
+    let bar_width = term_width.saturating_sub(reserved).max(5);
     format!(
         "     {{prefix:.cyan.bold}} [{{elapsed_precise:.dim}}] \
-         [{{bar:{bar_width}.cyan/dim}}] {{pos:>4}}/{{len:<4}} {{msg}}"
+         [{{bar:{bar_width}.white/dim}}] {{pos:>4}}/{{len:<4}} {{msg}}"
     )
 }
 
@@ -55,7 +50,6 @@ pub struct NextReporter<W: Write = io::Stdout> {
     passed: u64,
     failed: u64,
     skipped: u64,
-    left_col_width: usize,
     start: Instant,
     subcommand_label: &'static str,
     watch_hint: Option<String>,
@@ -73,7 +67,6 @@ impl NextReporter {
             passed: 0,
             failed: 0,
             skipped: 0,
-            left_col_width: 0,
             start: Instant::now(),
             subcommand_label: "tryke test",
             watch_hint: None,
@@ -100,7 +93,6 @@ impl<W: Write> NextReporter<W> {
             passed: 0,
             failed: 0,
             skipped: 0,
-            left_col_width: 0,
             start: Instant::now(),
             subcommand_label: "tryke test",
             watch_hint: None,
@@ -161,27 +153,6 @@ fn format_test_duration(d: Duration) -> String {
     }
 }
 
-/// Plain (no ANSI) form of the left column. Used for width math.
-fn left_label(test: &TestItem) -> String {
-    let stem = test
-        .file_path
-        .as_deref()
-        .and_then(Path::file_stem)
-        .map_or_else(
-            || test.module_path.clone(),
-            |s| s.to_string_lossy().into_owned(),
-        );
-    if test.groups.is_empty() {
-        stem
-    } else {
-        format!("{} > {}", stem, test.groups.join(" > "))
-    }
-}
-
-fn left_label_plain_len(test: &TestItem) -> usize {
-    left_label(test).chars().count()
-}
-
 /// Styled left column — file stem in cyan-bold to make the path
 /// stand out (matching nextest's crate-name highlighting), groups in
 /// cyan, ` > ` separators dimmed.
@@ -217,7 +188,6 @@ impl<W: Write> Reporter for NextReporter<W> {
         self.skipped = 0;
         self.start = Instant::now();
         self.started = false;
-        self.left_col_width = tests.iter().map(left_label_plain_len).max().unwrap_or(0);
 
         // Header lines go through the live area too; with no bar yet,
         // they're just plain writes (above where the bar will appear).
@@ -259,10 +229,8 @@ impl<W: Write> Reporter for NextReporter<W> {
         debug_assert_eq!(raw_badge.len(), BADGE_WIDTH);
 
         let dur = format_test_duration(result.duration);
-        let left_plain_len = left_label(&result.test).chars().count();
         let left_styled = styled_left_label(&result.test);
         let display = result.test.display_label();
-        let display_len = display.chars().count();
 
         let suffix_text = match &result.outcome {
             TestOutcome::Skipped {
@@ -276,26 +244,12 @@ impl<W: Write> Reporter for NextReporter<W> {
             } => Some(desc.as_str()),
             _ => None,
         };
-        let suffix_plain_len = suffix_text.map_or(0, |t| 3 + t.chars().count()); // " (text)"
         let suffix =
             suffix_text.map_or_else(String::new, |t| format!(" {}", format!("({t})").dimmed()));
 
-        // Skip the left-column alignment padding when the row would
-        // overflow the terminal — better to wrap once than to wrap
-        // twice with a wall of leading spaces.
-        let term_width = self.live.width();
-        let max_pad = self.left_col_width.saturating_sub(left_plain_len);
-        let row_min_len = ROW_CHROME_WIDTH + left_plain_len + display_len + suffix_plain_len;
-        let pad = if row_min_len + max_pad <= term_width {
-            max_pad
-        } else {
-            0
-        };
-
         let row = format!(
-            "     {badge} [{}] {left_styled}{} {} {display}{suffix}",
+            "     {badge} [{}] {left_styled} {} {display}{suffix}",
             dur.dimmed(),
-            " ".repeat(pad),
             "::".dimmed(),
         );
         self.live.println(&mut self.writer, &row);
@@ -451,27 +405,6 @@ mod tests {
     }
 
     #[test]
-    fn left_column_pads_to_widest_label() {
-        let mut r = reporter();
-        let tests = vec![
-            TestItem {
-                name: "t1".into(),
-                module_path: "tests.m".into(),
-                file_path: Some(PathBuf::from("tests/short.py")),
-                ..Default::default()
-            },
-            TestItem {
-                name: "t2".into(),
-                module_path: "tests.m".into(),
-                file_path: Some(PathBuf::from("tests/very_long_filename.py")),
-                ..Default::default()
-            },
-        ];
-        r.on_run_start(&tests);
-        assert_eq!(r.left_col_width, "very_long_filename".len());
-    }
-
-    #[test]
     fn writer_has_no_cursor_escapes() {
         // Bar lives in `LiveArea::hidden()` for `with_writer`; nothing
         // should ever emit cursor-control codes into the writer.
@@ -519,29 +452,6 @@ mod tests {
         assert!(out.contains("FAIL"));
         assert!(out.contains("1 failed"));
         assert!(out.contains("3 passed"));
-    }
-
-    #[test]
-    fn left_label_uses_groups() {
-        let test = TestItem {
-            name: "t".into(),
-            module_path: "tests.m".into(),
-            file_path: Some(PathBuf::from("tests/test_math.py")),
-            groups: vec!["Math".into(), "addition".into()],
-            ..Default::default()
-        };
-        assert_eq!(left_label(&test), "test_math > Math > addition");
-    }
-
-    #[test]
-    fn left_label_falls_back_to_module() {
-        let test = TestItem {
-            name: "t".into(),
-            module_path: "tests.fallback".into(),
-            file_path: None,
-            ..Default::default()
-        };
-        assert_eq!(left_label(&test), "tests.fallback");
     }
 
     #[test]

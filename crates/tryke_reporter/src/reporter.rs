@@ -13,6 +13,11 @@ pub trait Reporter {
     /// Lets the CLI tell the reporter which subcommand invoked it, so run
     /// headers can read "tryke watch" instead of the generic "tryke test".
     fn set_subcommand_label(&mut self, _label: &'static str) {}
+    /// In watch mode, sets a short trailing hint shown next to the
+    /// pass/fail badge in the run summary (e.g. "Waiting for file
+    /// changes..."). Reporters that don't render the summary line can
+    /// ignore this.
+    fn set_watch_hint(&mut self, _hint: Option<String>) {}
 }
 
 #[cfg(test)]

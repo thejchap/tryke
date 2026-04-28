@@ -153,7 +153,7 @@ Options:
           Reporter format to use for output
 
           [default: text]
-          [possible values: text, json, dot, junit, llm]
+          [possible values: text, json, dot, junit, llm, next, sugar]
 
       --no-progress
           Disable the terminal's native graphical progress bar (Ghostty, Windows Terminal, ConEmu, WezTerm, iTerm2 OSC 9;4)
@@ -222,7 +222,7 @@ Options:
           Reporter format to use for output
 
           [default: text]
-          [possible values: text, json, dot, junit, llm]
+          [possible values: text, json, dot, junit, llm, next, sugar]
 
   -v, --verbose...
           Increase logging verbosity

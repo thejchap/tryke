@@ -217,7 +217,9 @@ mod tests {
     use std::path::PathBuf;
 
     use tryke_discovery::Discoverer;
-    use tryke_reporter::{DotReporter, JSONReporter, JUnitReporter, TextReporter};
+    use tryke_reporter::{
+        DotReporter, JSONReporter, JUnitReporter, NextReporter, SugarReporter, TextReporter,
+    };
     use tryke_types::TestOutcome;
 
     use super::*;
@@ -293,6 +295,18 @@ mod tests {
     #[tokio::test]
     async fn test_command_junit() {
         let mut reporter = JUnitReporter::with_writer(Vec::new());
+        smoke_run_tests(&mut reporter).await;
+    }
+
+    #[tokio::test]
+    async fn test_command_next() {
+        let mut reporter = NextReporter::with_writer(Vec::new());
+        smoke_run_tests(&mut reporter).await;
+    }
+
+    #[tokio::test]
+    async fn test_command_sugar() {
+        let mut reporter = SugarReporter::with_writer(Vec::new());
         smoke_run_tests(&mut reporter).await;
     }
 

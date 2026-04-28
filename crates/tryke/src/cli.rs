@@ -47,6 +47,8 @@ pub enum ReporterFormat {
     Dot,
     Junit,
     Llm,
+    Next,
+    Sugar,
 }
 
 #[derive(Debug, Subcommand)]

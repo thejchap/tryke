@@ -1,0 +1,15 @@
+---
+source: crates/tryke/tests/snapshots.rs
+expression: strip_ansi(&out)
+---
+tryke test v[VERSION]
+
+     PASS  [  0.009s] test_one :: test_alpha
+     FAIL  [  0.123s] test_one :: test_beta
+  expected 1, got 2
+     PASS  [  0.004s] test_two :: test_gamma
+
+      Tests  1 failed | 2 passed (3)
+   Duration  10.00ms
+
+  FAIL

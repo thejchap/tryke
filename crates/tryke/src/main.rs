@@ -11,8 +11,8 @@ use tryke::execution::run_tests;
 use tryke::graph::{run_fixture_graph, run_graph};
 use tryke::watch::run_watch;
 use tryke_reporter::{
-    DotReporter, JSONReporter, JUnitReporter, LlmReporter, ProgressReporter, Reporter,
-    TextReporter, Verbosity,
+    DotReporter, JSONReporter, JUnitReporter, LlmReporter, NextReporter, ProgressReporter,
+    Reporter, SugarReporter, TextReporter, Verbosity,
 };
 use tryke_types::ChangedSelectionSummary;
 use tryke_types::filter::TestFilter;
@@ -22,6 +22,8 @@ fn build_reporter(
     verbosity: Verbosity,
     no_progress: bool,
 ) -> Box<dyn Reporter> {
+    // Next and Sugar reporters render their own progress UI, so we don't
+    // overlay the terminal's native OSC 9;4 progress bar on top of them.
     let use_progress = !no_progress
         && tryke_reporter::progress::supports_progress()
         && matches!(format, ReporterFormat::Text | ReporterFormat::Dot);
@@ -41,6 +43,8 @@ fn build_reporter(
         ReporterFormat::Text => Box::new(TextReporter::with_verbosity(verbosity)),
         ReporterFormat::Dot if use_progress => Box::new(ProgressReporter::new(DotReporter::new())),
         ReporterFormat::Dot => Box::new(DotReporter::new()),
+        ReporterFormat::Next => Box::new(NextReporter::new()),
+        ReporterFormat::Sugar => Box::new(SugarReporter::new()),
         ReporterFormat::Json => Box::new(JSONReporter::new()),
         ReporterFormat::Junit => Box::new(JUnitReporter::new()),
         ReporterFormat::Llm => Box::new(LlmReporter::new()),
@@ -169,6 +173,7 @@ fn main() -> Result<()> {
             let resolved_maxfail = if *fail_fast { Some(1) } else { *maxfail };
             let mut rep = build_reporter(reporter, verbosity, cli.no_progress);
             rep.set_subcommand_label("tryke watch");
+            rep.set_watch_hint(Some("Waiting for file changes... press q to quit".into()));
             let cwd = env::current_dir()?;
             let root_path = root.as_deref().unwrap_or(&cwd);
             let excludes = resolved_excludes(root_path, exclude, include);
@@ -341,6 +346,30 @@ mod tests {
     fn no_progress_flag_parsed_for_watch() {
         let cli = Cli::try_parse_from(["tryke", "watch", "--no-progress"]).unwrap();
         assert!(cli.no_progress);
+    }
+
+    #[test]
+    fn test_reporter_next_flag_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "test", "--reporter", "next"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Test {
+                reporter: ReporterFormat::Next,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_reporter_sugar_flag_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "test", "--reporter", "sugar"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Test {
+                reporter: ReporterFormat::Sugar,
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -17,6 +17,7 @@ chrono = "0.4.44"
 clap = { version = "4.5.60", features = ["derive"] }
 clap-verbosity-flag = "3"
 clearscreen = "4.0.5"
+console = { workspace = true }
 env_logger = "0.11"
 log = "0.4"
 notify-debouncer-mini = { workspace = true }

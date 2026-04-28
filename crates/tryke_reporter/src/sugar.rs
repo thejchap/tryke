@@ -23,11 +23,12 @@ use crate::summary;
 
 const SUFFIX_BAR_WIDTH: usize = 12;
 
-/// Bar template — pytest-sugar-style pipe-bracketed bar with a green
-/// fill. We swap to `red_bar_template` once a failure is observed.
-fn green_bar_template() -> String {
+/// Bar template — pytest-sugar-style pipe-bracketed bar with a white
+/// fill (`{wide_bar}` so it stretches to fill the terminal width). We
+/// swap to `red_bar_template` once a failure is observed.
+fn white_bar_template() -> String {
     format!(
-        "   {} |{{bar:30.green/dim}}| {{percent:>3}}% \x1b[2m·\x1b[0m \
+        "   {} |{{wide_bar:.white/dim}}| {{percent:>3}}% \x1b[2m·\x1b[0m \
          {{pos}}/{{len}} tests \x1b[2m·\x1b[0m {{prefix}} files \
          \x1b[2m·\x1b[0m {{elapsed_precise:.dim}}",
         "Progress:".bold(),
@@ -36,7 +37,7 @@ fn green_bar_template() -> String {
 
 fn red_bar_template() -> String {
     format!(
-        "   {} |{{bar:30.red/dim}}| {{percent:>3}}% \x1b[2m·\x1b[0m \
+        "   {} |{{wide_bar:.red/dim}}| {{percent:>3}}% \x1b[2m·\x1b[0m \
          {{pos}}/{{len}} tests \x1b[2m·\x1b[0m {{prefix}} files \
          \x1b[2m·\x1b[0m {{elapsed_precise:.dim}}",
         "Progress:".bold(),
@@ -116,7 +117,7 @@ impl<W: Write> SugarReporter<W> {
         if self.started {
             return;
         }
-        self.live.start(self.total_tests, &green_bar_template());
+        self.live.start(self.total_tests, &white_bar_template());
         self.live
             .set_prefix(format!("{}/{}", self.completed_files, self.total_files));
         self.started = true;
@@ -168,21 +169,17 @@ impl<W: Write> SugarReporter<W> {
             if self.failure_seen {
                 format!("{}", bar.red())
             } else {
-                format!("{}", bar.green())
+                format!("{}", bar.white())
             }
         );
 
-        // Single-space-separated marks (matches sugar's actual render).
-        let marks_joined = marks
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(" ");
+        // Marks rendered with no separator — almost-touching, matches
+        // pytest-sugar's compact look.
+        let marks_joined: String = marks.iter().map(String::as_str).collect();
         let marks_plain_len: usize = marks
             .iter()
             .map(|m| strip_ansi_count_chars(m))
-            .sum::<usize>()
-            + marks.len().saturating_sub(1);
+            .sum::<usize>();
 
         let path_plain_len = path_str.chars().count();
         // " <path> <marks>" prefix length, plain (no ANSI).

@@ -23,28 +23,20 @@ const BADGE_WIDTH: usize = 5;
 const SLOW_TEST_THRESHOLD: Duration = Duration::from_secs(1);
 const VERY_SLOW_TEST_THRESHOLD: Duration = Duration::from_secs(5);
 
-/// Build the bar template at runtime so the bar fills whatever
-/// horizontal space the terminal offers — wide terminals get a wide
-/// white bar, narrow ones still leave at least 5 cells before
-/// indicatif would truncate. White matches the user's request and
-/// stays neutral against any 256-color terminal scheme.
-fn build_bar_template(term_width: usize) -> String {
-    // Reserved plain-text overhead: 5-space indent + "Running" (7) +
-    // " [" (2) + "HH:MM:SS" (8) + "] [" (3) + "] " (2) + "{pos:>4}/
-    // {len:<4}" (9) + 1 trailing space + ~25 chars allowance for the
-    // colored `{msg}` tail. Whatever's left over goes to the bar.
-    let reserved = 5 + 7 + 2 + 8 + 3 + 2 + 9 + 1 + 25;
-    let bar_width = term_width.saturating_sub(reserved).max(5);
-    format!(
-        "     {{prefix:.cyan.bold}} [{{elapsed_precise:.dim}}] \
-         [{{bar:{bar_width}.white/dim}}] {{pos:>4}}/{{len:<4}} {{msg}}"
-    )
-}
+/// Bar template uses indicatif's `{wide_bar}` placeholder, which
+/// auto-resizes to fill whatever space the surrounding chrome and
+/// `{msg}` leave on the line. White by default; we swap to a red
+/// variant via `set_template` the first time a failure is seen.
+const BAR_TEMPLATE_WHITE: &str = "     {prefix:.cyan.bold} [{elapsed_precise:.dim}] \
+    [{wide_bar:.white/dim}] {pos:>4}/{len:<4} {msg}";
+const BAR_TEMPLATE_RED: &str = "     {prefix:.cyan.bold} [{elapsed_precise:.dim}] \
+    [{wide_bar:.red/dim}] {pos:>4}/{len:<4} {msg}";
 
 pub struct NextReporter<W: Write = io::Stdout> {
     writer: W,
     live: LiveArea,
     started: bool,
+    failure_seen: bool,
     total: u64,
     completed: u64,
     passed: u64,
@@ -62,6 +54,7 @@ impl NextReporter {
             writer: io::stdout(),
             live: LiveArea::new(),
             started: false,
+            failure_seen: false,
             total: 0,
             completed: 0,
             passed: 0,
@@ -88,6 +81,7 @@ impl<W: Write> NextReporter<W> {
             // caller's writer.
             live: LiveArea::hidden(),
             started: false,
+            failure_seen: false,
             total: 0,
             completed: 0,
             passed: 0,
@@ -107,10 +101,16 @@ impl<W: Write> NextReporter<W> {
         if self.started {
             return;
         }
-        let template = build_bar_template(self.live.width());
-        self.live.start(self.total, &template);
+        self.live.start(self.total, BAR_TEMPLATE_WHITE);
         self.live.set_prefix("Running");
         self.started = true;
+    }
+
+    fn note_failure(&mut self) {
+        if !self.failure_seen {
+            self.failure_seen = true;
+            self.live.set_template(BAR_TEMPLATE_RED);
+        }
     }
 
     fn refresh_bar(&self) {
@@ -188,6 +188,7 @@ impl<W: Write> Reporter for NextReporter<W> {
         self.skipped = 0;
         self.start = Instant::now();
         self.started = false;
+        self.failure_seen = false;
 
         // Header lines go through the live area too; with no bar yet,
         // they're just plain writes (above where the bar will appear).
@@ -211,6 +212,7 @@ impl<W: Write> Reporter for NextReporter<W> {
             TestOutcome::Passed => self.passed += 1,
             TestOutcome::Failed { .. } | TestOutcome::Error { .. } | TestOutcome::XPassed => {
                 self.failed += 1;
+                self.note_failure();
             }
             TestOutcome::Skipped { .. }
             | TestOutcome::XFailed { .. }

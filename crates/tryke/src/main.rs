@@ -17,15 +17,16 @@ use tryke_reporter::{
 use tryke_types::ChangedSelectionSummary;
 use tryke_types::filter::TestFilter;
 
-fn build_reporter(format: &ReporterFormat, verbosity: Verbosity) -> Box<dyn Reporter> {
-    let use_progress = tryke_reporter::progress::supports_progress()
-        && matches!(
-            format,
-            ReporterFormat::Text
-                | ReporterFormat::Dot
-                | ReporterFormat::Next
-                | ReporterFormat::Sugar
-        );
+fn build_reporter(
+    format: &ReporterFormat,
+    verbosity: Verbosity,
+    no_progress: bool,
+) -> Box<dyn Reporter> {
+    // Next and Sugar reporters render their own progress UI, so we don't
+    // overlay the terminal's native OSC 9;4 progress bar on top of them.
+    let use_progress = !no_progress
+        && tryke_reporter::progress::supports_progress()
+        && matches!(format, ReporterFormat::Text | ReporterFormat::Dot);
 
     if use_progress {
         // ProgressReporter emits OSC 9;4 "set progress" on every test
@@ -42,13 +43,7 @@ fn build_reporter(format: &ReporterFormat, verbosity: Verbosity) -> Box<dyn Repo
         ReporterFormat::Text => Box::new(TextReporter::with_verbosity(verbosity)),
         ReporterFormat::Dot if use_progress => Box::new(ProgressReporter::new(DotReporter::new())),
         ReporterFormat::Dot => Box::new(DotReporter::new()),
-        ReporterFormat::Next if use_progress => {
-            Box::new(ProgressReporter::new(NextReporter::new()))
-        }
         ReporterFormat::Next => Box::new(NextReporter::new()),
-        ReporterFormat::Sugar if use_progress => {
-            Box::new(ProgressReporter::new(SugarReporter::new()))
-        }
         ReporterFormat::Sugar => Box::new(SugarReporter::new()),
         ReporterFormat::Json => Box::new(JSONReporter::new()),
         ReporterFormat::Junit => Box::new(JUnitReporter::new()),
@@ -97,7 +92,7 @@ fn main() -> Result<()> {
                 ));
             }
             let resolved_maxfail = if *fail_fast { Some(1) } else { *maxfail };
-            let mut rep = build_reporter(reporter, verbosity);
+            let mut rep = build_reporter(reporter, verbosity, cli.no_progress);
             if let Some(p) = port {
                 if !exclude.is_empty() {
                     return Err(anyhow::anyhow!(
@@ -176,7 +171,7 @@ fn main() -> Result<()> {
             all,
         } => {
             let resolved_maxfail = if *fail_fast { Some(1) } else { *maxfail };
-            let mut rep = build_reporter(reporter, verbosity);
+            let mut rep = build_reporter(reporter, verbosity, cli.no_progress);
             rep.set_subcommand_label("tryke watch");
             rep.set_watch_hint(Some("Waiting for file changes... press q to quit".into()));
             let cwd = env::current_dir()?;
@@ -327,6 +322,30 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn no_progress_flag_defaults_to_false() {
+        let cli = Cli::try_parse_from(["tryke", "test"]).unwrap();
+        assert!(!cli.no_progress);
+    }
+
+    #[test]
+    fn no_progress_flag_parsed_before_subcommand() {
+        let cli = Cli::try_parse_from(["tryke", "--no-progress", "test"]).unwrap();
+        assert!(cli.no_progress);
+    }
+
+    #[test]
+    fn no_progress_flag_parsed_after_subcommand() {
+        let cli = Cli::try_parse_from(["tryke", "test", "--no-progress"]).unwrap();
+        assert!(cli.no_progress);
+    }
+
+    #[test]
+    fn no_progress_flag_parsed_for_watch() {
+        let cli = Cli::try_parse_from(["tryke", "watch", "--no-progress"]).unwrap();
+        assert!(cli.no_progress);
     }
 
     #[test]

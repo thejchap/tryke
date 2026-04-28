@@ -85,7 +85,7 @@ tryke test --reporter sugar
 Sample output:
 
 ```text
- tests/a.py ✓ ✗                                              2  66% ████████░░░░
+ tests/a.py ✓✗                                               2  66% ████████░░░░
  tests/b.py ✓                                                1 100% ████████████
 
 Failures

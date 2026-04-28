@@ -10,7 +10,6 @@
 
 use std::collections::HashSet;
 use std::io::{self, Write};
-use std::path::PathBuf;
 use std::time::Instant;
 
 use owo_colors::OwoColorize;
@@ -53,7 +52,7 @@ pub struct SugarReporter<W: Write = io::Stdout> {
     completed_tests: u64,
     total_files: u64,
     completed_files: u64,
-    current_file: Option<PathBuf>,
+    current_file: Option<String>,
     current_marks: Vec<String>,
     failures: Vec<TestResult>,
     start: Instant,
@@ -137,13 +136,12 @@ impl<W: Write> SugarReporter<W> {
     }
 
     fn commit_current_file(&mut self) {
-        let Some(file) = self.current_file.take() else {
+        let Some(path_str) = self.current_file.take() else {
             return;
         };
         let marks = std::mem::take(&mut self.current_marks);
         self.completed_files += 1;
 
-        let path_str = file.display().to_string();
         let term_width = self.live.width().max(40);
 
         let pct = if self.total_tests == 0 {
@@ -211,6 +209,17 @@ impl<W: Write> SugarReporter<W> {
     }
 }
 
+/// Display label and grouping key for a test's source file. Falls
+/// back to the `module_path` when no file path is available, so tests
+/// without a `file_path` (e.g. dynamically-loaded modules) still get
+/// a row and an accurate file count instead of being silently
+/// dropped.
+fn file_label(test: &TestItem) -> String {
+    test.file_path
+        .as_deref()
+        .map_or_else(|| test.module_path.clone(), |p| p.display().to_string())
+}
+
 fn outcome_mark(outcome: &TestOutcome) -> String {
     match outcome {
         TestOutcome::Passed => format!("{}", "✓".green()),
@@ -246,11 +255,7 @@ impl<W: Write> Reporter for SugarReporter<W> {
     fn on_run_start(&mut self, tests: &[TestItem]) {
         self.total_tests = tests.len() as u64;
         self.completed_tests = 0;
-        self.total_files = tests
-            .iter()
-            .filter_map(|t| t.file_path.as_ref())
-            .collect::<HashSet<_>>()
-            .len() as u64;
+        self.total_files = tests.iter().map(file_label).collect::<HashSet<_>>().len() as u64;
         self.completed_files = 0;
         self.current_file = None;
         self.current_marks.clear();
@@ -274,11 +279,11 @@ impl<W: Write> Reporter for SugarReporter<W> {
         // File transition: commit the previous file's accumulated marks
         // as a single row, then start fresh. The execution layer
         // guarantees a file's tests arrive contiguously, so a change in
-        // `file_path` reliably means "previous file done."
-        let new_file = result.test.file_path.clone();
-        if new_file != self.current_file {
+        // the file label reliably means "previous file done."
+        let new_label = file_label(&result.test);
+        if Some(&new_label) != self.current_file.as_ref() {
             self.commit_current_file();
-            self.current_file = new_file;
+            self.current_file = Some(new_label);
         }
 
         self.completed_tests += 1;
@@ -584,6 +589,52 @@ mod tests {
         );
         assert!(outcome_mark(&TestOutcome::Skipped { reason: None }).contains('s'));
         assert!(outcome_mark(&TestOutcome::Todo { description: None }).contains('T'));
+    }
+
+    #[test]
+    fn tests_with_no_file_path_are_grouped_under_module_path() {
+        // Regression: tests that come back from discovery with
+        // `file_path = None` (e.g. dynamically-loaded modules) used
+        // to be silently dropped because every "transition" stayed at
+        // `current_file = None`. They should now group under the
+        // module path instead.
+        let mut r = reporter();
+        let make = |name: &str| TestResult {
+            test: TestItem {
+                name: name.into(),
+                module_path: "tests.dynamic".into(),
+                file_path: None,
+                ..Default::default()
+            },
+            outcome: TestOutcome::Passed,
+            duration: Duration::from_millis(1),
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        let tests = vec![make("a").test.clone(), make("b").test.clone()];
+        r.on_run_start(&tests);
+        r.on_test_complete(&make("a"));
+        r.on_test_complete(&make("b"));
+        r.on_run_complete(&RunSummary {
+            passed: 2,
+            failed: 0,
+            skipped: 0,
+            errors: 0,
+            xfailed: 0,
+            todo: 0,
+            duration: Duration::from_millis(2),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 1,
+            start_time: None,
+            changed_selection: None,
+        });
+        let out = output(r);
+        let line = out
+            .lines()
+            .find(|l| l.contains("tests.dynamic"))
+            .expect("synthetic file row should be emitted");
+        assert_eq!(line.matches('✓').count(), 2, "line: {line}");
     }
 
     #[test]

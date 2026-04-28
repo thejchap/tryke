@@ -30,13 +30,15 @@ pub fn supports_live() -> bool {
     io::stdout().is_terminal() && io::stderr().is_terminal()
 }
 
-/// Format `d` as `HH:MM:SS`, capped at 99:59:59. Used by callers that
-/// build bar segments outside of indicatif's template (e.g. a frozen
-/// elapsed value rendered in the summary).
+/// Format `d` as `HH:MM:SS`, with the entire duration clamped to
+/// `99:59:59` (any longer reads as "off the chart"). Used by callers
+/// that build bar segments outside of indicatif's template (e.g. a
+/// frozen elapsed value rendered in the summary).
 #[must_use]
 pub fn format_elapsed(d: Duration) -> String {
-    let secs = d.as_secs();
-    let hours = (secs / 3600).min(99);
+    const MAX_SECS: u64 = 99 * 3600 + 59 * 60 + 59;
+    let secs = d.as_secs().min(MAX_SECS);
+    let hours = secs / 3600;
     let minutes = (secs / 60) % 60;
     let seconds = secs % 60;
     format!("{hours:02}:{minutes:02}:{seconds:02}")
@@ -255,8 +257,15 @@ mod tests {
     }
 
     #[test]
-    fn format_elapsed_caps_at_99h() {
-        assert_eq!(format_elapsed(Duration::from_secs(200 * 3600)), "99:00:00");
+    fn format_elapsed_caps_at_99h_59m_59s() {
+        // Whole duration clamps, so 200h reads as 99:59:59 — minutes
+        // and seconds saturate too instead of leaking from the
+        // un-clamped value.
+        assert_eq!(format_elapsed(Duration::from_secs(200 * 3600)), "99:59:59");
+        assert_eq!(
+            format_elapsed(Duration::from_secs(120 * 3600 + 30 * 60)),
+            "99:59:59"
+        );
     }
 
     #[test]

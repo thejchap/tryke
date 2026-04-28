@@ -38,7 +38,7 @@ pub fn install_cleanup_handler() {
         let stderr = io::stderr();
         let mut handle = stderr.lock();
         // \r\x1b[2K clears the in-terminal status bar line; \x1b[?25h
-        // shows the cursor in case it was hidden by LiveBar.
+        // shows the cursor in case it was hidden by `LiveArea`.
         let _ = write!(handle, "\r\x1b[2K\x1b[?25h");
         let _ = handle.flush();
         // 128 + SIGINT(2). Matches the exit status of an un-handled

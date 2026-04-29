@@ -56,6 +56,7 @@ pub enum Commands {
     /// Collect and run tests.
     Test {
         /// File paths or file:line specs to restrict collection
+        #[arg(conflicts_with = "watch")]
         paths: Vec<String>,
         /// Exclude files/directories from discovery (overrides pyproject config)
         #[arg(short = 'e', long = "exclude")]
@@ -64,7 +65,7 @@ pub enum Commands {
         #[arg(short = 'i', long = "include")]
         include: Vec<String>,
         /// Collect tests without running them
-        #[arg(long)]
+        #[arg(long, conflicts_with = "watch")]
         collect_only: bool,
         /// Filter expression (e.g. "math and not slow")
         #[arg(short = 'k', long = "filter")]
@@ -79,13 +80,13 @@ pub enum Commands {
         #[arg(long)]
         root: Option<PathBuf>,
         /// Use an already-running server on the optional port
-        #[arg(long, default_missing_value = "2337", num_args = 0..=1, require_equals = false)]
+        #[arg(long, default_missing_value = "2337", num_args = 0..=1, require_equals = false, conflicts_with = "watch")]
         port: Option<u16>,
         /// Run only tests affected by files changed since HEAD (requires git)
-        #[arg(long, conflicts_with = "changed_first")]
+        #[arg(long, conflicts_with_all = ["changed_first", "watch"])]
         changed: bool,
         /// Run changed tests first, then all remaining tests (requires git)
-        #[arg(long, conflicts_with = "changed")]
+        #[arg(long, conflicts_with_all = ["changed", "watch"])]
         changed_first: bool,
         /// Base branch for --changed or --changed-first (e.g. "main"). Uses merge-base diff.
         #[arg(long)]
@@ -102,41 +103,11 @@ pub enum Commands {
         /// How tests are distributed across workers
         #[arg(long, default_value = "test")]
         dist: Dist,
-    },
-    /// Watch files and rerun affected tests.
-    Watch {
-        /// Exclude files/directories from discovery (overrides pyproject config)
-        #[arg(short = 'e', long = "exclude")]
-        exclude: Vec<String>,
-        /// Include files/directories even if excluded by `pyproject.toml`
-        #[arg(short = 'i', long = "include")]
-        include: Vec<String>,
-        /// Filter expression (e.g. "math and not slow")
-        #[arg(short = 'k', long = "filter")]
-        filter: Option<String>,
-        /// Tag/marker filter expression (e.g. "slow and not network")
-        #[arg(short = 'm', long = "markers")]
-        markers: Option<String>,
-        /// Reporter format to use for output
-        #[arg(long = "reporter", default_value = "text")]
-        reporter: ReporterFormat,
-        /// Project root used for discovery and execution
-        #[arg(long)]
-        root: Option<PathBuf>,
-        /// Stop after first failure
-        #[arg(short = 'x', long = "fail-fast")]
-        fail_fast: bool,
-        /// Stop after N failures
-        #[arg(long)]
-        maxfail: Option<usize>,
-        /// Number of worker processes (default: cpu_count)
-        #[arg(short = 'j', long = "workers")]
-        workers: Option<usize>,
-        /// How tests are distributed across workers
-        #[arg(long, default_value = "test")]
-        dist: Dist,
-        /// Rerun the full test set on every change instead of just affected tests
-        #[arg(short = 'a', long = "all")]
+        /// Watch files and rerun affected tests on change (press q to quit).
+        #[arg(short = 'w', long = "watch")]
+        watch: bool,
+        /// In watch mode, rerun the full test set on every change instead of just affected tests
+        #[arg(short = 'a', long = "all", requires = "watch")]
         all: bool,
     },
     /// Start a persistent worker server.

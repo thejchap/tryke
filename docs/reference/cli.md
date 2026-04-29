@@ -11,7 +11,6 @@ Usage: tryke [OPTIONS] <COMMAND>
 
 Commands:
   test    Collect and run tests
-  watch   Watch files and rerun affected tests
   server  Start a persistent worker server
   graph   Print the import dependency graph for the project
   help    Print this message or the help of the given subcommand(s)
@@ -55,23 +54,23 @@ Options:
       --connected-only
           Show only files that have dependents or dependencies (skip isolated files)
 
-      --changed
-          Show only files affected by files changed since HEAD (requires git)
-
   -v, --verbose...
           Increase logging verbosity
 
-      --base-branch <BASE_BRANCH>
-          Base branch for --changed (e.g. "main"). Uses merge-base diff
+      --changed
+          Show only files affected by files changed since HEAD (requires git)
 
   -q, --quiet...
           Decrease logging verbosity
 
-      --fixtures
-          Print the fixture (`@fixture` + `Depends()`) dependency graph instead of the import graph
+      --base-branch <BASE_BRANCH>
+          Base branch for --changed (e.g. "main"). Uses merge-base diff
 
       --no-progress
           Disable the terminal's native graphical progress bar (Ghostty, Windows Terminal, ConEmu, WezTerm, iTerm2 OSC 9;4)
+
+      --fixtures
+          Print the fixture (`@fixture` + `Depends()`) dependency graph instead of the import graph
 
   -h, --help
           Print help
@@ -140,23 +139,23 @@ Options:
   -k, --filter <FILTER>
           Filter expression (e.g. "math and not slow")
 
-  -m, --markers <MARKERS>
-          Tag/marker filter expression (e.g. "slow and not network")
-
   -v, --verbose...
           Increase logging verbosity
 
+  -m, --markers <MARKERS>
+          Tag/marker filter expression (e.g. "slow and not network")
+
   -q, --quiet...
           Decrease logging verbosity
+
+      --no-progress
+          Disable the terminal's native graphical progress bar (Ghostty, Windows Terminal, ConEmu, WezTerm, iTerm2 OSC 9;4)
 
       --reporter <REPORTER>
           Reporter format to use for output
 
           [default: text]
           [possible values: text, json, dot, junit, llm, next, sugar]
-
-      --no-progress
-          Disable the terminal's native graphical progress bar (Ghostty, Windows Terminal, ConEmu, WezTerm, iTerm2 OSC 9;4)
 
       --root <ROOT>
           Project root used for discovery and execution
@@ -192,71 +191,11 @@ Options:
 
           [default: test]
 
-  -h, --help
-          Print help (see a summary with '-h')
-```
-
-### `tryke watch`
-
-Watch files and rerun affected tests
-
-```text
-Watch files and rerun affected tests
-
-Usage: tryke watch [OPTIONS]
-
-Options:
-  -e, --exclude <EXCLUDE>
-          Exclude files/directories from discovery (overrides pyproject config)
-
-  -i, --include <INCLUDE>
-          Include files/directories even if excluded by `pyproject.toml`
-
-  -k, --filter <FILTER>
-          Filter expression (e.g. "math and not slow")
-
-  -m, --markers <MARKERS>
-          Tag/marker filter expression (e.g. "slow and not network")
-
-      --reporter <REPORTER>
-          Reporter format to use for output
-
-          [default: text]
-          [possible values: text, json, dot, junit, llm, next, sugar]
-
-  -v, --verbose...
-          Increase logging verbosity
-
-  -q, --quiet...
-          Decrease logging verbosity
-
-      --root <ROOT>
-          Project root used for discovery and execution
-
-      --no-progress
-          Disable the terminal's native graphical progress bar (Ghostty, Windows Terminal, ConEmu, WezTerm, iTerm2 OSC 9;4)
-
-  -x, --fail-fast
-          Stop after first failure
-
-      --maxfail <MAXFAIL>
-          Stop after N failures
-
-  -j, --workers <WORKERS>
-          Number of worker processes (default: cpu_count)
-
-      --dist <DIST>
-          How tests are distributed across workers
-
-          Possible values:
-          - test:  Each test is its own work unit (maximum parallelism)
-          - file:  All tests from a file go to one worker
-          - group: Tests within a describe() group go to one worker
-
-          [default: test]
+  -w, --watch
+          Watch files and rerun affected tests on change (press q to quit)
 
   -a, --all
-          Rerun the full test set on every change instead of just affected tests
+          In watch mode, rerun the full test set on every change instead of just affected tests
 
   -h, --help
           Print help (see a summary with '-h')

@@ -18,7 +18,7 @@ Type "clear"
 Enter
 Show
 
-Type "uvx tryke watch -v"
+Type "uvx tryke test --watch -v"
 Sleep 500ms
 Enter
 Sleep 10s

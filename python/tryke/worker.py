@@ -855,9 +855,9 @@ def _configure_logging_from_env() -> None:
 
     Off by default so normal test runs don't emit anything on stderr.
     Set ``TRYKE_WORKER_LOG=DEBUG`` (or ``INFO`` / ``TRACE``) before
-    invoking ``tryke test``/``tryke watch``/``tryke server`` to trace
-    module registration and dispatch. Output goes to stderr so it never
-    contaminates the JSON-RPC stream on stdout.
+    invoking ``tryke test``/``tryke test --watch``/``tryke server`` to
+    trace module registration and dispatch. Output goes to stderr so it
+    never contaminates the JSON-RPC stream on stdout.
     """
     level_name = os.environ.get("TRYKE_WORKER_LOG", "").strip().upper()
     if not level_name:

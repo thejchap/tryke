@@ -11,7 +11,7 @@ pub trait Reporter {
     /// those files are always included in `--changed` runs.
     fn on_discovery_warning(&mut self, _warning: &DiscoveryWarning) {}
     /// Lets the CLI tell the reporter which subcommand invoked it, so run
-    /// headers can read "tryke watch" instead of the generic "tryke test".
+    /// headers can read "tryke test --watch" instead of the generic "tryke test".
     fn set_subcommand_label(&mut self, _label: &'static str) {}
     /// In watch mode, sets a short trailing hint shown next to the
     /// pass/fail badge in the run summary (e.g. "Waiting for file

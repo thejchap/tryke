@@ -353,8 +353,8 @@ mod tests {
         );
     }
 
-    /// Regression: in a fresh `tryke watch` session, the first event
-    /// the filter sees for a path may be a deletion. Without
+    /// Regression: in a fresh `tryke test --watch` session, the first
+    /// event the filter sees for a path may be a deletion. Without
     /// distinguishing "never seen" from "seen and currently missing",
     /// `current == prior == None` would silently drop the event and
     /// the discovery layer would never learn the file is gone.

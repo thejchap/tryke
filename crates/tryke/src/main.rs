@@ -85,6 +85,8 @@ fn main() -> Result<()> {
             workers,
             dist,
             include,
+            watch,
+            all,
         } => {
             if base_branch.is_some() && !changed && !changed_first {
                 return Err(anyhow::anyhow!(
@@ -93,6 +95,25 @@ fn main() -> Result<()> {
             }
             let resolved_maxfail = if *fail_fast { Some(1) } else { *maxfail };
             let mut rep = build_reporter(reporter, verbosity, cli.no_progress);
+            if *watch {
+                rep.set_subcommand_label("tryke test --watch");
+                rep.set_watch_hint(Some("Waiting for file changes... press q to quit".into()));
+                let cwd = env::current_dir()?;
+                let root_path = root.as_deref().unwrap_or(&cwd);
+                let excludes = resolved_excludes(root_path, exclude, include);
+                let test_filter = TestFilter::from_args(&[], filter.as_deref(), markers.as_deref())
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                return rt.block_on(run_watch(
+                    &mut *rep,
+                    Some(root_path),
+                    &excludes,
+                    &test_filter,
+                    resolved_maxfail,
+                    *workers,
+                    (*dist).into(),
+                    *all,
+                ));
+            }
             if let Some(p) = port {
                 if !exclude.is_empty() {
                     return Err(anyhow::anyhow!(
@@ -156,39 +177,6 @@ fn main() -> Result<()> {
                     changed_selection,
                 ))
             }
-        }
-        Commands::Watch {
-            exclude,
-            filter,
-            markers,
-            reporter,
-            root,
-            fail_fast,
-            maxfail,
-            workers,
-            dist,
-            include,
-            all,
-        } => {
-            let resolved_maxfail = if *fail_fast { Some(1) } else { *maxfail };
-            let mut rep = build_reporter(reporter, verbosity, cli.no_progress);
-            rep.set_subcommand_label("tryke watch");
-            rep.set_watch_hint(Some("Waiting for file changes... press q to quit".into()));
-            let cwd = env::current_dir()?;
-            let root_path = root.as_deref().unwrap_or(&cwd);
-            let excludes = resolved_excludes(root_path, exclude, include);
-            let test_filter = TestFilter::from_args(&[], filter.as_deref(), markers.as_deref())
-                .map_err(|e| anyhow::anyhow!(e))?;
-            rt.block_on(run_watch(
-                &mut *rep,
-                Some(root_path),
-                &excludes,
-                &test_filter,
-                resolved_maxfail,
-                *workers,
-                (*dist).into(),
-                *all,
-            ))
         }
         Commands::Server {
             port,
@@ -344,7 +332,7 @@ mod tests {
 
     #[test]
     fn no_progress_flag_parsed_for_watch() {
-        let cli = Cli::try_parse_from(["tryke", "watch", "--no-progress"]).unwrap();
+        let cli = Cli::try_parse_from(["tryke", "test", "--watch", "--no-progress"]).unwrap();
         assert!(cli.no_progress);
     }
 
@@ -468,21 +456,82 @@ mod tests {
     }
 
     #[test]
-    fn watch_subcommand_parsed() {
-        let cli = Cli::try_parse_from(["tryke", "watch"]).unwrap();
-        assert!(matches!(cli.command, Commands::Watch { .. }));
+    fn watch_flag_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "test", "--watch"]).unwrap();
+        assert!(matches!(cli.command, Commands::Test { watch: true, .. }));
     }
 
     #[test]
-    fn watch_subcommand_with_reporter_parsed() {
-        let cli = Cli::try_parse_from(["tryke", "watch", "--reporter", "json"]).unwrap();
+    fn watch_short_flag_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "test", "-w"]).unwrap();
+        assert!(matches!(cli.command, Commands::Test { watch: true, .. }));
+    }
+
+    #[test]
+    fn watch_with_reporter_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "test", "--watch", "--reporter", "json"]).unwrap();
         assert!(matches!(
             cli.command,
-            Commands::Watch {
+            Commands::Test {
+                watch: true,
                 reporter: ReporterFormat::Json,
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn watch_conflicts_with_collect_only() {
+        let result = Cli::try_parse_from(["tryke", "test", "--watch", "--collect-only"]);
+        assert!(
+            result.is_err(),
+            "--watch and --collect-only should conflict"
+        );
+    }
+
+    #[test]
+    fn watch_conflicts_with_changed() {
+        let result = Cli::try_parse_from(["tryke", "test", "--watch", "--changed"]);
+        assert!(result.is_err(), "--watch and --changed should conflict");
+    }
+
+    #[test]
+    fn watch_conflicts_with_changed_first() {
+        let result = Cli::try_parse_from(["tryke", "test", "--watch", "--changed-first"]);
+        assert!(
+            result.is_err(),
+            "--watch and --changed-first should conflict"
+        );
+    }
+
+    #[test]
+    fn watch_conflicts_with_port() {
+        let result = Cli::try_parse_from(["tryke", "test", "--watch", "--port", "2337"]);
+        assert!(result.is_err(), "--watch and --port should conflict");
+    }
+
+    #[test]
+    fn watch_conflicts_with_paths() {
+        let result = Cli::try_parse_from(["tryke", "test", "--watch", "tests/foo.py"]);
+        assert!(
+            result.is_err(),
+            "--watch and positional paths should conflict"
+        );
+    }
+
+    #[test]
+    fn all_requires_watch() {
+        let result = Cli::try_parse_from(["tryke", "test", "--all"]);
+        assert!(result.is_err(), "--all without --watch should error");
+    }
+
+    #[test]
+    fn watch_subcommand_removed() {
+        let result = Cli::try_parse_from(["tryke", "watch"]);
+        assert!(
+            result.is_err(),
+            "`tryke watch` subcommand should no longer exist"
+        );
     }
 
     #[test]
@@ -598,10 +647,11 @@ mod tests {
 
     #[test]
     fn watch_filter_flag_parsed() {
-        let cli = Cli::try_parse_from(["tryke", "watch", "-k", "test_add"]).unwrap();
+        let cli = Cli::try_parse_from(["tryke", "test", "--watch", "-k", "test_add"]).unwrap();
         assert!(matches!(
             &cli.command,
-            Commands::Watch {
+            Commands::Test {
+                watch: true,
                 filter: Some(f),
                 ..
             } if f == "test_add"
@@ -640,10 +690,11 @@ mod tests {
 
     #[test]
     fn watch_workers_flag_parsed() {
-        let cli = Cli::try_parse_from(["tryke", "watch", "-j", "2"]).unwrap();
+        let cli = Cli::try_parse_from(["tryke", "test", "--watch", "-j", "2"]).unwrap();
         assert!(matches!(
             cli.command,
-            Commands::Watch {
+            Commands::Test {
+                watch: true,
                 workers: Some(2),
                 ..
             }
@@ -652,20 +703,41 @@ mod tests {
 
     #[test]
     fn watch_all_flag_defaults_to_false() {
-        let cli = Cli::try_parse_from(["tryke", "watch"]).unwrap();
-        assert!(matches!(cli.command, Commands::Watch { all: false, .. }));
+        let cli = Cli::try_parse_from(["tryke", "test", "--watch"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Test {
+                watch: true,
+                all: false,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn watch_all_long_flag_parsed() {
-        let cli = Cli::try_parse_from(["tryke", "watch", "--all"]).unwrap();
-        assert!(matches!(cli.command, Commands::Watch { all: true, .. }));
+        let cli = Cli::try_parse_from(["tryke", "test", "--watch", "--all"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Test {
+                watch: true,
+                all: true,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn watch_all_short_flag_parsed() {
-        let cli = Cli::try_parse_from(["tryke", "watch", "-a"]).unwrap();
-        assert!(matches!(cli.command, Commands::Watch { all: true, .. }));
+        let cli = Cli::try_parse_from(["tryke", "test", "--watch", "-a"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Test {
+                watch: true,
+                all: true,
+                ..
+            }
+        ));
     }
 
     #[test]

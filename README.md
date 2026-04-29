@@ -56,7 +56,7 @@ with t.describe("users"):
 
 ```
 
-Run your tests — `tryke watch` for an always-on loop, `tryke test --changed`
+Run your tests — `tryke test --watch` for an always-on loop, `tryke test --changed`
 for just what your working tree touched, or plain:
 
 ```bash

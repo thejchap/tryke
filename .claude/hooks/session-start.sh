@@ -11,5 +11,3 @@ cd "${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel)}"
 if ! command -v cargo-nextest >/dev/null 2>&1; then
   cargo install cargo-nextest --locked
 fi
-
-cargo nextest run --workspace --all-features

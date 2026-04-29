@@ -13,5 +13,3 @@ if ! command -v cargo-nextest >/dev/null 2>&1; then
 fi
 
 cargo nextest run --workspace --all-features
-
-cargo run test --reporter llm

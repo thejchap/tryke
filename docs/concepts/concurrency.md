@@ -13,7 +13,7 @@ The pool size depends on the context:
 | Context | Default |
 |---------|---------|
 | `tryke test` | `min(test_count, cpu_count)` |
-| `tryke watch` | `cpu_count` |
+| `tryke test --watch` | `cpu_count` |
 | `tryke server` | `cpu_count` |
 
 If CPU detection fails, the fallback is 4 workers. Override with `-j` / `--workers`:
@@ -28,7 +28,7 @@ The `tryke test` default avoids creating more workers than there are tests to ru
 
 Workers are pre-warmed at startup. Before any tests execute, Tryke sends a ping to every worker over a dedicated per-worker control channel, causing each one to spawn its Python subprocess in parallel. This means Python startup latency is absorbed before the first test begins, not during it.
 
-In `tryke watch` and `tryke server`, this same control channel is used to **restart** workers when a watched file changes: each worker kills its current Python process and immediately respawns a fresh one (replaying any cached fixture registrations). Pre-warming on restart is parallel, so the workers are warm again by the time the next test cycle begins. This is how Tryke picks up code changes — it does **not** call `importlib.reload` in-process, which is fragile once classes, closures, or decorator-bound state from the old definitions have been captured elsewhere.
+In `tryke test --watch` and `tryke server`, this same control channel is used to **restart** workers when a watched file changes: each worker kills its current Python process and immediately respawns a fresh one (replaying any cached fixture registrations). Pre-warming on restart is parallel, so the workers are warm again by the time the next test cycle begins. This is how Tryke picks up code changes — it does **not** call `importlib.reload` in-process, which is fragile once classes, closures, or decorator-bound state from the old definitions have been captured elsewhere.
 
 ## Distribution modes
 

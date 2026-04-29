@@ -101,5 +101,5 @@ Like `next`, the live status bar is only drawn when both stdout and stderr are T
 The `--reporter` flag works with [watch mode](watch-mode.md) too:
 
 ```bash
-tryke watch --reporter dot
+tryke test --watch --reporter dot
 ```

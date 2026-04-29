@@ -5,7 +5,7 @@ Watch mode monitors your project for file changes and reruns only the affected t
 ## Basic usage
 
 ```bash
-tryke watch
+tryke test --watch
 ```
 
 Tryke watches all `.py` files in the project, respecting `.gitignore`. When a file changes, it:
@@ -29,13 +29,13 @@ All the standard [filtering](filtering.md) flags work in watch mode:
 
 ```bash
 # Only watch tests matching a name pattern
-tryke watch -k "math"
+tryke test --watch -k "math"
 
 # Only watch tests with specific tags
-tryke watch -m "fast"
+tryke test --watch -m "fast"
 
 # Combine filters
-tryke watch -k "parse" -m "not slow"
+tryke test --watch -k "parse" -m "not slow"
 ```
 
 ## Options
@@ -45,7 +45,7 @@ tryke watch -k "parse" -m "not slow"
 Choose an output format:
 
 ```bash
-tryke watch --reporter dot
+tryke test --watch --reporter dot
 ```
 
 See [reporters](reporters.md) for all formats.
@@ -55,13 +55,13 @@ See [reporters](reporters.md) for all formats.
 Stop a run on the first failure:
 
 ```bash
-tryke watch -x
+tryke test --watch -x
 ```
 
 Or after N failures:
 
 ```bash
-tryke watch --maxfail 3
+tryke test --watch --maxfail 3
 ```
 
 ### Workers
@@ -69,7 +69,7 @@ tryke watch --maxfail 3
 Override the number of parallel workers (defaults to CPU count):
 
 ```bash
-tryke watch -j 4
+tryke test --watch -j 4
 ```
 
 See [concurrency](../concepts/concurrency.md) for details on the worker pool.
@@ -81,7 +81,7 @@ By default, watch mode reruns only the tests affected by the changed files
 discovered test set on every change instead:
 
 ```bash
-tryke watch --all
+tryke test --watch --all
 ```
 
 This is useful when:

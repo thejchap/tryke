@@ -78,14 +78,20 @@ with t.describe("users"):
         @t.test("returns a stored user")
         async def test_get(users: Annotated[dict[str, str], t.Depends(users)]):
             users["alice"] = "alice@example.com"
-            t.expect(users["alice"]).to_equal("alice@example.com")
+            # Pass a label as the second argument to expect() so reports
+            # show "returns stored email" instead of the raw expression
+            t.expect(users["alice"], "returns stored email").to_equal(
+                "alice@example.com"
+            )
 
     with t.describe("set"):
 
         @t.test("stores a new user")
         async def test_set(users: Annotated[dict[str, str], t.Depends(users)]):
             users["bob"] = "bob@example.com"
-            t.expect(users["bob"]).to_equal("bob@example.com")
+            t.expect(users["bob"], "stores email under user key").to_equal(
+                "bob@example.com"
+            )
 
 ```
 
@@ -96,24 +102,24 @@ for just what your working tree touched, or plain:
 uvx tryke test
 ```
 
-```text
-tryke test v0.0.23
+```ansi
+[1mtryke test[0m [2mv0.0.25[0m
 
 example.py:
   users
     get
-      ✓ returns a stored user [0.00ms]
-        ✓ expect(users["alice"]).to_equal("alice@example.com")
+      [32m✓[39m returns a stored user [2m[0.00ms][0m
+        [32m✓[39m [2mreturns stored email[0m
     set
-      ✓ stores a new user [0.00ms]
-        ✓ expect(users["bob"]).to_equal("bob@example.com")
+      [32m✓[39m stores a new user [2m[0.00ms][0m
+        [32m✓[39m [2mstores email under user key[0m
 
- Test Files  1 passed (1)
-      Tests  2 passed (2)
-   Start at  08:58:39
-   Duration  46.01ms (discover 6.08ms, tests 39.93ms)
+ [2mTest Files[0m  [1m[32m1 passed[39m[0m [2m(1)[0m
+      [2mTests[0m  [1m[32m2 passed[39m[0m [2m(2)[0m
+   [2mStart at[0m  08:58:39
+   [2mDuration[0m  46.01ms [2m(discover 6.08ms, tests 39.93ms)[0m
 
-  PASS
+ [1m[30;42m PASS [0m[0m
 ```
 
 ## Coming from pytest?

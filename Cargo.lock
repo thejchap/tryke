@@ -330,9 +330,9 @@ checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
 
 [[package]]
 name = "clearscreen"
-version = "4.0.5"
+version = "4.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5def4343d62f01f67ff1a49147e4a15112e936c6a6a3f8ff7a29394e76468244"
+checksum = "d669bb552908e336ad5681789752033b45566b7e591aeaac7a614e58e5d6d8f2"
 dependencies = [
  "nix",
  "terminfo",
@@ -387,6 +387,18 @@ dependencies = [
  "once_cell",
  "unicode-width 0.2.2",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "console"
+version = "0.16.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d64e8af5551369d19cf50138de61f1c42074ab970f74e99be916646777f8fc87"
+dependencies = [
+ "encode_unicode",
+ "libc",
+ "unicode-width 0.2.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -630,9 +642,9 @@ checksum = "7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d"
 
 [[package]]
 name = "get-size-derive2"
-version = "0.7.4"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2b6d1e2f75c16bfbcd0f95d84f99858a6e2f885c2287d1f5c3a96e8444a34b4"
+checksum = "dfd774e8175d3adb09c1742cb4697fb08490607fc02acfaa3b66b88254239d1d"
 dependencies = [
  "attribute-derive",
  "quote",
@@ -641,13 +653,13 @@ dependencies = [
 
 [[package]]
 name = "get-size2"
-version = "0.7.4"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49cf31a6d70300cf81461098f7797571362387ef4bf85d32ac47eaa59b3a5a1a"
+checksum = "d5b6f7d040889b1980e31d03585f0150223f44eeada7a69c525cbb74c38266f6"
 dependencies = [
  "compact_str",
  "get-size-derive2",
- "hashbrown 0.16.1",
+ "hashbrown 0.17.0",
  "ordermap",
  "smallvec",
 ]
@@ -717,9 +729,9 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.16.1"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
 
 [[package]]
 name = "hashlink"
@@ -784,26 +796,26 @@ dependencies = [
 
 [[package]]
 name = "indexmap"
-version = "2.13.0"
+version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7714e70437a7dc3ac8eb7e6f8df75fd8eb422675fc7678aff7364301092b1017"
+checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 dependencies = [
  "equivalent",
- "hashbrown 0.16.1",
+ "hashbrown 0.17.0",
  "serde",
  "serde_core",
 ]
 
 [[package]]
 name = "indicatif"
-version = "0.17.11"
+version = "0.18.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "183b3088984b400f4cfac3620d5e076c84da5364016b4f49473de574b2586235"
+checksum = "25470f23803092da7d239834776d653104d551bc4d7eacaf31e6837854b8e9eb"
 dependencies = [
- "console",
- "number_prefix",
+ "console 0.16.3",
  "portable-atomic",
  "unicode-width 0.2.2",
+ "unit-prefix",
  "web-time",
 ]
 
@@ -829,11 +841,11 @@ dependencies = [
 
 [[package]]
 name = "insta"
-version = "1.46.3"
+version = "1.47.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e82db8c87c7f1ccecb34ce0c24399b8a73081427f3c7c50a5d597925356115e4"
+checksum = "7b4a6248eb93a4401ed2f37dfe8ea592d3cf05b7cf4f8efa867b6895af7e094e"
 dependencies = [
- "console",
+ "console 0.16.3",
  "once_cell",
  "regex",
  "similar",
@@ -1184,12 +1196,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "number_prefix"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
-
-[[package]]
 name = "objc2"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1249,9 +1255,9 @@ dependencies = [
 
 [[package]]
 name = "ordermap"
-version = "1.1.0"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfa78c92071bbd3628c22b1a964f7e0eb201dc1456555db072beb1662ecd6715"
+checksum = "7f7476a5b122ff1fce7208e7ee9dccd0a516e835f5b8b19b8f3c98a34cf757c1"
 dependencies = [
  "indexmap",
 ]
@@ -1588,7 +1594,7 @@ dependencies = [
 [[package]]
 name = "ruff_python_ast"
 version = "0.0.0"
-source = "git+https://github.com/astral-sh/ruff?tag=0.15.6#e4c7f357777a2fdd34dbe6a98b1b7d3e7488f675"
+source = "git+https://github.com/astral-sh/ruff?tag=0.15.12#66f93cf7ed4d36325f35a452e4afa28268fbcd28"
 dependencies = [
  "aho-corasick",
  "bitflags 2.11.0",
@@ -1606,7 +1612,7 @@ dependencies = [
 [[package]]
 name = "ruff_python_parser"
 version = "0.0.0"
-source = "git+https://github.com/astral-sh/ruff?tag=0.15.6#e4c7f357777a2fdd34dbe6a98b1b7d3e7488f675"
+source = "git+https://github.com/astral-sh/ruff?tag=0.15.12#66f93cf7ed4d36325f35a452e4afa28268fbcd28"
 dependencies = [
  "bitflags 2.11.0",
  "bstr",
@@ -1626,7 +1632,7 @@ dependencies = [
 [[package]]
 name = "ruff_python_trivia"
 version = "0.0.0"
-source = "git+https://github.com/astral-sh/ruff?tag=0.15.6#e4c7f357777a2fdd34dbe6a98b1b7d3e7488f675"
+source = "git+https://github.com/astral-sh/ruff?tag=0.15.12#66f93cf7ed4d36325f35a452e4afa28268fbcd28"
 dependencies = [
  "itertools",
  "ruff_source_file",
@@ -1637,7 +1643,7 @@ dependencies = [
 [[package]]
 name = "ruff_source_file"
 version = "0.0.0"
-source = "git+https://github.com/astral-sh/ruff?tag=0.15.6#e4c7f357777a2fdd34dbe6a98b1b7d3e7488f675"
+source = "git+https://github.com/astral-sh/ruff?tag=0.15.12#66f93cf7ed4d36325f35a452e4afa28268fbcd28"
 dependencies = [
  "memchr",
  "ruff_text_size",
@@ -1646,7 +1652,7 @@ dependencies = [
 [[package]]
 name = "ruff_text_size"
 version = "0.0.0"
-source = "git+https://github.com/astral-sh/ruff?tag=0.15.6#e4c7f357777a2fdd34dbe6a98b1b7d3e7488f675"
+source = "git+https://github.com/astral-sh/ruff?tag=0.15.12#66f93cf7ed4d36325f35a452e4afa28268fbcd28"
 dependencies = [
  "get-size2",
 ]
@@ -2152,7 +2158,7 @@ dependencies = [
  "clap",
  "clap-verbosity-flag",
  "clearscreen",
- "console",
+ "console 0.15.11",
  "env_logger",
  "insta",
  "log",
@@ -2208,7 +2214,7 @@ dependencies = [
 name = "tryke_reporter"
 version = "0.0.25"
 dependencies = [
- "console",
+ "console 0.15.11",
  "ctrlc",
  "indicatif",
  "miette",
@@ -2325,6 +2331,12 @@ dependencies = [
  "phf_codegen",
  "rand",
 ]
+
+[[package]]
+name = "unit-prefix"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81e544489bf3d8ef66c953931f56617f423cd4b5494be343d9b9d3dda037b9a3"
 
 [[package]]
 name = "utf8parse"

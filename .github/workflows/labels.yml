@@ -20,7 +20,7 @@ jobs:
       # Dry-run on pull_request so label changes can be reviewed in CI output
       # without mutating the repo. Real sync only happens on push to main or
       # manual workflow_dispatch.
-      - uses: crazy-max/ghaction-github-labeler@v5.3.0
+      - uses: crazy-max/ghaction-github-labeler@v6.0.0
         with:
           yaml-file: .github/labels.yml
           skip-delete: true

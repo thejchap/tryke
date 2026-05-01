@@ -19,10 +19,10 @@ license = "MIT"
 async-channel = "2"
 salsa = "0.26"
 ignore = "0.4"
-ruff_python_ast = { git = "https://github.com/astral-sh/ruff", tag = "0.15.6" }
-ruff_python_parser = { git = "https://github.com/astral-sh/ruff", tag = "0.15.6" }
-ruff_source_file = { git = "https://github.com/astral-sh/ruff", tag = "0.15.6" }
-ruff_text_size = { git = "https://github.com/astral-sh/ruff", tag = "0.15.6" }
+ruff_python_ast = { git = "https://github.com/astral-sh/ruff", tag = "0.15.12" }
+ruff_python_parser = { git = "https://github.com/astral-sh/ruff", tag = "0.15.12" }
+ruff_source_file = { git = "https://github.com/astral-sh/ruff", tag = "0.15.12" }
+ruff_text_size = { git = "https://github.com/astral-sh/ruff", tag = "0.15.12" }
 rayon = "1"
 miette = { version = "7", features = ["fancy", "syntect-highlighter"] }
 owo-colors = { version = "4", features = ["supports-color"] }
@@ -44,7 +44,7 @@ notify-debouncer-mini = "0.4"
 toml = "1.0"
 ctrlc = "3"
 console = "0.15"
-indicatif = "0.17"
+indicatif = "0.18"
 tryke = { path = "crates/tryke" }
 tryke_config = { path = "crates/tryke_config" }
 tryke_discovery = { path = "crates/tryke_discovery" }

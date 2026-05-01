@@ -69,25 +69,29 @@ for just what your working tree touched, or plain:
 uvx tryke test
 ```
 
-```ansi
-[1mtryke test[0m [2mv0.0.25[0m
+<!-- REPORTER:text:plain:START -->
 
-example.py:
+```text
+tryke test v0.0.25
+
+sample.py:
   users
     get
-      [32m✓[39m returns a stored user [2m[0.00ms][0m
-        [32m✓[39m [2mreturns stored email[0m
+      ✓ returns a stored user [0.00ms]
+        ✓ returns stored email
     set
-      [32m✓[39m stores a new user [2m[0.00ms][0m
-        [32m✓[39m [2mstores email under user key[0m
+      ✓ stores a new user [0.00ms]
+        ✓ stores email under user key
 
- [2mTest Files[0m  [1m[32m1 passed[39m[0m [2m(1)[0m
-      [2mTests[0m  [1m[32m2 passed[39m[0m [2m(2)[0m
-   [2mStart at[0m  08:58:39
-   [2mDuration[0m  46.01ms [2m(discover 6.08ms, tests 39.93ms)[0m
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+   Start at  10:02:24
+   Duration  36.36ms (discover 0.76ms, tests 35.60ms)
 
- [1m[30;42m PASS [0m[0m
+  PASS
 ```
+
+<!-- REPORTER:text:plain:END -->
 
 ## Coming from pytest?
 

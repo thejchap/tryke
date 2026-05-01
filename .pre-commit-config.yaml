@@ -35,7 +35,7 @@ repos:
       - id: generate-reporter-examples
         name: generate reporter examples
         entry: uv run python scripts/generate_reporter_examples.py
-        files: ^(crates/tryke_reporter/.*|demo/sample\.py|scripts/generate_reporter_examples\.py|docs/(guides/reporters|index)\.md)$
+        files: ^(crates/tryke_reporter/.*|demo/sample\.py|scripts/generate_reporter_examples\.py|docs/(guides/reporters|index)\.md|README\.md)$
         pass_filenames: false
         language: system
       - id: markdownlint-cli2

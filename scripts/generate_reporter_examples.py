@@ -28,6 +28,12 @@ DEMO_DIR = ROOT / "demo"
 SAMPLE = "sample.py"
 DOCS_PATH = ROOT / "docs" / "guides" / "reporters.md"
 INDEX_PATH = ROOT / "docs" / "index.md"
+README_PATH = ROOT / "README.md"
+
+# Strip ANSI escape sequences. GitHub's markdown renderer does not
+# interpret them, so the README ships a plain-text variant while the
+# docs site keeps the colored version.
+_ANSI_ESCAPE = re.compile(r"\x1b\[[\d;]*[a-zA-Z]")
 
 # (cli reporter name, code-fence language, extra cli flags)
 REPORTERS: tuple[tuple[str, str, list[str]], ...] = (
@@ -63,9 +69,12 @@ _NON_DIGIT = rf"(?:{_ANSI}|[^\d\n])"
 
 def _normalize(text: str) -> str:
     # Per-test bracket timings: tests round to 0 for our tiny sample, so
-    # leaving them at 0.00ms / 0.000s is realistic.
+    # leaving them at 0.00ms / 0.000s is realistic. The seconds variant
+    # has no bracket guard because the `next` reporter wraps the value
+    # in ANSI escapes (`[\x1b[2m  0.001s\x1b[0m]`), and there are no
+    # other decimal-second patterns in tryke's output.
     text = re.sub(r"(\[)\s*\d+(?:\.\d+)?ms(?!\w)(\s*\])", r"\g<1>0.00ms\g<2>", text)
-    text = re.sub(r"(\[\s*)\d+\.\d+s(?!\w)(\s*\])", r"\g<1>0.000s\g<2>", text)
+    text = re.sub(r"\d+\.\d+s(?!\w)", "0.000s", text)
 
     # `Duration  X.XXms (discover X.XXms, tests X.XXms)` summary line.
     text = re.sub(
@@ -165,14 +174,14 @@ def _run(reporter: str, extra: list[str]) -> str:
     return _normalize(captured)
 
 
-def _splice(content: str, name: str, lang: str, body: str) -> str:
-    start = f"<!-- REPORTER:{name}:START -->"
-    end = f"<!-- REPORTER:{name}:END -->"
+def _splice(content: str, marker: str, lang: str, body: str) -> str:
+    start = f"<!-- REPORTER:{marker}:START -->"
+    end = f"<!-- REPORTER:{marker}:END -->"
     pattern = rf"{re.escape(start)}.*?{re.escape(end)}"
     block = f"```{lang}\n{body.rstrip()}\n```"
     replacement = f"{start}\n\n{block}\n\n{end}"
     if not re.search(pattern, content, flags=re.DOTALL):
-        sys.stderr.write(f"missing markers for reporter {name!r} in {DOCS_PATH}\n")
+        sys.stderr.write(f"missing markers for {marker!r}\n")
         sys.exit(1)
     return re.sub(pattern, replacement, content, count=1, flags=re.DOTALL)
 
@@ -182,16 +191,24 @@ def main() -> int:
     for name, lang, extra in REPORTERS:
         bodies[name] = (lang, _run(name, extra))
 
-    for path, names in (
-        (DOCS_PATH, [name for name, *_ in REPORTERS]),
+    text_lang, text_body = bodies["text"]
+    text_plain = _ANSI_ESCAPE.sub("", text_body)
+
+    # Each target is (path, ((marker, fence-lang, body), ...)).
+    targets: tuple[tuple[Path, tuple[tuple[str, str, str], ...]], ...] = (
+        (DOCS_PATH, tuple((name, lang, body) for name, (lang, body) in bodies.items())),
         # The landing page only embeds the headline `text` reporter sample.
-        (INDEX_PATH, ["text"]),
-    ):
+        (INDEX_PATH, (("text", text_lang, text_body),)),
+        # GitHub's renderer ignores `ansi`, so ship a stripped plain-text
+        # variant in the README under a distinct marker.
+        (README_PATH, (("text:plain", "text", text_plain),)),
+    )
+
+    for path, blocks in targets:
         original = path.read_text(encoding="utf-8")
         updated = original
-        for name in names:
-            lang, body = bodies[name]
-            updated = _splice(updated, name, lang, body)
+        for marker, lang, body in blocks:
+            updated = _splice(updated, marker, lang, body)
         if updated != original:
             path.write_text(updated, encoding="utf-8")
             sys.stdout.write(f"wrote {path}\n")

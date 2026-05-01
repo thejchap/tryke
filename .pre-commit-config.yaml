@@ -32,6 +32,12 @@ repos:
         files: ^(benchmarks/(summarize\.py|results/.*\.json)|docs/benchmarks\.md)$
         pass_filenames: false
         language: system
+      - id: generate-reporter-examples
+        name: generate reporter examples
+        entry: uv run python scripts/generate_reporter_examples.py
+        files: ^(crates/tryke_reporter/.*|demo/sample\.py|scripts/generate_reporter_examples\.py|docs/(guides/reporters|index)\.md)$
+        pass_filenames: false
+        language: system
       - id: markdownlint-cli2
         name: markdownlint-cli2
         entry: markdownlint-cli2

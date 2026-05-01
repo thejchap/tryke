@@ -1,0 +1,87 @@
+/* Styles for `ansi` code blocks rendered by pygments-ansi-color.
+   The lexer emits chained tokens like `Color.Bold.Black.BGGreen`, which
+   Pygments turns into one space-separated CSS class per ancestor:
+   ` -Color -Color-Bold -Color-Bold-Black -Color-Bold-Black-BGGreen`.
+   We match the bold/faint modifiers via the parent class, and fg/bg via
+   the terminal class suffix (`[class$="-X"]` for fg-only/last position,
+   `[class*="-X-BG"]` for fg followed by a bg). */
+
+.language-ansi .\-Color-Bold {
+  font-weight: bold;
+}
+
+.language-ansi .\-Color-Faint {
+  opacity: 0.65;
+}
+
+.language-ansi [class$="-Black"],
+.language-ansi [class*="-Black-BG"] {
+  color: var(--md-default-fg-color);
+}
+
+.language-ansi [class$="-Red"],
+.language-ansi [class*="-Red-BG"] {
+  color: #c62828;
+}
+
+.language-ansi [class$="-Green"],
+.language-ansi [class*="-Green-BG"] {
+  color: #2e7d32;
+}
+
+.language-ansi [class$="-Yellow"],
+.language-ansi [class*="-Yellow-BG"] {
+  color: #f9a825;
+}
+
+.language-ansi [class$="-Blue"],
+.language-ansi [class*="-Blue-BG"] {
+  color: #1565c0;
+}
+
+.language-ansi [class$="-Magenta"],
+.language-ansi [class*="-Magenta-BG"] {
+  color: #ad1457;
+}
+
+.language-ansi [class$="-Cyan"],
+.language-ansi [class*="-Cyan-BG"] {
+  color: #00838f;
+}
+
+.language-ansi [class$="-White"],
+.language-ansi [class*="-White-BG"] {
+  color: var(--md-default-bg-color);
+}
+
+.language-ansi [class$="-BGBlack"] {
+  background-color: var(--md-default-fg-color);
+}
+
+.language-ansi [class$="-BGRed"] {
+  background-color: #c62828;
+}
+
+.language-ansi [class$="-BGGreen"] {
+  background-color: #2e7d32;
+}
+
+.language-ansi [class$="-BGYellow"] {
+  background-color: #f9a825;
+}
+
+.language-ansi [class$="-BGBlue"] {
+  background-color: #1565c0;
+}
+
+.language-ansi [class$="-BGMagenta"] {
+  background-color: #ad1457;
+}
+
+.language-ansi [class$="-BGCyan"] {
+  background-color: #00838f;
+}
+
+.language-ansi [class$="-BGWhite"] {
+  background-color: var(--md-default-bg-color);
+}

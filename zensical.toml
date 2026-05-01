@@ -6,7 +6,7 @@ site_author = "Justin Chapman"
 copyright = "Copyright &copy; 2025 Justin Chapman"
 repo_url = "https://github.com/thejchap/tryke"
 repo_name = "tryke"
-extra_css = ["stylesheets/extra.css"]
+extra_css = ["stylesheets/extra.css", "stylesheets/ansi.css"]
 nav = [
   { "Introduction" = "index.md" },
   { "Guides" = [
@@ -116,6 +116,13 @@ separate_signature = true
 # merge. Enable `admonition` explicitly so `!!! tip` / `!!! note` blocks
 # render as callouts instead of literal text.
 [project.markdown_extensions.admonition]
+
+# Headerlink anchors on hover. `toc.permalink = true` injects an `¶`
+# (or, with the Material CSS, a copy-link icon) into each heading,
+# linking to that heading's anchor. Re-declared because the default
+# was dropped along with the rest of `markdown_extensions` above.
+[project.markdown_extensions.toc]
+permalink = true
 
 [project.markdown_extensions.pymdownx.highlight]
 anchor_linenums = true

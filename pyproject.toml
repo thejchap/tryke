@@ -52,6 +52,11 @@ ignore = ["D", "COM812"]
 # testing flag does NOT leak into child processes. The subprocess args are
 # fully controlled (sys.executable, fixed -c script), so S603 is spurious.
 "tests/test_in_source_guard.py" = ["S603"]
+# This sample mirrors the code block on the docs landing page and is the
+# source for `scripts/generate_reporter_examples.py`. It deliberately omits
+# return-type annotations and an `__init__.py` to keep the example
+# minimal and focused on the user-facing API.
+"demo/sample.py" = ["INP001", "ANN201"]
 
 [tool.tryke]
 exclude = ["benchmarks/suites", "demo"]
@@ -80,5 +85,6 @@ dev = [
   "ty~=0.0.29",
   "zensical>=0.0.26",
   "mkdocstrings-python>=1.16.12",
+  "pygments-ansi-color>=0.3.0",
   "tryke",
 ]

@@ -29,7 +29,7 @@ jobs:
       # aborts page rendering, leaving `site/` without an index. Guard
       # against shipping an empty artifact.
       - run: test -f site/index.html
-      - uses: actions/upload-pages-artifact@v4
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: site
       - uses: actions/deploy-pages@v4

@@ -7,6 +7,8 @@
 
 use std::path::PathBuf;
 
+use tryke_config::{TrykeConfig, resolve_python};
+
 /// Path to the workspace root, derived from this crate's manifest dir.
 ///
 /// Anchoring on this crate's `CARGO_MANIFEST_DIR` (rather than the
@@ -21,19 +23,19 @@ pub fn workspace_root() -> PathBuf {
 ///
 /// Prefers the workspace's uv-managed `.venv` if it exists (so tests pick
 /// up the project's `requires-python` interpreter even when no venv is
-/// active in the shell), otherwise falls back to the OS default — `python`
-/// on Windows, `python3` elsewhere — matching `tryke_config::default_python`.
+/// active in the shell), otherwise delegates to `tryke_config::resolve_python`
+/// so the bare-name fallback always matches whatever production picks.
 #[must_use]
 pub fn python_bin() -> String {
     let workspace = workspace_root();
-    let (venv, fallback) = if cfg!(windows) {
-        (workspace.join(".venv/Scripts/python.exe"), "python")
+    let venv = if cfg!(windows) {
+        workspace.join(".venv/Scripts/python.exe")
     } else {
-        (workspace.join(".venv/bin/python3"), "python3")
+        workspace.join(".venv/bin/python3")
     };
     if venv.exists() {
         venv.to_string_lossy().into_owned()
     } else {
-        fallback.to_owned()
+        resolve_python(None, &TrykeConfig::default())
     }
 }

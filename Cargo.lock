@@ -2268,6 +2268,9 @@ dependencies = [
 [[package]]
 name = "tryke_test_support"
 version = "0.0.26"
+dependencies = [
+ "tryke_config",
+]
 
 [[package]]
 name = "tryke_types"

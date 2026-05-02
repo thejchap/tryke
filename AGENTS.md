@@ -9,9 +9,11 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 ## running python tests
 
-Workers are spawned with whatever `python` (Windows) or `python3`
-(Unix) is on `PATH`, so activate the project venv (or use `uv run`)
-before invoking the runner:
+Worker interpreter resolution is `--python` > `[tool.tryke] python` in
+`pyproject.toml` > `python` (Windows) / `python3` (Unix) on `PATH`.
+With nothing configured, activate the project venv (or use `uv run`)
+before invoking the runner so the default picks up the right
+interpreter:
 
 ```bash
 uv run cargo run -- test --reporter llm

@@ -5,5 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[dependencies]
+tryke_config = { workspace = true }
+
 [lints]
 workspace = true

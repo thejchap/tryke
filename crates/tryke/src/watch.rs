@@ -227,23 +227,10 @@ mod tests {
     use std::path::PathBuf;
 
     use tryke_reporter::TextReporter;
+    use tryke_testing::python_bin as test_python_bin;
 
     use super::*;
     use crate::discovery::discover_tests;
-
-    fn test_python_bin() -> String {
-        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let (venv, fallback) = if cfg!(windows) {
-            (workspace.join(".venv/Scripts/python.exe"), "python")
-        } else {
-            (workspace.join(".venv/bin/python3"), "python3")
-        };
-        if venv.exists() {
-            venv.to_string_lossy().into_owned()
-        } else {
-            fallback.to_owned()
-        }
-    }
 
     #[tokio::test]
     async fn run_watch_cycle_absorbs_test_failures() {

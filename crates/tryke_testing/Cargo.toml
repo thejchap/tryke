@@ -1,0 +1,12 @@
+[package]
+name = "tryke_testing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+tryke_config = { workspace = true }
+
+[lints]
+workspace = true

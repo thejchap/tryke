@@ -72,25 +72,21 @@ pub fn load_effective_config(start: &Path) -> TrykeConfig {
         return TrykeConfig::default();
     };
     let mut config = TrykeConfig::from_toml_str(&contents).unwrap_or_default();
-    // A `python` value like `.venv/bin/python3` is meaningful relative to
-    // the directory containing `pyproject.toml`, not the cwd of whoever
-    // invoked tryke (e.g. a script running from a sibling directory).
-    // But bare executable names (`python`, `python3`, `pypy`) should
-    // resolve via `PATH` — only rewrite values that actually look like
-    // paths.
-    if let Some(py) = config.python.as_deref()
-        && looks_like_path(py)
-    {
+    // Mirror `execvp` / `CreateProcess` semantics: a value containing a
+    // path separator is treated as a filesystem path; anything else is a
+    // bare command name to look up via `PATH`. For paths that are
+    // genuinely relative (no root, no drive prefix), anchor them to the
+    // directory containing `pyproject.toml` so configs like
+    // `python = ".venv/bin/python3"` work regardless of the cwd from
+    // which tryke is invoked.
+    if let Some(py) = config.python.as_deref() {
+        let has_separator = py.contains('/') || py.contains('\\');
         let path = Path::new(py);
-        if path.is_relative() {
+        if has_separator && !path.is_absolute() && !path.has_root() {
             config.python = Some(root.join(path).to_string_lossy().into_owned());
         }
     }
     config
-}
-
-fn looks_like_path(value: &str) -> bool {
-    value.contains('/') || value.contains('\\') || value.starts_with('.')
 }
 
 /// Default Python binary name when neither a CLI flag nor a config value
@@ -332,20 +328,5 @@ mod tests {
         .expect("write pyproject");
         let config = load_effective_config(dir.path());
         assert_eq!(config.python.as_deref(), Some("python3"));
-    }
-
-    #[test]
-    fn looks_like_path_classifies_correctly() {
-        assert!(!looks_like_path("python"));
-        assert!(!looks_like_path("python3"));
-        assert!(!looks_like_path("python3.13"));
-        assert!(!looks_like_path("pypy"));
-        assert!(looks_like_path(".venv/bin/python3"));
-        assert!(looks_like_path("./python"));
-        assert!(looks_like_path("../python"));
-        assert!(looks_like_path("/usr/bin/python3"));
-        assert!(looks_like_path("bin/python"));
-        assert!(looks_like_path(r"C:\Python\python.exe"));
-        assert!(looks_like_path(r".venv\Scripts\python.exe"));
     }
 }

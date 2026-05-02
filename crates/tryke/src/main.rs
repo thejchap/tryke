@@ -7,7 +7,7 @@ use tryke::cli::{Cli, Commands, ReporterFormat};
 use tryke::discovery::{
     discover_tests, discover_tests_changed_first, discover_tests_for_paths, resolved_excludes,
 };
-use tryke::execution::run_tests;
+use tryke::execution::{exit_code_for, run_tests};
 use tryke::graph::{run_fixture_graph, run_graph};
 use tryke::watch::run_watch;
 use tryke_reporter::{
@@ -171,7 +171,7 @@ fn main() -> Result<()> {
             } else {
                 let config = tryke_config::load_effective_config(root_path);
                 let resolved_python = tryke_config::resolve_python(python.as_deref(), &config);
-                rt.block_on(run_tests(
+                let summary = rt.block_on(run_tests(
                     &mut *rep,
                     root_path,
                     &resolved_python,
@@ -182,7 +182,12 @@ fn main() -> Result<()> {
                     (*dist).into(),
                     Some(discovery_duration),
                     changed_selection,
-                ))
+                ))?;
+                let code = exit_code_for(&summary);
+                if code != 0 {
+                    std::process::exit(code);
+                }
+                Ok(())
             }
         }
         Commands::Server {

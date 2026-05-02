@@ -74,8 +74,12 @@ pub fn load_effective_config(start: &Path) -> TrykeConfig {
     // A `python` value like `.venv/bin/python3` is meaningful relative to
     // the directory containing `pyproject.toml`, not the cwd of whoever
     // invoked tryke (e.g. a script running from a sibling directory).
-    // Resolve here so downstream code can treat it as a literal path.
-    if let Some(py) = config.python.as_deref() {
+    // But bare executable names (`python`, `python3`, `pypy`) should
+    // resolve via `PATH` — only rewrite values that actually look like
+    // paths.
+    if let Some(py) = config.python.as_deref()
+        && looks_like_path(py)
+    {
         let path = Path::new(py);
         if path.is_relative() {
             config.python = Some(root.join(path).to_string_lossy().into_owned());
@@ -84,18 +88,30 @@ pub fn load_effective_config(start: &Path) -> TrykeConfig {
     config
 }
 
+fn looks_like_path(value: &str) -> bool {
+    value.contains('/') || value.contains('\\') || value.starts_with('.')
+}
+
+/// Default Python binary name when neither a CLI flag nor a config value
+/// is provided. Windows venvs ship `python.exe` (no `python3.exe` shim),
+/// while Linux and macOS conventionally expose `python3`.
+fn default_python() -> &'static str {
+    if cfg!(windows) { "python" } else { "python3" }
+}
+
 /// Resolve the Python interpreter for spawning worker processes.
 ///
 /// Precedence: CLI override > `[tool.tryke] python` in `pyproject.toml` >
-/// `python3` on `PATH`. Environment management (venv activation, `uv run`,
-/// etc.) is the user's responsibility — tryke does not introspect or
-/// validate the chosen interpreter.
+/// `python` (Windows) / `python3` (elsewhere) on `PATH`. Environment
+/// management (venv activation, `uv run`, etc.) is the user's
+/// responsibility — tryke does not introspect or validate the chosen
+/// interpreter.
 #[must_use]
 pub fn resolve_python(cli_override: Option<&str>, config: &TrykeConfig) -> String {
     cli_override
         .map(str::to_owned)
         .or_else(|| config.python.clone())
-        .unwrap_or_else(|| "python3".to_owned())
+        .unwrap_or_else(|| default_python().to_owned())
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -297,8 +313,38 @@ mod tests {
     }
 
     #[test]
-    fn resolve_python_defaults_to_python3() {
+    fn resolve_python_defaults_to_platform_default() {
         let config = TrykeConfig::default();
-        assert_eq!(resolve_python(None, &config), "python3");
+        let expected = if cfg!(windows) { "python" } else { "python3" };
+        assert_eq!(resolve_python(None, &config), expected);
+    }
+
+    #[test]
+    fn load_effective_config_leaves_bare_executable_name_unchanged() {
+        // `python = "python3"` should resolve via PATH, not be rewritten
+        // to `<config-root>/python3`.
+        let dir = tempdir();
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.tryke]\npython = \"python3\"\n",
+        )
+        .expect("write pyproject");
+        let config = load_effective_config(dir.path());
+        assert_eq!(config.python.as_deref(), Some("python3"));
+    }
+
+    #[test]
+    fn looks_like_path_classifies_correctly() {
+        assert!(!looks_like_path("python"));
+        assert!(!looks_like_path("python3"));
+        assert!(!looks_like_path("python3.13"));
+        assert!(!looks_like_path("pypy"));
+        assert!(looks_like_path(".venv/bin/python3"));
+        assert!(looks_like_path("./python"));
+        assert!(looks_like_path("../python"));
+        assert!(looks_like_path("/usr/bin/python3"));
+        assert!(looks_like_path("bin/python"));
+        assert!(looks_like_path(r"C:\Python\python.exe"));
+        assert!(looks_like_path(r".venv\Scripts\python.exe"));
     }
 }

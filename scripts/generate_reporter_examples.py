@@ -143,6 +143,10 @@ def _normalize(text: str) -> str:
     return re.sub(r'time="\d+(?:\.\d+)?"', _junit_time, text)
 
 
+# `tryke test` exit codes — see `exit_code_for` in `crates/tryke/src/execution.rs`.
+TRYKE_EXIT_INFRA_ERROR = 2
+
+
 def _run(reporter: str, extra: list[str]) -> str:
     env = os.environ.copy()
     env["FORCE_COLOR"] = "1"
@@ -162,6 +166,7 @@ def _run(reporter: str, extra: list[str]) -> str:
     ]
     captured = ""
     captured_err = ""
+    last_returncode = 0
     for _ in range(2):
         result = subprocess.run(  # noqa: S603
             cmd,
@@ -173,16 +178,16 @@ def _run(reporter: str, extra: list[str]) -> str:
         )
         captured = result.stdout
         captured_err = result.stderr
-    # `tryke test` exits non-zero when the demo has actual test failures, which
-    # is expected — the sample.py contains intentional failing tests so the
-    # rendered docs cover failure output. But infrastructure errors (worker
-    # spawn failed, hook replay crashed, etc.) produce useless docs that
-    # hide regressions in the runner; surface those as a script failure.
-    fatal_markers = ("worker unavailable", "spawn or hook replay failed")
-    if any(marker in captured for marker in fatal_markers):
+        last_returncode = result.returncode
+    # tryke distinguishes test failures (exit 1) from infrastructure
+    # errors like worker spawn / hook replay failures (exit 2). The
+    # demo's `sample.py` has intentional failing tests, so exit 1 is
+    # expected and the rendered docs are meant to cover failure output.
+    # Exit 2 means we'd be committing broken sample output — refuse.
+    if last_returncode == TRYKE_EXIT_INFRA_ERROR:
         sys.stderr.write(
-            f"reporter {reporter!r} produced infrastructure errors "
-            f"(not test failures); refusing to commit broken sample output.\n"
+            f"reporter {reporter!r} exited with code {TRYKE_EXIT_INFRA_ERROR} "
+            f"(infrastructure error); refusing to commit broken sample output.\n"
             f"--- stdout ---\n{captured}\n--- stderr ---\n{captured_err}\n"
         )
         sys.exit(1)

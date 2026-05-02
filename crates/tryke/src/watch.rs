@@ -79,10 +79,9 @@ fn emit_discovery_warnings(reporter: &mut dyn Reporter, discoverer: &Discoverer)
     }
 }
 
-/// Run a single watch cycle. Test failures are non-fatal here: `report_cycle`
-/// returns `Err` purely to signal pass/fail state to `tryke test`, but in watch
-/// mode the whole point is to iterate on failing tests — so we absorb it and
-/// let the watcher keep running.
+/// Run a single watch cycle. Test failures are non-fatal here: in watch
+/// mode the whole point is to iterate on failing tests, so we discard
+/// the run summary and any setup error and let the watcher keep running.
 async fn run_watch_cycle(
     reporter: &mut dyn Reporter,
     tests: Vec<tryke_types::TestItem>,
@@ -104,7 +103,7 @@ async fn run_watch_cycle(
     )
     .await
     {
-        debug!("watch: test cycle reported failures: {e}");
+        debug!("watch: report_cycle errored: {e}");
     }
 }
 

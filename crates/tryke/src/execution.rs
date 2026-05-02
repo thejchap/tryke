@@ -22,11 +22,11 @@ pub async fn run_tests(
     dist: DistMode,
     discovery_duration: Option<Duration>,
     changed_selection: Option<ChangedSelectionSummary>,
-) -> Result<()> {
+) -> Result<RunSummary> {
     let pool_size = workers.unwrap_or_else(|| tests.len().min(worker_pool_size()));
     let pool = WorkerPool::new(pool_size, python, root);
     pool.warm().await;
-    report_cycle(
+    let summary = report_cycle(
         reporter,
         tests,
         hooks,
@@ -38,7 +38,7 @@ pub async fn run_tests(
     )
     .await?;
     pool.shutdown();
-    Ok(())
+    Ok(summary)
 }
 
 fn flush_buffer(
@@ -67,7 +67,7 @@ pub async fn report_cycle(
     dist: DistMode,
     discovery_duration: Option<Duration>,
     changed_selection: Option<ChangedSelectionSummary>,
-) -> Result<()> {
+) -> Result<RunSummary> {
     use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
 
@@ -187,7 +187,7 @@ pub async fn report_cycle(
         }
     }
 
-    reporter.on_run_complete(&RunSummary {
+    let summary = RunSummary {
         passed,
         failed,
         skipped,
@@ -200,12 +200,30 @@ pub async fn report_cycle(
         file_count,
         start_time: Some(start_time),
         changed_selection,
-    });
+    };
+    reporter.on_run_complete(&summary);
+    Ok(summary)
+}
 
-    if failed > 0 || errors > 0 {
-        Err(anyhow::anyhow!("{failed} failed, {errors} error(s)"))
+/// Map a `RunSummary` to a process exit code. The `cargo run -- test`
+/// step in CI (and tooling like `scripts/generate_reporter_examples.py`)
+/// rely on this to distinguish "tests had real failures" from "the
+/// runner couldn't spawn or talk to its workers" without scraping
+/// reporter output.
+///
+/// - `0` — every test passed (or was skipped/xfailed/todo).
+/// - `1` — at least one test reported a failure.
+/// - `2` — at least one test surfaced an `Error` outcome (worker spawn
+///   failed, RPC died, hook replay crashed, …). Takes precedence over
+///   `1` because infrastructure issues hide test results.
+#[must_use]
+pub fn exit_code_for(summary: &RunSummary) -> i32 {
+    if summary.errors > 0 {
+        2
+    } else if summary.failed > 0 {
+        1
     } else {
-        Ok(())
+        0
     }
 }
 
@@ -247,7 +265,7 @@ mod tests {
         reporter: &mut dyn Reporter,
         discoverer: &mut Discoverer,
         pool: &WorkerPool,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<RunSummary> {
         report_cycle(
             reporter,
             discoverer.rediscover(),
@@ -509,7 +527,7 @@ def test_failing():
             dir.path(),
             &[dir.path().to_path_buf(), python_dir],
         );
-        let result = report_cycle(
+        let summary = report_cycle(
             &mut reporter,
             tests,
             &[],
@@ -519,10 +537,51 @@ def test_failing():
             None,
             None,
         )
-        .await;
-        assert!(
-            result.is_err(),
-            "expected Err when tests fail, got {result:?}"
-        );
+        .await
+        .expect("report_cycle should not error on test failures");
+        assert_eq!(summary.failed, 1, "expected one failed test");
+        assert_eq!(exit_code_for(&summary), 1, "expected exit code 1");
+    }
+
+    fn empty_summary() -> RunSummary {
+        RunSummary {
+            passed: 0,
+            failed: 0,
+            skipped: 0,
+            errors: 0,
+            xfailed: 0,
+            todo: 0,
+            duration: std::time::Duration::ZERO,
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
+            changed_selection: None,
+        }
+    }
+
+    #[test]
+    fn exit_code_for_handles_pass_fail_error() {
+        let pass = RunSummary {
+            passed: 1,
+            ..empty_summary()
+        };
+        let fail = RunSummary {
+            failed: 1,
+            ..empty_summary()
+        };
+        let err = RunSummary {
+            errors: 1,
+            ..empty_summary()
+        };
+        let both = RunSummary {
+            failed: 1,
+            errors: 1,
+            ..empty_summary()
+        };
+        assert_eq!(exit_code_for(&pass), 0);
+        assert_eq!(exit_code_for(&fail), 1);
+        assert_eq!(exit_code_for(&err), 2);
+        assert_eq!(exit_code_for(&both), 2, "errors take precedence");
     }
 }

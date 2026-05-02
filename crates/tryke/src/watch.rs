@@ -227,7 +227,7 @@ mod tests {
     use std::path::PathBuf;
 
     use tryke_reporter::TextReporter;
-    use tryke_test_support::python_bin as test_python_bin;
+    use tryke_testing::python_bin as test_python_bin;
 
     use super::*;
     use crate::discovery::discover_tests;

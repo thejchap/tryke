@@ -1,5 +1,5 @@
 [package]
-name = "tryke_test_support"
+name = "tryke_testing"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

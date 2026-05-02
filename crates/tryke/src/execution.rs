@@ -213,7 +213,7 @@ mod tests {
     use tryke_reporter::{
         DotReporter, JSONReporter, JUnitReporter, NextReporter, SugarReporter, TextReporter,
     };
-    use tryke_test_support::python_bin as test_python_bin;
+    use tryke_testing::python_bin as test_python_bin;
     use tryke_types::TestOutcome;
 
     use super::*;

@@ -34,4 +34,4 @@ tryke_types = { workspace = true }
 insta = { version = "1", features = ["filters"] }
 serde_json = "1"
 tempfile = "3"
-tryke_test_support = { workspace = true }
+tryke_testing = { workspace = true }

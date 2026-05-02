@@ -404,7 +404,7 @@ mod tests {
     use std::path::PathBuf;
 
     use tokio_stream::StreamExt;
-    use tryke_test_support::python_bin as test_python_bin;
+    use tryke_testing::python_bin as test_python_bin;
     use tryke_types::{FixturePer, HookItem, TestItem};
 
     use super::*;

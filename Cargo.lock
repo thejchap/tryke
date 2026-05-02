@@ -2172,7 +2172,7 @@ dependencies = [
  "tryke_reporter",
  "tryke_runner",
  "tryke_server",
- "tryke_test_support",
+ "tryke_testing",
  "tryke_types",
 ]
 
@@ -2238,7 +2238,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-stream",
- "tryke_test_support",
+ "tryke_testing",
  "tryke_types",
 ]
 
@@ -2261,12 +2261,12 @@ dependencies = [
  "tryke_discovery",
  "tryke_reporter",
  "tryke_runner",
- "tryke_test_support",
+ "tryke_testing",
  "tryke_types",
 ]
 
 [[package]]
-name = "tryke_test_support"
+name = "tryke_testing"
 version = "0.0.26"
 dependencies = [
  "tryke_config",

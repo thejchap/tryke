@@ -307,7 +307,7 @@ mod tests {
     };
     use tryke_discovery::Discoverer;
     use tryke_runner::WorkerPool;
-    use tryke_test_support::python_bin as test_python_bin;
+    use tryke_testing::python_bin as test_python_bin;
 
     use super::*;
 

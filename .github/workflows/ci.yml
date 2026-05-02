@@ -62,12 +62,10 @@ jobs:
         python-version: ["3.12", "3.13", "3.14", "3.15"]
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python-version }}
-          # 3.15 is in alpha through mid-2026; setup-python needs an
-          # explicit opt-in before it'll hand us pre-release builds.
-          allow-prereleases: true
+      - run: uv sync
       - run: rustup show
       - uses: Swatinem/rust-cache@v2.8.2
       - uses: taiki-e/install-action@v2
@@ -75,7 +73,7 @@ jobs:
           tool: nextest
       - run: cargo build --verbose
       - run: cargo nextest run --workspace --all-features
-      - run: cargo run -- test
+      - run: uv run cargo run -- test
 
   ci:
     if: always()

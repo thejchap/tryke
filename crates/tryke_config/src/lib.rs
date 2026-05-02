@@ -1,6 +1,6 @@
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use serde::Deserialize;
@@ -78,11 +78,16 @@ pub fn load_effective_config(start: &Path) -> TrykeConfig {
     // genuinely relative (no root, no drive prefix), anchor them to the
     // directory containing `pyproject.toml` so configs like
     // `python = ".venv/bin/python3"` work regardless of the cwd from
-    // which tryke is invoked.
+    // which tryke is invoked. Windows drive-relative values like
+    // `C:foo\python.exe` carry a `Component::Prefix` but no root and are
+    // *not* `is_absolute()` — leaving them to the OS's per-drive cwd
+    // resolution is closer to user intent than rewriting them onto the
+    // config root.
     if let Some(py) = config.python.as_deref() {
         let has_separator = py.contains('/') || py.contains('\\');
         let path = Path::new(py);
-        if has_separator && !path.is_absolute() && !path.has_root() {
+        let has_prefix = matches!(path.components().next(), Some(Component::Prefix(_)));
+        if has_separator && !path.is_absolute() && !path.has_root() && !has_prefix {
             config.python = Some(root.join(path).to_string_lossy().into_owned());
         }
     }
@@ -328,5 +333,21 @@ mod tests {
         .expect("write pyproject");
         let config = load_effective_config(dir.path());
         assert_eq!(config.python.as_deref(), Some("python3"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn load_effective_config_leaves_drive_relative_python_unchanged() {
+        // `C:foo\python.exe` is drive-relative on Windows — it has a
+        // `Component::Prefix` but no root and is not `is_absolute()`.
+        // Rewriting it onto the config root would mangle the value.
+        let dir = tempdir();
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.tryke]\npython = 'C:foo\\\\python.exe'\n",
+        )
+        .expect("write pyproject");
+        let config = load_effective_config(dir.path());
+        assert_eq!(config.python.as_deref(), Some("C:foo\\python.exe"));
     }
 }

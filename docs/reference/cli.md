@@ -132,6 +132,12 @@ tryke server [OPTIONS]
 
   Default: `2337`
 
+- `--python` `<PYTHON>`
+
+  Path to the Python interpreter used to spawn worker processes.
+
+  Overrides `[tool.tryke] python` in `pyproject.toml`. Defaults to `python3` on `PATH`.
+
 - `-q`, `--quiet`
 
   Decrease logging verbosity
@@ -268,6 +274,12 @@ tryke test [OPTIONS] [PATHS]...
   Run against an already-running `tryke server` instead of spawning fresh workers.
 
   Pass `--port` alone to use the default `2337`, or `--port 9000` to target a specific port. The server keeps workers pre-warmed and the import graph cached, so this is significantly faster for repeated runs.
+
+- `--python` `<PYTHON>`
+
+  Path to the Python interpreter used to spawn worker processes.
+
+  Overrides `[tool.tryke] python` in `pyproject.toml`. Defaults to `python3` on `PATH`. The interpreter is the user's responsibility — tryke does not validate it. Activate the appropriate venv (or use `uv run tryke ...`) and the default will pick it up. Not compatible with `--port`; configure the interpreter on the server instead.
 
 - `-q`, `--quiet`
 

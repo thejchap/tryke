@@ -3,9 +3,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use tokio_stream::StreamExt;
 use tryke_reporter::Reporter;
-use tryke_runner::{
-    DistMode, WorkerPool, check_python_version, partition_with_hooks, resolve_python,
-};
+use tryke_runner::{DistMode, WorkerPool, partition_with_hooks};
 use tryke_types::{ChangedSelectionSummary, HookItem, RunSummary, TestOutcome};
 
 pub fn worker_pool_size() -> usize {
@@ -16,6 +14,7 @@ pub fn worker_pool_size() -> usize {
 pub async fn run_tests(
     reporter: &mut dyn Reporter,
     root: &std::path::Path,
+    python: &str,
     tests: Vec<tryke_types::TestItem>,
     hooks: &[HookItem],
     maxfail: Option<usize>,
@@ -24,10 +23,8 @@ pub async fn run_tests(
     discovery_duration: Option<Duration>,
     changed_selection: Option<ChangedSelectionSummary>,
 ) -> Result<()> {
-    let python = resolve_python(root);
-    check_python_version(&python, root)?;
     let pool_size = workers.unwrap_or_else(|| tests.len().min(worker_pool_size()));
-    let pool = WorkerPool::new(pool_size, &python, root);
+    let pool = WorkerPool::new(pool_size, python, root);
     pool.warm().await;
     report_cycle(
         reporter,
@@ -225,12 +222,17 @@ mod tests {
     use super::*;
     use crate::discovery::{discover_tests, resolved_excludes};
 
+    /// Use the workspace's `.venv/bin/python3` if present, otherwise fall
+    /// back to `python3` on PATH. Tests need a Python that satisfies the
+    /// project's `requires-python = ">=3.12"`; CI runners often have an
+    /// older system `python3`, so prefer the venv.
     fn test_python_bin() -> String {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()
-            .expect("workspace root");
-        tryke_runner::resolve_python(&root)
+        let venv = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.venv/bin/python3");
+        if venv.exists() {
+            venv.to_string_lossy().into_owned()
+        } else {
+            "python3".to_owned()
+        }
     }
 
     async fn run_cycle(
@@ -252,9 +254,9 @@ mod tests {
     }
 
     /// Smoke-test a reporter against the full `run_tests` pipeline using an
-    /// empty project. Exercises check_python_version, pool init/teardown, and
-    /// the reporter's run_start/run_summary callbacks without doing real work.
-    /// Snapshot tests in `tests/snapshots.rs` cover per-test rendering.
+    /// empty project. Exercises pool init/teardown and the reporter's
+    /// run_start/run_summary callbacks without doing real work. Snapshot
+    /// tests in `tests/snapshots.rs` cover per-test rendering.
     async fn smoke_run_tests(reporter: &mut dyn Reporter) {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
@@ -263,6 +265,7 @@ mod tests {
         let _ = run_tests(
             reporter,
             dir.path(),
+            &test_python_bin(),
             tests,
             &[],
             None,
@@ -363,6 +366,7 @@ mod tests {
             run_tests(
                 &mut reporter,
                 dir.path(),
+                &test_python_bin(),
                 tests,
                 &[],
                 None,
@@ -382,10 +386,6 @@ mod tests {
             .join("../..")
             .canonicalize()
             .expect("workspace root");
-        let python = test_python_bin();
-        tryke_runner::check_python_version(&python, &workspace_root)
-            .expect("Python version check (from pyproject.toml requires-python)");
-
         let python_dir = workspace_root.join("python");
 
         let dir = tempfile::tempdir().expect("tempdir");

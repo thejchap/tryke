@@ -87,6 +87,7 @@ fn main() -> Result<()> {
             include,
             watch,
             all,
+            python,
         } => {
             if base_branch.is_some() && !changed && !changed_first {
                 return Err(anyhow::anyhow!(
@@ -103,9 +104,12 @@ fn main() -> Result<()> {
                 let excludes = resolved_excludes(root_path, exclude, include);
                 let test_filter = TestFilter::from_args(&[], filter.as_deref(), markers.as_deref())
                     .map_err(|e| anyhow::anyhow!(e))?;
+                let config = tryke_config::load_effective_config(root_path);
+                let resolved_python = tryke_config::resolve_python(python.as_deref(), &config);
                 return rt.block_on(run_watch(
                     &mut *rep,
                     Some(root_path),
+                    &resolved_python,
                     &excludes,
                     &test_filter,
                     resolved_maxfail,
@@ -165,9 +169,12 @@ fn main() -> Result<()> {
                 rep.on_collect_complete(&tests);
                 Ok(())
             } else {
+                let config = tryke_config::load_effective_config(root_path);
+                let resolved_python = tryke_config::resolve_python(python.as_deref(), &config);
                 rt.block_on(run_tests(
                     &mut *rep,
                     root_path,
+                    &resolved_python,
                     tests,
                     &discovered.hooks,
                     resolved_maxfail,
@@ -183,10 +190,13 @@ fn main() -> Result<()> {
             root,
             exclude,
             include,
+            python,
         } => {
             let root_path = root.clone().unwrap_or(env::current_dir()?);
             let excludes = resolved_excludes(&root_path, exclude, include);
-            let server = tryke_server::Server::new(*port, root_path, excludes);
+            let config = tryke_config::load_effective_config(&root_path);
+            let resolved_python = tryke_config::resolve_python(python.as_deref(), &config);
+            let server = tryke_server::Server::new(*port, root_path, excludes, resolved_python);
             rt.block_on(server.run())
         }
         Commands::Graph {
@@ -544,6 +554,48 @@ mod tests {
     fn server_default_port() {
         let cli = Cli::try_parse_from(["tryke", "server"]).unwrap();
         assert!(matches!(cli.command, Commands::Server { port: 2337, .. }));
+    }
+
+    #[test]
+    fn test_python_flag_parsed() {
+        let cli =
+            Cli::try_parse_from(["tryke", "test", "--python", "/usr/bin/python3.13"]).unwrap();
+        assert!(matches!(
+            &cli.command,
+            Commands::Test {
+                python: Some(p),
+                ..
+            } if p == "/usr/bin/python3.13"
+        ));
+    }
+
+    #[test]
+    fn test_python_default_is_none() {
+        let cli = Cli::try_parse_from(["tryke", "test"]).unwrap();
+        assert!(matches!(cli.command, Commands::Test { python: None, .. }));
+    }
+
+    #[test]
+    fn test_python_conflicts_with_port() {
+        let result =
+            Cli::try_parse_from(["tryke", "test", "--python", "/usr/bin/python3", "--port"]);
+        assert!(
+            result.is_err(),
+            "--python and --port should conflict (server has its own python)"
+        );
+    }
+
+    #[test]
+    fn server_python_flag_parsed() {
+        let cli =
+            Cli::try_parse_from(["tryke", "server", "--python", "/usr/bin/python3.13"]).unwrap();
+        assert!(matches!(
+            &cli.command,
+            Commands::Server {
+                python: Some(p),
+                ..
+            } if p == "/usr/bin/python3.13"
+        ));
     }
 
     #[test]

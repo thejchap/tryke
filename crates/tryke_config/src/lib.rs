@@ -27,6 +27,9 @@ impl Default for DiscoveryConfig {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TrykeConfig {
     pub discovery: DiscoveryConfig,
+    /// Path to the Python interpreter used to spawn worker processes.
+    /// `None` means fall back to `python3` on `PATH`.
+    pub python: Option<String>,
 }
 
 impl TrykeConfig {
@@ -39,6 +42,7 @@ impl TrykeConfig {
                     exclude: config.exclude.unwrap_or_default(),
                     src: config.src.unwrap_or_else(|| vec![".".into()]),
                 },
+                python: config.python,
             })
         })
     }
@@ -69,22 +73,23 @@ pub fn load_effective_config(start: &Path) -> TrykeConfig {
     TrykeConfig::from_toml_str(&contents).unwrap_or_default()
 }
 
+/// Resolve the Python interpreter for spawning worker processes.
+///
+/// Precedence: CLI override > `[tool.tryke] python` in `pyproject.toml` >
+/// `python3` on `PATH`. Environment management (venv activation, `uv run`,
+/// etc.) is the user's responsibility — tryke does not introspect or
+/// validate the chosen interpreter.
 #[must_use]
-pub fn requires_python(contents: &str) -> Option<String> {
-    let raw = toml::from_str::<PyprojectToml>(contents).ok()?;
-    raw.project.and_then(|p| p.requires_python)
+pub fn resolve_python(cli_override: Option<&str>, config: &TrykeConfig) -> String {
+    cli_override
+        .map(str::to_owned)
+        .or_else(|| config.python.clone())
+        .unwrap_or_else(|| "python3".to_owned())
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct PyprojectToml {
-    project: Option<PyprojectProject>,
     tool: Option<PyprojectTool>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct PyprojectProject {
-    #[serde(rename = "requires-python")]
-    requires_python: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -97,6 +102,7 @@ struct PyprojectTool {
 struct RawTrykeConfig {
     exclude: Option<Vec<String>>,
     src: Option<Vec<String>>,
+    python: Option<String>,
 }
 
 #[cfg(test)]
@@ -123,6 +129,7 @@ mod tests {
                     exclude: vec!["benchmarks/suites".into(), "generated".into()],
                     src: vec![".".into()],
                 },
+                python: None,
             })
         );
     }
@@ -137,6 +144,7 @@ mod tests {
                     exclude: vec!["generated".into()],
                     src: vec![".".into()],
                 },
+                python: None,
             })
         );
     }
@@ -152,6 +160,19 @@ mod tests {
     fn src_defaults_to_project_root_when_unset() {
         let config = TrykeConfig::from_toml_str("[tool.tryke]\n").expect("some");
         assert_eq!(config.discovery.src, vec!["."]);
+    }
+
+    #[test]
+    fn parses_python_path() {
+        let config = TrykeConfig::from_toml_str("[tool.tryke]\npython = \"/usr/bin/python3.13\"\n")
+            .expect("some");
+        assert_eq!(config.python.as_deref(), Some("/usr/bin/python3.13"));
+    }
+
+    #[test]
+    fn python_defaults_to_none() {
+        let config = TrykeConfig::from_toml_str("[tool.tryke]\n").expect("some");
+        assert_eq!(config.python, None);
     }
 
     #[test]
@@ -216,20 +237,26 @@ mod tests {
     }
 
     #[test]
-    fn requires_python_extracts_specifier() {
-        let spec = requires_python("[project]\nrequires-python = \">=3.12\"\n");
-        assert_eq!(spec.as_deref(), Some(">=3.12"));
+    fn resolve_python_prefers_cli_override() {
+        let config = TrykeConfig {
+            python: Some("/from/config".into()),
+            ..TrykeConfig::default()
+        };
+        assert_eq!(resolve_python(Some("/from/cli"), &config), "/from/cli");
     }
 
     #[test]
-    fn requires_python_returns_none_when_missing() {
-        let spec = requires_python("[project]\nname = \"app\"\n");
-        assert_eq!(spec, None);
+    fn resolve_python_falls_back_to_config() {
+        let config = TrykeConfig {
+            python: Some("/from/config".into()),
+            ..TrykeConfig::default()
+        };
+        assert_eq!(resolve_python(None, &config), "/from/config");
     }
 
     #[test]
-    fn requires_python_returns_none_without_project_table() {
-        let spec = requires_python("[tool.tryke]\nexclude = []\n");
-        assert_eq!(spec, None);
+    fn resolve_python_defaults_to_python3() {
+        let config = TrykeConfig::default();
+        assert_eq!(resolve_python(None, &config), "python3");
     }
 }

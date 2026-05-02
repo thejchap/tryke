@@ -7,7 +7,7 @@ use tokio::{
     sync::{Mutex, broadcast},
 };
 use tryke_discovery::Discoverer;
-use tryke_runner::{WorkerPool, check_python_version, resolve_python};
+use tryke_runner::WorkerPool;
 
 use crate::{
     handler::ConnectionHandler,
@@ -19,15 +19,17 @@ pub struct Server {
     port: u16,
     root: PathBuf,
     excludes: Vec<String>,
+    python: String,
 }
 
 impl Server {
     #[must_use]
-    pub fn new(port: u16, root: PathBuf, excludes: Vec<String>) -> Self {
+    pub fn new(port: u16, root: PathBuf, excludes: Vec<String>, python: String) -> Self {
         Self {
             port,
             root,
             excludes,
+            python,
         }
     }
 
@@ -40,9 +42,7 @@ impl Server {
     #[expect(clippy::missing_errors_doc)]
     pub async fn run_on_listener(self, listener: TcpListener) -> anyhow::Result<()> {
         let size = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
-        let python = resolve_python(&self.root);
-        check_python_version(&python, &self.root)?;
-        let pool = Arc::new(WorkerPool::new(size, &python, &self.root));
+        let pool = Arc::new(WorkerPool::new(size, &self.python, &self.root));
         pool.warm().await;
 
         // Held across the full duration of a single `run` so concurrent
@@ -170,7 +170,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let root = dir.path().to_path_buf();
         tokio::spawn(async move {
-            Server::new(port, root, vec![])
+            Server::new(port, root, vec![], "python3".to_owned())
                 .run_on_listener(listener)
                 .await
                 .unwrap();

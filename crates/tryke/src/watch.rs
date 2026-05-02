@@ -13,7 +13,7 @@ use console::{Key, Term};
 use log::debug;
 use tryke_discovery::Discoverer;
 use tryke_reporter::Reporter;
-use tryke_runner::{DistMode, WorkerPool, check_python_version, resolve_python};
+use tryke_runner::{DistMode, WorkerPool};
 use tryke_types::{DiscoveryWarning, DiscoveryWarningKind, HookItem, filter::TestFilter};
 
 use crate::execution::{report_cycle, worker_pool_size};
@@ -115,6 +115,7 @@ async fn run_watch_cycle(
 pub async fn run_watch(
     reporter: &mut dyn Reporter,
     root: Option<&Path>,
+    python: &str,
     excludes: &[String],
     test_filter: &TestFilter,
     maxfail: Option<usize>,
@@ -126,10 +127,8 @@ pub async fn run_watch(
     let root = root.unwrap_or(&cwd);
     let mut discoverer = Discoverer::new_with_excludes(root, excludes);
 
-    let python = resolve_python(root);
-    check_python_version(&python, root)?;
     let pool_size = workers.unwrap_or_else(worker_pool_size);
-    let pool = WorkerPool::new(pool_size, &python, root);
+    let pool = WorkerPool::new(pool_size, python, root);
     pool.warm().await;
 
     clear_if_tty();
@@ -234,11 +233,12 @@ mod tests {
     use crate::discovery::discover_tests;
 
     fn test_python_bin() -> String {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()
-            .expect("workspace root");
-        tryke_runner::resolve_python(&root)
+        let venv = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.venv/bin/python3");
+        if venv.exists() {
+            venv.to_string_lossy().into_owned()
+        } else {
+            "python3".to_owned()
+        }
     }
 
     #[tokio::test]

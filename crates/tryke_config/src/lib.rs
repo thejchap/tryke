@@ -1,6 +1,6 @@
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use serde::Deserialize;
@@ -27,6 +27,10 @@ impl Default for DiscoveryConfig {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TrykeConfig {
     pub discovery: DiscoveryConfig,
+    /// Path to the Python interpreter used to spawn worker processes.
+    /// `None` means fall back to `python` on Windows / `python3` on Unix
+    /// (per `default_python()`).
+    pub python: Option<String>,
 }
 
 impl TrykeConfig {
@@ -39,6 +43,7 @@ impl TrykeConfig {
                     exclude: config.exclude.unwrap_or_default(),
                     src: config.src.unwrap_or_else(|| vec![".".into()]),
                 },
+                python: config.python,
             })
         })
     }
@@ -66,25 +71,54 @@ pub fn load_effective_config(start: &Path) -> TrykeConfig {
     let Ok(contents) = fs::read_to_string(root.join("pyproject.toml")) else {
         return TrykeConfig::default();
     };
-    TrykeConfig::from_toml_str(&contents).unwrap_or_default()
+    let mut config = TrykeConfig::from_toml_str(&contents).unwrap_or_default();
+    // Mirror `execvp` / `CreateProcess` semantics: a value containing a
+    // path separator is treated as a filesystem path; anything else is a
+    // bare command name to look up via `PATH`. For paths that are
+    // genuinely relative (no root, no drive prefix), anchor them to the
+    // directory containing `pyproject.toml` so configs like
+    // `python = ".venv/bin/python3"` work regardless of the cwd from
+    // which tryke is invoked. Windows drive-relative values like
+    // `C:foo\python.exe` carry a `Component::Prefix` but no root and are
+    // *not* `is_absolute()` — leaving them to the OS's per-drive cwd
+    // resolution is closer to user intent than rewriting them onto the
+    // config root.
+    if let Some(py) = config.python.as_deref() {
+        let has_separator = py.contains('/') || py.contains('\\');
+        let path = Path::new(py);
+        let has_prefix = matches!(path.components().next(), Some(Component::Prefix(_)));
+        if has_separator && !path.is_absolute() && !path.has_root() && !has_prefix {
+            config.python = Some(root.join(path).to_string_lossy().into_owned());
+        }
+    }
+    config
 }
 
+/// Default Python binary name when neither a CLI flag nor a config value
+/// is provided. Windows venvs ship `python.exe` (no `python3.exe` shim),
+/// while Linux and macOS conventionally expose `python3`.
+fn default_python() -> &'static str {
+    if cfg!(windows) { "python" } else { "python3" }
+}
+
+/// Resolve the Python interpreter for spawning worker processes.
+///
+/// Precedence: CLI override > `[tool.tryke] python` in `pyproject.toml` >
+/// `python` (Windows) / `python3` (elsewhere) on `PATH`. Environment
+/// management (venv activation, `uv run`, etc.) is the user's
+/// responsibility — tryke does not introspect or validate the chosen
+/// interpreter.
 #[must_use]
-pub fn requires_python(contents: &str) -> Option<String> {
-    let raw = toml::from_str::<PyprojectToml>(contents).ok()?;
-    raw.project.and_then(|p| p.requires_python)
+pub fn resolve_python(cli_override: Option<&str>, config: &TrykeConfig) -> String {
+    cli_override
+        .map(str::to_owned)
+        .or_else(|| config.python.clone())
+        .unwrap_or_else(|| default_python().to_owned())
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct PyprojectToml {
-    project: Option<PyprojectProject>,
     tool: Option<PyprojectTool>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct PyprojectProject {
-    #[serde(rename = "requires-python")]
-    requires_python: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -97,6 +131,7 @@ struct PyprojectTool {
 struct RawTrykeConfig {
     exclude: Option<Vec<String>>,
     src: Option<Vec<String>>,
+    python: Option<String>,
 }
 
 #[cfg(test)]
@@ -123,6 +158,7 @@ mod tests {
                     exclude: vec!["benchmarks/suites".into(), "generated".into()],
                     src: vec![".".into()],
                 },
+                python: None,
             })
         );
     }
@@ -137,6 +173,7 @@ mod tests {
                     exclude: vec!["generated".into()],
                     src: vec![".".into()],
                 },
+                python: None,
             })
         );
     }
@@ -152,6 +189,19 @@ mod tests {
     fn src_defaults_to_project_root_when_unset() {
         let config = TrykeConfig::from_toml_str("[tool.tryke]\n").expect("some");
         assert_eq!(config.discovery.src, vec!["."]);
+    }
+
+    #[test]
+    fn parses_python_path() {
+        let config = TrykeConfig::from_toml_str("[tool.tryke]\npython = \"/usr/bin/python3.13\"\n")
+            .expect("some");
+        assert_eq!(config.python.as_deref(), Some("/usr/bin/python3.13"));
+    }
+
+    #[test]
+    fn python_defaults_to_none() {
+        let config = TrykeConfig::from_toml_str("[tool.tryke]\n").expect("some");
+        assert_eq!(config.python, None);
     }
 
     #[test]
@@ -216,20 +266,90 @@ mod tests {
     }
 
     #[test]
-    fn requires_python_extracts_specifier() {
-        let spec = requires_python("[project]\nrequires-python = \">=3.12\"\n");
-        assert_eq!(spec.as_deref(), Some(">=3.12"));
+    fn load_effective_config_resolves_relative_python_against_config_root() {
+        let dir = tempdir();
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.tryke]\npython = \".venv/bin/python3\"\n",
+        )
+        .expect("write pyproject");
+        let nested = dir.path().join("subdir");
+        fs::create_dir_all(&nested).expect("create nested");
+        let config = load_effective_config(&nested);
+        let expected = dir
+            .path()
+            .join(".venv/bin/python3")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(config.python, Some(expected));
     }
 
     #[test]
-    fn requires_python_returns_none_when_missing() {
-        let spec = requires_python("[project]\nname = \"app\"\n");
-        assert_eq!(spec, None);
+    fn load_effective_config_leaves_absolute_python_unchanged() {
+        let dir = tempdir();
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.tryke]\npython = \"/usr/bin/python3.13\"\n",
+        )
+        .expect("write pyproject");
+        let config = load_effective_config(dir.path());
+        assert_eq!(config.python.as_deref(), Some("/usr/bin/python3.13"));
     }
 
     #[test]
-    fn requires_python_returns_none_without_project_table() {
-        let spec = requires_python("[tool.tryke]\nexclude = []\n");
-        assert_eq!(spec, None);
+    fn resolve_python_prefers_cli_override() {
+        let config = TrykeConfig {
+            python: Some("/from/config".into()),
+            ..TrykeConfig::default()
+        };
+        assert_eq!(resolve_python(Some("/from/cli"), &config), "/from/cli");
+    }
+
+    #[test]
+    fn resolve_python_falls_back_to_config() {
+        let config = TrykeConfig {
+            python: Some("/from/config".into()),
+            ..TrykeConfig::default()
+        };
+        assert_eq!(resolve_python(None, &config), "/from/config");
+    }
+
+    #[test]
+    fn resolve_python_defaults_to_platform_default() {
+        let config = TrykeConfig::default();
+        let expected = if cfg!(windows) { "python" } else { "python3" };
+        assert_eq!(resolve_python(None, &config), expected);
+    }
+
+    #[test]
+    fn load_effective_config_leaves_bare_executable_name_unchanged() {
+        // `python = "python3"` should resolve via PATH, not be rewritten
+        // to `<config-root>/python3`.
+        let dir = tempdir();
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.tryke]\npython = \"python3\"\n",
+        )
+        .expect("write pyproject");
+        let config = load_effective_config(dir.path());
+        assert_eq!(config.python.as_deref(), Some("python3"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn load_effective_config_leaves_drive_relative_python_unchanged() {
+        // `C:foo\python.exe` is drive-relative on Windows — it has a
+        // `Component::Prefix` but no root and is not `is_absolute()`.
+        // Rewriting it onto the config root would mangle the value.
+        // Written via a TOML literal string (single quotes) so backslashes
+        // are passed through verbatim, no escape processing.
+        let dir = tempdir();
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.tryke]\npython = 'C:foo\\python.exe'\n",
+        )
+        .expect("write pyproject");
+        let config = load_effective_config(dir.path());
+        assert_eq!(config.python.as_deref(), Some("C:foo\\python.exe"));
     }
 }

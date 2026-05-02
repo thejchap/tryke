@@ -416,12 +416,21 @@ mod tests {
             .expect("workspace root")
     }
 
-    fn test_python_bin() -> String {
-        crate::resolve_python(&workspace_root())
-    }
-
     fn python_package_dir() -> PathBuf {
         workspace_root().join("python")
+    }
+
+    fn test_python_bin() -> String {
+        let (venv, fallback) = if cfg!(windows) {
+            (workspace_root().join(".venv/Scripts/python.exe"), "python")
+        } else {
+            (workspace_root().join(".venv/bin/python3"), "python3")
+        };
+        if venv.exists() {
+            venv.to_string_lossy().into_owned()
+        } else {
+            fallback.to_owned()
+        }
     }
 
     fn make_test_item(module: &str, name: &str, file: &std::path::Path) -> TestItem {

@@ -311,11 +311,17 @@ mod tests {
     use super::*;
 
     fn test_python_bin() -> String {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()
-            .expect("workspace root");
-        tryke_runner::resolve_python(&root)
+        let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let (venv, fallback) = if cfg!(windows) {
+            (workspace.join(".venv/Scripts/python.exe"), "python")
+        } else {
+            (workspace.join(".venv/bin/python3"), "python3")
+        };
+        if venv.exists() {
+            venv.to_string_lossy().into_owned()
+        } else {
+            fallback.to_owned()
+        }
     }
 
     fn make_root() -> tempfile::TempDir {

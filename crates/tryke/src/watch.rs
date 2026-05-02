@@ -13,7 +13,7 @@ use console::{Key, Term};
 use log::debug;
 use tryke_discovery::Discoverer;
 use tryke_reporter::Reporter;
-use tryke_runner::{DistMode, WorkerPool, check_python_version, resolve_python};
+use tryke_runner::{DistMode, WorkerPool};
 use tryke_types::{DiscoveryWarning, DiscoveryWarningKind, HookItem, filter::TestFilter};
 
 use crate::execution::{report_cycle, worker_pool_size};
@@ -79,10 +79,9 @@ fn emit_discovery_warnings(reporter: &mut dyn Reporter, discoverer: &Discoverer)
     }
 }
 
-/// Run a single watch cycle. Test failures are non-fatal here: `report_cycle`
-/// returns `Err` purely to signal pass/fail state to `tryke test`, but in watch
-/// mode the whole point is to iterate on failing tests — so we absorb it and
-/// let the watcher keep running.
+/// Run a single watch cycle. Test failures are non-fatal here: in watch
+/// mode the whole point is to iterate on failing tests, so we discard
+/// the run summary and any setup error and let the watcher keep running.
 async fn run_watch_cycle(
     reporter: &mut dyn Reporter,
     tests: Vec<tryke_types::TestItem>,
@@ -104,7 +103,7 @@ async fn run_watch_cycle(
     )
     .await
     {
-        debug!("watch: test cycle reported failures: {e}");
+        debug!("watch: report_cycle errored: {e}");
     }
 }
 
@@ -115,6 +114,7 @@ async fn run_watch_cycle(
 pub async fn run_watch(
     reporter: &mut dyn Reporter,
     root: Option<&Path>,
+    python: &str,
     excludes: &[String],
     test_filter: &TestFilter,
     maxfail: Option<usize>,
@@ -126,10 +126,8 @@ pub async fn run_watch(
     let root = root.unwrap_or(&cwd);
     let mut discoverer = Discoverer::new_with_excludes(root, excludes);
 
-    let python = resolve_python(root);
-    check_python_version(&python, root)?;
     let pool_size = workers.unwrap_or_else(worker_pool_size);
-    let pool = WorkerPool::new(pool_size, &python, root);
+    let pool = WorkerPool::new(pool_size, python, root);
     pool.warm().await;
 
     clear_if_tty();
@@ -234,11 +232,17 @@ mod tests {
     use crate::discovery::discover_tests;
 
     fn test_python_bin() -> String {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()
-            .expect("workspace root");
-        tryke_runner::resolve_python(&root)
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let (venv, fallback) = if cfg!(windows) {
+            (workspace.join(".venv/Scripts/python.exe"), "python")
+        } else {
+            (workspace.join(".venv/bin/python3"), "python3")
+        };
+        if venv.exists() {
+            venv.to_string_lossy().into_owned()
+        } else {
+            fallback.to_owned()
+        }
     }
 
     #[tokio::test]

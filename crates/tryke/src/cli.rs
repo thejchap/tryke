@@ -227,6 +227,18 @@ pub enum Commands {
         /// suites.
         #[arg(short = 'a', long = "all", requires = "watch")]
         all: bool,
+
+        /// Path to the Python interpreter used to spawn worker processes.
+        ///
+        /// Overrides `[tool.tryke] python` in `pyproject.toml`. Defaults
+        /// to `python` on Windows / `python3` on Unix from `PATH`. The
+        /// interpreter is the user's responsibility — tryke does not
+        /// validate it. Activate the appropriate venv (or use
+        /// `uv run tryke ...`) and the default will pick it up. Not
+        /// compatible with `--port`; configure the interpreter on the
+        /// server instead.
+        #[arg(long, conflicts_with = "port")]
+        python: Option<String>,
     },
 
     /// Start a persistent worker server.
@@ -253,6 +265,13 @@ pub enum Commands {
         /// Include files or directories even if excluded by `pyproject.toml`.
         #[arg(short = 'i', long = "include")]
         include: Vec<String>,
+
+        /// Path to the Python interpreter used to spawn worker processes.
+        ///
+        /// Overrides `[tool.tryke] python` in `pyproject.toml`. Defaults
+        /// to `python` on Windows / `python3` on Unix from `PATH`.
+        #[arg(long)]
+        python: Option<String>,
     },
 
     /// Print the import dependency graph for the project.

@@ -3,9 +3,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use tokio_stream::StreamExt;
 use tryke_reporter::Reporter;
-use tryke_runner::{
-    DistMode, WorkerPool, check_python_version, partition_with_hooks, resolve_python,
-};
+use tryke_runner::{DistMode, WorkerPool, partition_with_hooks};
 use tryke_types::{ChangedSelectionSummary, HookItem, RunSummary, TestOutcome};
 
 pub fn worker_pool_size() -> usize {
@@ -16,6 +14,7 @@ pub fn worker_pool_size() -> usize {
 pub async fn run_tests(
     reporter: &mut dyn Reporter,
     root: &std::path::Path,
+    python: &str,
     tests: Vec<tryke_types::TestItem>,
     hooks: &[HookItem],
     maxfail: Option<usize>,
@@ -23,13 +22,11 @@ pub async fn run_tests(
     dist: DistMode,
     discovery_duration: Option<Duration>,
     changed_selection: Option<ChangedSelectionSummary>,
-) -> Result<()> {
-    let python = resolve_python(root);
-    check_python_version(&python, root)?;
+) -> Result<RunSummary> {
     let pool_size = workers.unwrap_or_else(|| tests.len().min(worker_pool_size()));
-    let pool = WorkerPool::new(pool_size, &python, root);
+    let pool = WorkerPool::new(pool_size, python, root);
     pool.warm().await;
-    report_cycle(
+    let summary = report_cycle(
         reporter,
         tests,
         hooks,
@@ -41,7 +38,7 @@ pub async fn run_tests(
     )
     .await?;
     pool.shutdown();
-    Ok(())
+    Ok(summary)
 }
 
 fn flush_buffer(
@@ -70,7 +67,7 @@ pub async fn report_cycle(
     dist: DistMode,
     discovery_duration: Option<Duration>,
     changed_selection: Option<ChangedSelectionSummary>,
-) -> Result<()> {
+) -> Result<RunSummary> {
     use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
 
@@ -190,7 +187,7 @@ pub async fn report_cycle(
         }
     }
 
-    reporter.on_run_complete(&RunSummary {
+    let summary = RunSummary {
         passed,
         failed,
         skipped,
@@ -203,13 +200,9 @@ pub async fn report_cycle(
         file_count,
         start_time: Some(start_time),
         changed_selection,
-    });
-
-    if failed > 0 || errors > 0 {
-        Err(anyhow::anyhow!("{failed} failed, {errors} error(s)"))
-    } else {
-        Ok(())
-    }
+    };
+    reporter.on_run_complete(&summary);
+    Ok(summary)
 }
 
 #[cfg(test)]
@@ -225,19 +218,32 @@ mod tests {
     use super::*;
     use crate::discovery::{discover_tests, resolved_excludes};
 
+    /// Use the workspace's venv interpreter if present, otherwise fall back
+    /// to a bare-name lookup on `PATH`. Tests need a Python that satisfies
+    /// the project's `requires-python`; locally the uv-managed venv
+    /// covers that, and CI runs nextest under `uv run` so the venv is
+    /// already on `PATH`. Venv layout and the bare fallback both differ
+    /// per OS — Windows uses `Scripts/python.exe` + `python`, Unix uses
+    /// `bin/python3` + `python3` — matching `tryke_config::default_python`.
     fn test_python_bin() -> String {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()
-            .expect("workspace root");
-        tryke_runner::resolve_python(&root)
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let (venv, fallback) = if cfg!(windows) {
+            (workspace.join(".venv/Scripts/python.exe"), "python")
+        } else {
+            (workspace.join(".venv/bin/python3"), "python3")
+        };
+        if venv.exists() {
+            venv.to_string_lossy().into_owned()
+        } else {
+            fallback.to_owned()
+        }
     }
 
     async fn run_cycle(
         reporter: &mut dyn Reporter,
         discoverer: &mut Discoverer,
         pool: &WorkerPool,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<RunSummary> {
         report_cycle(
             reporter,
             discoverer.rediscover(),
@@ -252,9 +258,9 @@ mod tests {
     }
 
     /// Smoke-test a reporter against the full `run_tests` pipeline using an
-    /// empty project. Exercises check_python_version, pool init/teardown, and
-    /// the reporter's run_start/run_summary callbacks without doing real work.
-    /// Snapshot tests in `tests/snapshots.rs` cover per-test rendering.
+    /// empty project. Exercises pool init/teardown and the reporter's
+    /// run_start/run_summary callbacks without doing real work. Snapshot
+    /// tests in `tests/snapshots.rs` cover per-test rendering.
     async fn smoke_run_tests(reporter: &mut dyn Reporter) {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
@@ -263,6 +269,7 @@ mod tests {
         let _ = run_tests(
             reporter,
             dir.path(),
+            &test_python_bin(),
             tests,
             &[],
             None,
@@ -363,6 +370,7 @@ mod tests {
             run_tests(
                 &mut reporter,
                 dir.path(),
+                &test_python_bin(),
                 tests,
                 &[],
                 None,
@@ -382,10 +390,6 @@ mod tests {
             .join("../..")
             .canonicalize()
             .expect("workspace root");
-        let python = test_python_bin();
-        tryke_runner::check_python_version(&python, &workspace_root)
-            .expect("Python version check (from pyproject.toml requires-python)");
-
         let python_dir = workspace_root.join("python");
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -481,7 +485,7 @@ def test_failing():
     }
 
     #[tokio::test]
-    async fn report_cycle_returns_err_when_tests_fail() {
+    async fn report_cycle_summary_reports_failures() {
         let python_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../python")
             .canonicalize()
@@ -501,7 +505,7 @@ def test_failing():
             dir.path(),
             &[dir.path().to_path_buf(), python_dir],
         );
-        let result = report_cycle(
+        let summary = report_cycle(
             &mut reporter,
             tests,
             &[],
@@ -511,10 +515,9 @@ def test_failing():
             None,
             None,
         )
-        .await;
-        assert!(
-            result.is_err(),
-            "expected Err when tests fail, got {result:?}"
-        );
+        .await
+        .expect("report_cycle should not error on test failures");
+        assert_eq!(summary.failed, 1, "expected one failed test");
+        assert_eq!(summary.passed, 0);
     }
 }

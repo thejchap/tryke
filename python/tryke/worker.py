@@ -863,16 +863,8 @@ def _configure_logging_from_env() -> None:
     Accepts ``DEBUG`` / ``INFO`` / ``WARN`` / ``ERROR`` / ``TRACE``.
     Output goes to stderr so it never contaminates the JSON-RPC stream
     on stdout.
-
-    ``TRYKE_WORKER_LOG`` is honored as a deprecated alias for one
-    cycle so existing shell exports keep working when ``tryke.worker``
-    is invoked standalone. The deprecation warning lives in the rust
-    runner so it fires exactly once per ``tryke`` invocation rather
-    than once per worker process.
     """
     level_name = os.environ.get("TRYKE_LOG", "").strip().upper()
-    if not level_name:
-        level_name = os.environ.get("TRYKE_WORKER_LOG", "").strip().upper()
     if not level_name:
         return
     # Map TRACE to DEBUG since stdlib logging has no TRACE level.

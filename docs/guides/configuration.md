@@ -131,8 +131,6 @@ TRYKE_LOG=debug tryke test
 TRYKE_LOG=info RUST_LOG=tryke=warn tryke test
 ```
 
-The legacy `TRYKE_WORKER_LOG` env var is still accepted (one cycle) as a deprecated alias for `TRYKE_LOG`. A single deprecation line is logged when only the old name is set.
-
 ## Example
 
 A typical configuration for a project with benchmarks and generated code:

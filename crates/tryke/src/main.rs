@@ -2,7 +2,7 @@ use std::{env, time::Instant};
 
 use anyhow::Result;
 use clap::Parser;
-use log::{debug, warn};
+use log::debug;
 use tryke::cli::{Cli, Commands, ReporterFormat};
 use tryke::discovery::{
     discover_tests, discover_tests_changed_first, discover_tests_for_paths, resolved_excludes,
@@ -54,16 +54,7 @@ fn build_reporter(
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let cli_filter = cli.verbose.log_level_filter();
-    // Resolve `TRYKE_LOG` with `TRYKE_WORKER_LOG` as a one-cycle
-    // deprecated alias. Doing the alias check here (rather than in the
-    // python worker) means the deprecation warning fires exactly once
-    // per `tryke` invocation — moving it to the worker side fired it
-    // once per spawned worker process, which spammed multi-worker pools
-    // and watch-mode restarts.
-    let tryke_log_legacy = env::var("TRYKE_WORKER_LOG").ok();
-    let tryke_log = env::var("TRYKE_LOG")
-        .ok()
-        .or_else(|| tryke_log_legacy.clone());
+    let tryke_log = env::var("TRYKE_LOG").ok();
     // Rust-side default for env_logger when `RUST_LOG` is unset. `RUST_LOG`
     // wins natively because we use `Builder::from_env`. Precedence chain:
     // `RUST_LOG` > `TRYKE_LOG` > `-v`/`-q` flag > `warn`.
@@ -72,12 +63,6 @@ fn main() -> Result<()> {
         env_logger::Env::default().default_filter_or(rust_default.as_str().to_ascii_lowercase()),
     )
     .init();
-    if env::var("TRYKE_LOG").is_err() && tryke_log_legacy.is_some() {
-        warn!(
-            "TRYKE_WORKER_LOG is deprecated; use TRYKE_LOG instead \
-             (it propagates to both rust and python workers)"
-        );
-    }
     debug!("{cli:?}");
 
     // Cross-language verbosity for spawned python workers. `RUST_LOG` is

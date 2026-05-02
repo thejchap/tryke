@@ -77,18 +77,18 @@ tryke test v0.0.25
 sample.py:
   users
     get
-      ! returns a stored user [error]
-    worker unavailable (spawn or hook replay failed)
+      ✓ returns a stored user [0.00ms]
+        ✓ returns stored email
     set
-      ! stores a new user [error]
-    worker unavailable (spawn or hook replay failed)
+      ✓ stores a new user [0.00ms]
+        ✓ stores email under user key
 
- Test Files  1 ran (1)
-      Tests  2 error (2)
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
    Start at  10:02:24
    Duration  36.36ms (discover 0.76ms, tests 35.60ms)
 
-  FAIL
+  PASS
 ```
 
 <!-- REPORTER:text:plain:END -->

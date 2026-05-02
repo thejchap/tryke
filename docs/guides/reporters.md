@@ -25,18 +25,18 @@ Sample output (with `-v` to surface per-assertion lines):
 sample.py:
   users
     get
-      [31m![39m returns a stored user [31m[error][39m
-    worker unavailable (spawn or hook replay failed)
+      [32m✓[39m returns a stored user [2m[0.00ms][0m
+        [32m✓[39m [2mreturns stored email[0m
     set
-      [31m![39m stores a new user [31m[error][39m
-    worker unavailable (spawn or hook replay failed)
+      [32m✓[39m stores a new user [2m[0.00ms][0m
+        [32m✓[39m [2mstores email under user key[0m
 
- [2mTest Files[0m  [1m[31m1 ran[39m[0m [2m(1)[0m
-      [2mTests[0m  [1m[31m2 error[39m[0m [2m(2)[0m
+ [2mTest Files[0m  [1m[32m1 passed[39m[0m [2m(1)[0m
+      [2mTests[0m  [1m[32m2 passed[39m[0m [2m(2)[0m
    [2mStart at[0m  10:02:24
    [2mDuration[0m  36.36ms [2m(discover 0.76ms, tests 35.60ms)[0m
 
- [1m[30;41m FAIL [0m[0m
+ [1m[30;42m PASS [0m[0m
 ```
 
 <!-- REPORTER:text:END -->
@@ -64,14 +64,14 @@ Sample output:
 ```ansi
 [1mtryke test[0m [2mv0.0.25[0m
 
-[31mE[39m[31mE[39m
+[32m.[39m[32m.[39m
 
- [2mTest Files[0m  [1m[31m1 ran[39m[0m [2m(1)[0m
-      [2mTests[0m  [1m[31m2 error[39m[0m [2m(2)[0m
+ [2mTest Files[0m  [1m[32m1 passed[39m[0m [2m(1)[0m
+      [2mTests[0m  [1m[32m2 passed[39m[0m [2m(2)[0m
    [2mStart at[0m  10:02:24
    [2mDuration[0m  36.36ms [2m(discover 0.76ms, tests 35.60ms)[0m
 
- [1m[30;41m FAIL [0m[0m
+ [1m[30;42m PASS [0m[0m
 ```
 
 <!-- REPORTER:dot:END -->
@@ -90,9 +90,9 @@ Sample output:
 
 ```json
 {"event":"run_start","tests":[{"name":"test_get","module_path":"sample","file_path":"sample.py","line_number":27,"display_name":"returns a stored user","expected_assertions":[{"subject":"users[\"alice\"]","matcher":"to_equal","negated":false,"args":["\"alice@example.com\""],"line":32,"label":"returns stored email"}],"groups":["users","get"]},{"name":"test_set","module_path":"sample","file_path":"sample.py","line_number":38,"display_name":"stores a new user","expected_assertions":[{"subject":"users[\"bob\"]","matcher":"to_equal","negated":false,"args":["\"bob@example.com\""],"line":41,"label":"stores email under user key"}],"groups":["users","set"]}]}
-{"event":"test_complete","result":{"test":{"name":"test_get","module_path":"sample","file_path":"sample.py","line_number":27,"display_name":"returns a stored user","expected_assertions":[{"subject":"users[\"alice\"]","matcher":"to_equal","negated":false,"args":["\"alice@example.com\""],"line":32,"label":"returns stored email"}],"groups":["users","get"]},"outcome":{"status":"error","detail":{"message":"worker unavailable (spawn or hook replay failed)"}},"duration":{"secs":0,"nanos":0},"stdout":"","stderr":""}}
-{"event":"test_complete","result":{"test":{"name":"test_set","module_path":"sample","file_path":"sample.py","line_number":38,"display_name":"stores a new user","expected_assertions":[{"subject":"users[\"bob\"]","matcher":"to_equal","negated":false,"args":["\"bob@example.com\""],"line":41,"label":"stores email under user key"}],"groups":["users","set"]},"outcome":{"status":"error","detail":{"message":"worker unavailable (spawn or hook replay failed)"}},"duration":{"secs":0,"nanos":0},"stdout":"","stderr":""}}
-{"event":"run_complete","summary":{"passed":0,"failed":0,"skipped":0,"errors":2,"xfailed":0,"todo":0,"duration":{"secs":0,"nanos":0},"discovery_duration":{"secs":0,"nanos":760000},"test_duration":{"secs":0,"nanos":35600000},"file_count":1,"start_time":"10:02:24"}}
+{"event":"test_complete","result":{"test":{"name":"test_get","module_path":"sample","file_path":"sample.py","line_number":27,"display_name":"returns a stored user","expected_assertions":[{"subject":"users[\"alice\"]","matcher":"to_equal","negated":false,"args":["\"alice@example.com\""],"line":32,"label":"returns stored email"}],"groups":["users","get"]},"outcome":{"status":"passed"},"duration":{"secs":0,"nanos":0},"stdout":"","stderr":""}}
+{"event":"test_complete","result":{"test":{"name":"test_set","module_path":"sample","file_path":"sample.py","line_number":38,"display_name":"stores a new user","expected_assertions":[{"subject":"users[\"bob\"]","matcher":"to_equal","negated":false,"args":["\"bob@example.com\""],"line":41,"label":"stores email under user key"}],"groups":["users","set"]},"outcome":{"status":"passed"},"duration":{"secs":0,"nanos":0},"stdout":"","stderr":""}}
+{"event":"run_complete","summary":{"passed":2,"failed":0,"skipped":0,"errors":0,"xfailed":0,"todo":0,"duration":{"secs":0,"nanos":0},"discovery_duration":{"secs":0,"nanos":760000},"test_duration":{"secs":0,"nanos":35600000},"file_count":1,"start_time":"10:02:24"}}
 ```
 
 <!-- REPORTER:json:END -->
@@ -111,13 +111,9 @@ Sample output:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="tryke" tests="2" failures="0" errors="2" skipped="0" time="0.036">
-  <testcase name="returns a stored user" classname="sample.users.get" time="0.000">
-    <error message="worker unavailable (spawn or hook replay failed)"/>
-  </testcase>
-  <testcase name="stores a new user" classname="sample.users.set" time="0.000">
-    <error message="worker unavailable (spawn or hook replay failed)"/>
-  </testcase>
+<testsuite name="tryke" tests="2" failures="0" errors="0" skipped="0" time="0.036">
+  <testcase name="returns a stored user" classname="sample.users.get" time="0.000"/>
+  <testcase name="stores a new user" classname="sample.users.set" time="0.000"/>
 </testsuite>
 ```
 
@@ -136,11 +132,7 @@ Sample output:
 <!-- REPORTER:llm:START -->
 
 ```text
-ERROR returns a stored user (sample.py:27)
-  worker unavailable (spawn or hook replay failed)
-ERROR stores a new user (sample.py:38)
-  worker unavailable (spawn or hook replay failed)
-2 error [36.36ms]
+2 passed [36.36ms]
 ```
 
 <!-- REPORTER:llm:END -->
@@ -160,17 +152,15 @@ Sample output:
 ```ansi
 [1mtryke test[0m [2mv0.0.25[0m
 
-     [1m[31mERROR[39m[0m [[2m  0.000s[0m] [1m[36msample[39m[0m [2m>[0m [36musers[39m [2m>[0m [36mget[39m [2m::[0m returns a stored user
-    worker unavailable (spawn or hook replay failed)
-     [1m[31mERROR[39m[0m [[2m  0.000s[0m] [1m[36msample[39m[0m [2m>[0m [36musers[39m [2m>[0m [36mset[39m [2m::[0m stores a new user
-    worker unavailable (spawn or hook replay failed)
+     [1m[32mPASS [39m[0m [[2m  0.000s[0m] [1m[36msample[39m[0m [2m>[0m [36musers[39m [2m>[0m [36mget[39m [2m::[0m returns a stored user
+     [1m[32mPASS [39m[0m [[2m  0.000s[0m] [1m[36msample[39m[0m [2m>[0m [36musers[39m [2m>[0m [36mset[39m [2m::[0m stores a new user
 
- [2mTest Files[0m  [1m[31m1 ran[39m[0m [2m(1)[0m
-      [2mTests[0m  [1m[31m2 error[39m[0m [2m(2)[0m
+ [2mTest Files[0m  [1m[32m1 passed[39m[0m [2m(1)[0m
+      [2mTests[0m  [1m[32m2 passed[39m[0m [2m(2)[0m
    [2mStart at[0m  10:02:24
    [2mDuration[0m  36.36ms [2m(discover 0.76ms, tests 35.60ms)[0m
 
- [1m[30;41m FAIL [0m[0m
+ [1m[30;42m PASS [0m[0m
 ```
 
 <!-- REPORTER:next:END -->
@@ -192,22 +182,14 @@ Sample output:
 ```ansi
 [1mtryke test[0m [2mv0.0.25[0m
 
- [1msample.py[0m [1m[31mE[39m[0m[1m[31mE[39m[0m                                                [1m2[0m [1m100%[0m [31m████████████[39m
+ [1msample.py[0m [32m✓[39m[32m✓[39m                                                [1m2[0m [1m100%[0m [37m████████████[39m
 
-[4m[1m[31mFailures[39m[0m[0m
-
-[1m[31m✗[39m[0m returns a stored user [2m(sample.py)[0m
-    worker unavailable (spawn or hook replay failed)
-
-[1m[31m✗[39m[0m stores a new user [2m(sample.py)[0m
-    worker unavailable (spawn or hook replay failed)
-
- [2mTest Files[0m  [1m[31m1 ran[39m[0m [2m(1)[0m
-      [2mTests[0m  [1m[31m2 error[39m[0m [2m(2)[0m
+ [2mTest Files[0m  [1m[32m1 passed[39m[0m [2m(1)[0m
+      [2mTests[0m  [1m[32m2 passed[39m[0m [2m(2)[0m
    [2mStart at[0m  10:02:24
    [2mDuration[0m  36.36ms [2m(discover 0.76ms, tests 35.60ms)[0m
 
- [1m[30;41m FAIL [0m[0m
+ [1m[30;42m PASS [0m[0m
 ```
 
 <!-- REPORTER:sugar:END -->

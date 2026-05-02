@@ -70,7 +70,18 @@ pub fn load_effective_config(start: &Path) -> TrykeConfig {
     let Ok(contents) = fs::read_to_string(root.join("pyproject.toml")) else {
         return TrykeConfig::default();
     };
-    TrykeConfig::from_toml_str(&contents).unwrap_or_default()
+    let mut config = TrykeConfig::from_toml_str(&contents).unwrap_or_default();
+    // A `python` value like `.venv/bin/python3` is meaningful relative to
+    // the directory containing `pyproject.toml`, not the cwd of whoever
+    // invoked tryke (e.g. a script running from a sibling directory).
+    // Resolve here so downstream code can treat it as a literal path.
+    if let Some(py) = config.python.as_deref() {
+        let path = Path::new(py);
+        if path.is_relative() {
+            config.python = Some(root.join(path).to_string_lossy().into_owned());
+        }
+    }
+    config
 }
 
 /// Resolve the Python interpreter for spawning worker processes.
@@ -234,6 +245,37 @@ mod tests {
 
         let config = load_effective_config(&nested);
         assert_eq!(config.discovery.exclude, vec!["generated"]);
+    }
+
+    #[test]
+    fn load_effective_config_resolves_relative_python_against_config_root() {
+        let dir = tempdir();
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.tryke]\npython = \".venv/bin/python3\"\n",
+        )
+        .expect("write pyproject");
+        let nested = dir.path().join("subdir");
+        fs::create_dir_all(&nested).expect("create nested");
+        let config = load_effective_config(&nested);
+        let expected = dir
+            .path()
+            .join(".venv/bin/python3")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(config.python, Some(expected));
+    }
+
+    #[test]
+    fn load_effective_config_leaves_absolute_python_unchanged() {
+        let dir = tempdir();
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.tryke]\npython = \"/usr/bin/python3.13\"\n",
+        )
+        .expect("write pyproject");
+        let config = load_effective_config(dir.path());
+        assert_eq!(config.python.as_deref(), Some("/usr/bin/python3.13"));
     }
 
     #[test]

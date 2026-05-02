@@ -161,6 +161,7 @@ def _run(reporter: str, extra: list[str]) -> str:
         *extra,
     ]
     captured = ""
+    captured_err = ""
     for _ in range(2):
         result = subprocess.run(  # noqa: S603
             cmd,
@@ -171,6 +172,20 @@ def _run(reporter: str, extra: list[str]) -> str:
             check=False,
         )
         captured = result.stdout
+        captured_err = result.stderr
+    # `tryke test` exits non-zero when the demo has actual test failures, which
+    # is expected — the sample.py contains intentional failing tests so the
+    # rendered docs cover failure output. But infrastructure errors (worker
+    # spawn failed, hook replay crashed, etc.) produce useless docs that
+    # hide regressions in the runner; surface those as a script failure.
+    fatal_markers = ("worker unavailable", "spawn or hook replay failed")
+    if any(marker in captured for marker in fatal_markers):
+        sys.stderr.write(
+            f"reporter {reporter!r} produced infrastructure errors "
+            f"(not test failures); refusing to commit broken sample output.\n"
+            f"--- stdout ---\n{captured}\n--- stderr ---\n{captured_err}\n"
+        )
+        sys.exit(1)
     return _normalize(captured)
 
 

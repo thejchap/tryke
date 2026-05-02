@@ -110,18 +110,18 @@ uvx tryke test
 sample.py:
   users
     get
-      [31m![39m returns a stored user [31m[error][39m
-    worker unavailable (spawn or hook replay failed)
+      [32m✓[39m returns a stored user [2m[0.00ms][0m
+        [32m✓[39m [2mreturns stored email[0m
     set
-      [31m![39m stores a new user [31m[error][39m
-    worker unavailable (spawn or hook replay failed)
+      [32m✓[39m stores a new user [2m[0.00ms][0m
+        [32m✓[39m [2mstores email under user key[0m
 
- [2mTest Files[0m  [1m[31m1 ran[39m[0m [2m(1)[0m
-      [2mTests[0m  [1m[31m2 error[39m[0m [2m(2)[0m
+ [2mTest Files[0m  [1m[32m1 passed[39m[0m [2m(1)[0m
+      [2mTests[0m  [1m[32m2 passed[39m[0m [2m(2)[0m
    [2mStart at[0m  10:02:24
    [2mDuration[0m  36.36ms [2m(discover 0.76ms, tests 35.60ms)[0m
 
- [1m[30;41m FAIL [0m[0m
+ [1m[30;42m PASS [0m[0m
 ```
 
 <!-- REPORTER:text:END -->

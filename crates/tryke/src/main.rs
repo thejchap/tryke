@@ -53,9 +53,15 @@ fn build_reporter(
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    env_logger::Builder::new()
-        .filter_level(cli.verbose.log_level_filter())
-        .init();
+    // `Builder::new()` ignores `RUST_LOG`, so consumers (e.g. the VS Code
+    // extension setting `RUST_LOG=tryke=info`) never see any output. Use
+    // `from_env` so the env var wins when set, while `-v`/`-q` still sets
+    // the default when it isn't.
+    env_logger::Builder::from_env(
+        env_logger::Env::default()
+            .default_filter_or(cli.verbose.log_level_filter().to_string()),
+    )
+    .init();
     debug!("{cli:?}");
 
     let verbosity = match cli.verbose.log_level() {

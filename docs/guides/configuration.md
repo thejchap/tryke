@@ -41,6 +41,19 @@ Roots earlier in the list take precedence. Roots that don't resolve to a file on
 
 This only affects absolute imports (`from foo.bar import x`). Relative imports (`from .sibling import x`) always resolve from the importing file's directory and are unaffected.
 
+### `python`
+
+Path to the Python interpreter used to spawn worker processes. Tryke does not enforce `requires-python` — that is the package manager's job (uv, pip, poetry, hatch). Whatever interpreter you point at is the one that runs your tests.
+
+```toml
+[tool.tryke]
+python = ".venv/bin/python3"
+```
+
+Defaults to `python` on Windows and `python3` on Unix from `PATH`.
+
+**Path resolution.** A value with a path separator (e.g., `.venv/bin/python3`) is treated as a filesystem path; bare names (e.g., `python3`, `pypy`) are looked up via `PATH` exactly like `execvp` / `CreateProcess`. Relative paths are anchored to the directory containing `pyproject.toml`, not the cwd, so `python = ".venv/bin/python3"` keeps working when tryke is invoked from a sibling directory or a script. Absolute paths and Windows drive-relative values (e.g., `C:foo\python.exe`) are passed through unchanged.
+
 ## CLI overrides
 
 ### `--exclude` / `-e`

@@ -213,31 +213,11 @@ mod tests {
     use tryke_reporter::{
         DotReporter, JSONReporter, JUnitReporter, NextReporter, SugarReporter, TextReporter,
     };
+    use tryke_test_support::python_bin as test_python_bin;
     use tryke_types::TestOutcome;
 
     use super::*;
     use crate::discovery::{discover_tests, resolved_excludes};
-
-    /// Use the workspace's venv interpreter if present, otherwise fall back
-    /// to a bare-name lookup on `PATH`. Tests need a Python that satisfies
-    /// the project's `requires-python`; locally the uv-managed venv
-    /// covers that, and CI runs nextest under `uv run` so the venv is
-    /// already on `PATH`. Venv layout and the bare fallback both differ
-    /// per OS — Windows uses `Scripts/python.exe` + `python`, Unix uses
-    /// `bin/python3` + `python3` — matching `tryke_config::default_python`.
-    fn test_python_bin() -> String {
-        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let (venv, fallback) = if cfg!(windows) {
-            (workspace.join(".venv/Scripts/python.exe"), "python")
-        } else {
-            (workspace.join(".venv/bin/python3"), "python3")
-        };
-        if venv.exists() {
-            venv.to_string_lossy().into_owned()
-        } else {
-            fallback.to_owned()
-        }
-    }
 
     async fn run_cycle(
         reporter: &mut dyn Reporter,

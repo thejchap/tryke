@@ -51,4 +51,5 @@ tryke_discovery = { path = "crates/tryke_discovery" }
 tryke_reporter = { path = "crates/tryke_reporter" }
 tryke_runner = { path = "crates/tryke_runner" }
 tryke_server = { path = "crates/tryke_server" }
+tryke_test_support = { path = "crates/tryke_test_support" }
 tryke_types = { path = "crates/tryke_types" }

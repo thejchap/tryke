@@ -14,7 +14,7 @@ Workers are spawned with whatever `python` (Windows) or `python3`
 before invoking the runner:
 
 ```bash
-uv run cargo run test --reporter llm
+uv run cargo run -- test --reporter llm
 ```
 
 ## running rust tests

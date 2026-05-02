@@ -234,9 +234,16 @@ pub enum Commands {
         /// to `python` on Windows / `python3` on Unix from `PATH`. The
         /// interpreter is the user's responsibility — tryke does not
         /// validate it. Activate the appropriate venv (or use
-        /// `uv run tryke ...`) and the default will pick it up. Not
-        /// compatible with `--port`; configure the interpreter on the
-        /// server instead.
+        /// `uv run tryke ...`) and the default will pick it up.
+        ///
+        /// Relative `python` values in `pyproject.toml` (e.g.,
+        /// `.venv/bin/python3`) resolve against the directory containing
+        /// `pyproject.toml`, not the cwd. Bare names (`python3`, `pypy`)
+        /// are looked up via `PATH`. See the `Configuration` guide for
+        /// the full resolution rules.
+        ///
+        /// Not compatible with `--port`; configure the interpreter on
+        /// the server instead.
         #[arg(long, conflicts_with = "port")]
         python: Option<String>,
     },
@@ -270,6 +277,9 @@ pub enum Commands {
         ///
         /// Overrides `[tool.tryke] python` in `pyproject.toml`. Defaults
         /// to `python` on Windows / `python3` on Unix from `PATH`.
+        /// Relative values in `pyproject.toml` resolve against the
+        /// directory containing `pyproject.toml`; bare names go through
+        /// `PATH`. See the `Configuration` guide for the full rules.
         #[arg(long)]
         python: Option<String>,
     },

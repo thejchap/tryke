@@ -311,12 +311,16 @@ mod tests {
     use super::*;
 
     fn test_python_bin() -> String {
-        let venv =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.venv/bin/python3");
+        let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let (venv, fallback) = if cfg!(windows) {
+            (workspace.join(".venv/Scripts/python.exe"), "python")
+        } else {
+            (workspace.join(".venv/bin/python3"), "python3")
+        };
         if venv.exists() {
             venv.to_string_lossy().into_owned()
         } else {
-            "python3".to_owned()
+            fallback.to_owned()
         }
     }
 

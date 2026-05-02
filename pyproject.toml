@@ -65,11 +65,6 @@ exclude = ["benchmarks/suites", "demo"]
 # Without this, `from tryke.worker import ...` in tests/ would not
 # resolve to python/tryke/worker.py in the import graph.
 src = [".", "python"]
-# Use the project's uv-managed venv for spawning workers. CI hosts and
-# system installs commonly expose a `python3` that's older than this
-# project's `requires-python` floor; pinning to `.venv/bin/python3`
-# keeps `cargo run test` working out of the box after `uv sync`.
-python = ".venv/bin/python3"
 
 [tool.maturin]
 bindings = "bin"

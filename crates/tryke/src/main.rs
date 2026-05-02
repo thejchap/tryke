@@ -53,18 +53,26 @@ fn build_reporter(
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    env_logger::Builder::new()
-        .filter_level(cli.verbose.log_level_filter())
-        .init();
+    let cli_filter = cli.verbose.log_level_filter();
+    let tryke_log = env::var("TRYKE_LOG").ok();
+    // Rust-side default for env_logger when `RUST_LOG` is unset. `RUST_LOG`
+    // wins natively because we use `Builder::from_env`. Precedence chain:
+    // `RUST_LOG` > `TRYKE_LOG` > `-v`/`-q` flag > `warn`.
+    let rust_default = tryke_config::rust_log_default(tryke_log.as_deref(), cli_filter);
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or(rust_default.as_str().to_ascii_lowercase()),
+    )
+    .init();
     debug!("{cli:?}");
 
-    let verbosity = match cli.verbose.log_level() {
-        Some(log::Level::Info) | Some(log::Level::Debug) | Some(log::Level::Trace) => {
-            Verbosity::Verbose
-        }
-        Some(log::Level::Error) | None => Verbosity::Quiet,
-        _ => Verbosity::Normal,
-    };
+    // Cross-language verbosity for spawned python workers. `RUST_LOG` is
+    // intentionally not consulted (its per-module filter syntax doesn't
+    // map onto a python log level); `TRYKE_LOG` is the umbrella knob and
+    // `-v` only propagates when the user explicitly asked for more
+    // verbosity than the `Warn` default.
+    let worker_log = tryke_config::worker_log_level(tryke_log.as_deref(), cli_filter);
+
+    let verbosity = Verbosity::from_level_filter(cli_filter);
 
     let rt = tokio::runtime::Runtime::new()?;
     match &cli.command {
@@ -110,6 +118,7 @@ fn main() -> Result<()> {
                     &mut *rep,
                     Some(root_path),
                     &resolved_python,
+                    worker_log,
                     &excludes,
                     &test_filter,
                     resolved_maxfail,
@@ -175,6 +184,7 @@ fn main() -> Result<()> {
                     &mut *rep,
                     root_path,
                     &resolved_python,
+                    worker_log,
                     tests,
                     &discovered.hooks,
                     resolved_maxfail,
@@ -200,7 +210,8 @@ fn main() -> Result<()> {
             let excludes = resolved_excludes(&root_path, exclude, include);
             let config = tryke_config::load_effective_config(&root_path);
             let resolved_python = tryke_config::resolve_python(python.as_deref(), &config);
-            let server = tryke_server::Server::new(*port, root_path, excludes, resolved_python);
+            let server =
+                tryke_server::Server::new(*port, root_path, excludes, resolved_python, worker_log);
             rt.block_on(server.run())
         }
         Commands::Graph {
@@ -377,26 +388,14 @@ mod tests {
     #[test]
     fn test_verbose_flag_drives_verbose_output() {
         let cli = Cli::try_parse_from(["tryke", "test", "-v"]).unwrap();
-        let verbosity = match cli.verbose.log_level() {
-            Some(log::Level::Info) | Some(log::Level::Debug) | Some(log::Level::Trace) => {
-                Verbosity::Verbose
-            }
-            Some(log::Level::Error) | None => Verbosity::Quiet,
-            _ => Verbosity::Normal,
-        };
+        let verbosity = Verbosity::from_level_filter(cli.verbose.log_level_filter());
         assert!(matches!(verbosity, Verbosity::Verbose));
     }
 
     #[test]
     fn test_quiet_flag_drives_quiet_output() {
         let cli = Cli::try_parse_from(["tryke", "test", "-q"]).unwrap();
-        let verbosity = match cli.verbose.log_level() {
-            Some(log::Level::Info) | Some(log::Level::Debug) | Some(log::Level::Trace) => {
-                Verbosity::Verbose
-            }
-            Some(log::Level::Error) | None => Verbosity::Quiet,
-            _ => Verbosity::Normal,
-        };
+        let verbosity = Verbosity::from_level_filter(cli.verbose.log_level_filter());
         assert!(matches!(verbosity, Verbosity::Quiet));
     }
 

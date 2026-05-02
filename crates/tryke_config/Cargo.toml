@@ -10,6 +10,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+log = "0.4"
 serde = { workspace = true }
 toml = { workspace = true }
 

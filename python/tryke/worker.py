@@ -851,15 +851,26 @@ class Worker:
 
 
 def _configure_logging_from_env() -> None:
-    """Opt-in worker logging via ``TRYKE_WORKER_LOG``.
+    """Opt-in worker logging via ``TRYKE_LOG``.
 
     Off by default so normal test runs don't emit anything on stderr.
-    Set ``TRYKE_WORKER_LOG=DEBUG`` (or ``INFO`` / ``TRACE``) before
-    invoking ``tryke test``/``tryke test --watch``/``tryke server`` to
-    trace module registration and dispatch. Output goes to stderr so it
-    never contaminates the JSON-RPC stream on stdout.
+    The rust runner sets ``TRYKE_LOG=<level>`` on the worker env when
+    ``-v`` / ``-q`` or the ``TRYKE_LOG`` env var asks for cross-language
+    verbosity, so users typically don't set this directly.
+
+    Accepts ``DEBUG`` / ``INFO`` / ``WARN`` / ``ERROR`` / ``TRACE``.
+    Output goes to stderr so it never contaminates the JSON-RPC stream
+    on stdout.
+
+    The legacy ``TRYKE_WORKER_LOG`` name is honored as a deprecated
+    alias (one cycle) so existing shell exports keep working; a single
+    deprecation line is logged when only the old name is set.
     """
-    level_name = os.environ.get("TRYKE_WORKER_LOG", "").strip().upper()
+    level_name = os.environ.get("TRYKE_LOG", "").strip().upper()
+    legacy_name = os.environ.get("TRYKE_WORKER_LOG", "").strip().upper()
+    use_legacy = not level_name and bool(legacy_name)
+    if use_legacy:
+        level_name = legacy_name
     if not level_name:
         return
     # Map TRACE to DEBUG since stdlib logging has no TRACE level.
@@ -875,6 +886,11 @@ def _configure_logging_from_env() -> None:
     _log.addHandler(handler)
     _log.setLevel(level)
     _log.propagate = False
+    if use_legacy:
+        _log.warning(
+            "TRYKE_WORKER_LOG is deprecated; use TRYKE_LOG instead "
+            "(it propagates to both rust and python workers)"
+        )
 
 
 def main() -> None:

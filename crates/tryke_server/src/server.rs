@@ -1,7 +1,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use bytes::Bytes;
-use log::debug;
+use log::{LevelFilter, debug};
 use tokio::{
     net::TcpListener,
     sync::{Mutex, broadcast},
@@ -20,16 +20,24 @@ pub struct Server {
     root: PathBuf,
     excludes: Vec<String>,
     python: String,
+    log_level: LevelFilter,
 }
 
 impl Server {
     #[must_use]
-    pub fn new(port: u16, root: PathBuf, excludes: Vec<String>, python: String) -> Self {
+    pub fn new(
+        port: u16,
+        root: PathBuf,
+        excludes: Vec<String>,
+        python: String,
+        log_level: LevelFilter,
+    ) -> Self {
         Self {
             port,
             root,
             excludes,
             python,
+            log_level,
         }
     }
 
@@ -42,7 +50,12 @@ impl Server {
     #[expect(clippy::missing_errors_doc)]
     pub async fn run_on_listener(self, listener: TcpListener) -> anyhow::Result<()> {
         let size = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
-        let pool = Arc::new(WorkerPool::new(size, &self.python, &self.root));
+        let pool = Arc::new(WorkerPool::new(
+            size,
+            &self.python,
+            &self.root,
+            self.log_level,
+        ));
         pool.warm().await;
 
         // Held across the full duration of a single `run` so concurrent
@@ -155,6 +168,7 @@ mod tests {
 
     use std::time::Duration;
 
+    use log::LevelFilter;
     use tokio::{
         io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
         net::{TcpListener, TcpStream},
@@ -172,7 +186,7 @@ mod tests {
         let root = dir.path().to_path_buf();
         let python = test_python_bin();
         tokio::spawn(async move {
-            Server::new(port, root, vec![], python)
+            Server::new(port, root, vec![], python, LevelFilter::Off)
                 .run_on_listener(listener)
                 .await
                 .unwrap();

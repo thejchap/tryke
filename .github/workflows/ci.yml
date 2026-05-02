@@ -72,7 +72,7 @@ jobs:
         with:
           tool: nextest
       - run: cargo build --verbose
-      - run: cargo nextest run --workspace --all-features
+      - run: uv run cargo nextest run --workspace --all-features
       - run: uv run cargo run -- test
 
   ci:

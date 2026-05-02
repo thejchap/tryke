@@ -422,7 +422,7 @@ mod tests {
 
     fn test_python_bin() -> String {
         let (venv, fallback) = if cfg!(windows) {
-            (workspace_root().join(".venv/Scripts/python.exe"), "python")
+            (workspace_root().join(".venv/Scripts/python.exe"), "python3")
         } else {
             (workspace_root().join(".venv/bin/python3"), "python3")
         };

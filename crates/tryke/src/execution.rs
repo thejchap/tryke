@@ -223,15 +223,16 @@ mod tests {
     use crate::discovery::{discover_tests, resolved_excludes};
 
     /// Use the workspace's venv interpreter if present, otherwise fall back
-    /// to `python` / `python3` on PATH. Tests need a Python that satisfies
-    /// the project's `requires-python`; locally the uv-managed venv covers
+    /// to `python3` on PATH. Tests need a Python that satisfies the
+    /// project's `requires-python`; locally the uv-managed venv covers
     /// that, while CI relies on `actions/setup-python` putting a matching
-    /// interpreter on PATH. Layout differs per OS — Windows venvs use
-    /// `Scripts/python.exe`, Unix uses `bin/python3`.
+    /// `python3` on PATH (it provides one on Windows too). Venv layout
+    /// differs per OS — Windows uses `Scripts/python.exe`, Unix uses
+    /// `bin/python3`.
     fn test_python_bin() -> String {
         let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let (venv, fallback) = if cfg!(windows) {
-            (workspace.join(".venv/Scripts/python.exe"), "python")
+            (workspace.join(".venv/Scripts/python.exe"), "python3")
         } else {
             (workspace.join(".venv/bin/python3"), "python3")
         };

@@ -28,7 +28,8 @@ impl Default for DiscoveryConfig {
 pub struct TrykeConfig {
     pub discovery: DiscoveryConfig,
     /// Path to the Python interpreter used to spawn worker processes.
-    /// `None` means fall back to `python3` on `PATH`.
+    /// `None` means fall back to `python` on Windows / `python3` on Unix
+    /// (per `default_python()`).
     pub python: Option<String>,
 }
 

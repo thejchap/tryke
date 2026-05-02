@@ -166,7 +166,7 @@ mod tests {
     fn test_python_bin() -> String {
         let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let (venv, fallback) = if cfg!(windows) {
-            (workspace.join(".venv/Scripts/python.exe"), "python3")
+            (workspace.join(".venv/Scripts/python.exe"), "python")
         } else {
             (workspace.join(".venv/bin/python3"), "python3")
         };

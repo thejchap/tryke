@@ -9,8 +9,9 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 ## running python tests
 
-Workers are spawned with whatever `python3` is on `PATH`, so activate
-the project venv (or use `uv run`) before invoking the runner:
+Workers are spawned with whatever `python` (Windows) or `python3`
+(Unix) is on `PATH`, so activate the project venv (or use `uv run`)
+before invoking the runner:
 
 ```bash
 uv run cargo run test --reporter llm

@@ -136,7 +136,7 @@ tryke server [OPTIONS]
 
   Path to the Python interpreter used to spawn worker processes.
 
-  Overrides `[tool.tryke] python` in `pyproject.toml`. Defaults to `python3` on `PATH`.
+  Overrides `[tool.tryke] python` in `pyproject.toml`. Defaults to `python` on Windows / `python3` on Unix from `PATH`.
 
 - `-q`, `--quiet`
 
@@ -279,7 +279,7 @@ tryke test [OPTIONS] [PATHS]...
 
   Path to the Python interpreter used to spawn worker processes.
 
-  Overrides `[tool.tryke] python` in `pyproject.toml`. Defaults to `python3` on `PATH`. The interpreter is the user's responsibility — tryke does not validate it. Activate the appropriate venv (or use `uv run tryke ...`) and the default will pick it up. Not compatible with `--port`; configure the interpreter on the server instead.
+  Overrides `[tool.tryke] python` in `pyproject.toml`. Defaults to `python` on Windows / `python3` on Unix from `PATH`. The interpreter is the user's responsibility — tryke does not validate it. Activate the appropriate venv (or use `uv run tryke ...`) and the default will pick it up. Not compatible with `--port`; configure the interpreter on the server instead.
 
 - `-q`, `--quiet`
 

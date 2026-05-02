@@ -162,7 +162,12 @@ def _run(reporter: str, extra: list[str]) -> str:
     ]
     captured = ""
     captured_err = ""
-    last_returncode = 0
+    # Run twice so the second invocation hits a warm discovery cache;
+    # the second run's stdout is what we record. Validate every run —
+    # `demo/sample.py` is all-passing, so any non-zero exit means a real
+    # regression (test failure, worker spawn fail, hook replay crash,
+    # etc.). Bail on the first such failure rather than silently masking
+    # it with a successful retry.
     for _ in range(2):
         result = subprocess.run(  # noqa: S603
             cmd,
@@ -174,17 +179,13 @@ def _run(reporter: str, extra: list[str]) -> str:
         )
         captured = result.stdout
         captured_err = result.stderr
-        last_returncode = result.returncode
-    # `demo/sample.py` is all-passing — any non-zero exit means a real
-    # regression (test failure, worker spawn fail, hook replay crash,
-    # etc.) and we'd be committing broken sample output. Refuse.
-    if last_returncode != 0:
-        sys.stderr.write(
-            f"reporter {reporter!r} exited with code {last_returncode}; "
-            f"refusing to commit broken sample output.\n"
-            f"--- stdout ---\n{captured}\n--- stderr ---\n{captured_err}\n"
-        )
-        sys.exit(1)
+        if result.returncode != 0:
+            sys.stderr.write(
+                f"reporter {reporter!r} exited with code {result.returncode}; "
+                f"refusing to commit broken sample output.\n"
+                f"--- stdout ---\n{captured}\n--- stderr ---\n{captured_err}\n"
+            )
+            sys.exit(1)
     return _normalize(captured)
 
 

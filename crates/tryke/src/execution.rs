@@ -219,16 +219,16 @@ mod tests {
     use crate::discovery::{discover_tests, resolved_excludes};
 
     /// Use the workspace's venv interpreter if present, otherwise fall back
-    /// to `python3` on PATH. Tests need a Python that satisfies the
-    /// project's `requires-python`; locally the uv-managed venv covers
-    /// that, while CI relies on `actions/setup-python` putting a matching
-    /// `python3` on PATH (it provides one on Windows too). Venv layout
-    /// differs per OS — Windows uses `Scripts/python.exe`, Unix uses
-    /// `bin/python3`.
+    /// to a bare-name lookup on `PATH`. Tests need a Python that satisfies
+    /// the project's `requires-python`; locally the uv-managed venv
+    /// covers that, and CI runs nextest under `uv run` so the venv is
+    /// already on `PATH`. Venv layout and the bare fallback both differ
+    /// per OS — Windows uses `Scripts/python.exe` + `python`, Unix uses
+    /// `bin/python3` + `python3` — matching `tryke_config::default_python`.
     fn test_python_bin() -> String {
         let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let (venv, fallback) = if cfg!(windows) {
-            (workspace.join(".venv/Scripts/python.exe"), "python3")
+            (workspace.join(".venv/Scripts/python.exe"), "python")
         } else {
             (workspace.join(".venv/bin/python3"), "python3")
         };
@@ -485,7 +485,7 @@ def test_failing():
     }
 
     #[tokio::test]
-    async fn report_cycle_returns_err_when_tests_fail() {
+    async fn report_cycle_summary_reports_failures() {
         let python_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../python")
             .canonicalize()

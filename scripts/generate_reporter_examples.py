@@ -143,10 +143,6 @@ def _normalize(text: str) -> str:
     return re.sub(r'time="\d+(?:\.\d+)?"', _junit_time, text)
 
 
-# `tryke test` exit codes — see `exit_code_for` in `crates/tryke/src/execution.rs`.
-TRYKE_EXIT_INFRA_ERROR = 2
-
-
 def _run(reporter: str, extra: list[str]) -> str:
     env = os.environ.copy()
     env["FORCE_COLOR"] = "1"
@@ -179,15 +175,13 @@ def _run(reporter: str, extra: list[str]) -> str:
         captured = result.stdout
         captured_err = result.stderr
         last_returncode = result.returncode
-    # tryke distinguishes test failures (exit 1) from infrastructure
-    # errors like worker spawn / hook replay failures (exit 2). The
-    # demo's `sample.py` has intentional failing tests, so exit 1 is
-    # expected and the rendered docs are meant to cover failure output.
-    # Exit 2 means we'd be committing broken sample output — refuse.
-    if last_returncode == TRYKE_EXIT_INFRA_ERROR:
+    # `demo/sample.py` is all-passing — any non-zero exit means a real
+    # regression (test failure, worker spawn fail, hook replay crash,
+    # etc.) and we'd be committing broken sample output. Refuse.
+    if last_returncode != 0:
         sys.stderr.write(
-            f"reporter {reporter!r} exited with code {TRYKE_EXIT_INFRA_ERROR} "
-            f"(infrastructure error); refusing to commit broken sample output.\n"
+            f"reporter {reporter!r} exited with code {last_returncode}; "
+            f"refusing to commit broken sample output.\n"
             f"--- stdout ---\n{captured}\n--- stderr ---\n{captured_err}\n"
         )
         sys.exit(1)

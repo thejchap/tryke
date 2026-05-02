@@ -205,28 +205,6 @@ pub async fn report_cycle(
     Ok(summary)
 }
 
-/// Map a `RunSummary` to a process exit code. The `cargo run -- test`
-/// step in CI (and tooling like `scripts/generate_reporter_examples.py`)
-/// rely on this to distinguish "tests had real failures" from "the
-/// runner couldn't spawn or talk to its workers" without scraping
-/// reporter output.
-///
-/// - `0` — every test passed (or was skipped/xfailed/todo).
-/// - `1` — at least one test reported a failure.
-/// - `2` — at least one test surfaced an `Error` outcome (worker spawn
-///   failed, RPC died, hook replay crashed, …). Takes precedence over
-///   `1` because infrastructure issues hide test results.
-#[must_use]
-pub fn exit_code_for(summary: &RunSummary) -> i32 {
-    if summary.errors > 0 {
-        2
-    } else if summary.failed > 0 {
-        1
-    } else {
-        0
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -540,48 +518,6 @@ def test_failing():
         .await
         .expect("report_cycle should not error on test failures");
         assert_eq!(summary.failed, 1, "expected one failed test");
-        assert_eq!(exit_code_for(&summary), 1, "expected exit code 1");
-    }
-
-    fn empty_summary() -> RunSummary {
-        RunSummary {
-            passed: 0,
-            failed: 0,
-            skipped: 0,
-            errors: 0,
-            xfailed: 0,
-            todo: 0,
-            duration: std::time::Duration::ZERO,
-            discovery_duration: None,
-            test_duration: None,
-            file_count: 0,
-            start_time: None,
-            changed_selection: None,
-        }
-    }
-
-    #[test]
-    fn exit_code_for_handles_pass_fail_error() {
-        let pass = RunSummary {
-            passed: 1,
-            ..empty_summary()
-        };
-        let fail = RunSummary {
-            failed: 1,
-            ..empty_summary()
-        };
-        let err = RunSummary {
-            errors: 1,
-            ..empty_summary()
-        };
-        let both = RunSummary {
-            failed: 1,
-            errors: 1,
-            ..empty_summary()
-        };
-        assert_eq!(exit_code_for(&pass), 0);
-        assert_eq!(exit_code_for(&fail), 1);
-        assert_eq!(exit_code_for(&err), 2);
-        assert_eq!(exit_code_for(&both), 2, "errors take precedence");
+        assert_eq!(summary.passed, 0);
     }
 }

@@ -7,7 +7,7 @@ use tryke::cli::{Cli, Commands, ReporterFormat};
 use tryke::discovery::{
     discover_tests, discover_tests_changed_first, discover_tests_for_paths, resolved_excludes,
 };
-use tryke::execution::{exit_code_for, run_tests};
+use tryke::execution::run_tests;
 use tryke::graph::{run_fixture_graph, run_graph};
 use tryke::watch::run_watch;
 use tryke_reporter::{
@@ -183,9 +183,8 @@ fn main() -> Result<()> {
                     Some(discovery_duration),
                     changed_selection,
                 ))?;
-                let code = exit_code_for(&summary);
-                if code != 0 {
-                    std::process::exit(code);
+                if summary.failed > 0 || summary.errors > 0 {
+                    std::process::exit(1);
                 }
                 Ok(())
             }

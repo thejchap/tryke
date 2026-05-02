@@ -490,7 +490,7 @@ fn is_tryke_test_cases_decorator(expr: &Expr, body: &[Stmt], aliases: &TrykeAlia
     if attr.attr.id.as_str() != "cases" {
         return false;
     }
-    is_bare_test_or_qualified(&attr.value, body, aliases)
+    is_test_or_call_wrapper(&attr.value, body, aliases)
 }
 
 /// Recognises bare `test` / `tryke.test` plus the marker attribute forms
@@ -522,6 +522,17 @@ fn is_bare_test_or_qualified(expr: &Expr, body: &[Stmt], aliases: &TrykeAliases)
                 && matches!(&*a.value, Expr::Name(n) if aliases.is_module(n.id.as_str()))
         }
         _ => false,
+    }
+}
+
+/// Same as :fn:`is_bare_test_or_qualified` but also accepts a call wrapper —
+/// `test("label")` / `test(name="…")` / `tryke.test(...)` — so
+/// `@test("label").cases(...)` is recognised as a cases decorator with the
+/// label flowing through to discovery as a display name.
+fn is_test_or_call_wrapper(expr: &Expr, body: &[Stmt], aliases: &TrykeAliases) -> bool {
+    match expr {
+        Expr::Call(c) => is_bare_test_or_qualified(&c.func, body, aliases),
+        _ => is_bare_test_or_qualified(expr, body, aliases),
     }
 }
 
@@ -1450,7 +1461,9 @@ fn collect_cases_from_func(
         TestModifier::SkipIf | TestModifier::None => (None, None, None),
     };
 
-    let display_name = extract_docstring(&func.body);
+    let display_name =
+        extract_cases_display_name(&cases_dec.expression).or_else(|| extract_docstring(&func.body));
+    let tags = extract_cases_tags(&cases_dec.expression);
     let line_number = u32::try_from(line_index.line_index(func.range.start()).get()).ok();
     let file_path = Some(file.strip_prefix(root).unwrap_or(file).to_path_buf());
     let module_path = path_to_module(root, file);
@@ -1467,13 +1480,44 @@ fn collect_cases_from_func(
             skip: case.skip.or_else(|| fn_skip.clone()),
             todo: case.todo.or_else(|| fn_todo.clone()),
             xfail: case.xfail.or_else(|| fn_xfail.clone()),
-            tags: vec![],
+            tags: tags.clone(),
             groups: groups.to_vec(),
             case_label: Some(case.label),
             case_index: u32::try_from(i).ok(),
             ..TestItem::default()
         });
     }
+}
+
+/// Extract a function-level display name from a `@test("label").cases(...)`
+/// decorator. Returns `None` for the bare `@test.cases(...)` form, which has
+/// no inner call to inspect.
+fn extract_cases_display_name(expr: &Expr) -> Option<String> {
+    let Expr::Call(call) = expr else {
+        return None;
+    };
+    let Expr::Attribute(attr) = &*call.func else {
+        return None;
+    };
+    if attr.attr.id.as_str() != "cases" {
+        return None;
+    }
+    extract_decorator_name(&attr.value)
+}
+
+/// Extract a `tags=[...]` kwarg from the inner `test(...)` call of a
+/// `@test(tags=[...]).cases(...)` decorator.
+fn extract_cases_tags(expr: &Expr) -> Vec<String> {
+    let Expr::Call(call) = expr else {
+        return vec![];
+    };
+    let Expr::Attribute(attr) = &*call.func else {
+        return vec![];
+    };
+    if attr.attr.id.as_str() != "cases" {
+        return vec![];
+    }
+    extract_decorator_tags(&attr.value)
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -2210,6 +2254,58 @@ def fn(n):
         // function-level skip is still inherited since xfail != skip.
         assert_eq!(items[1].skip.as_deref(), Some("default skip"));
         assert_eq!(items[1].xfail.as_deref(), Some("override"));
+    }
+
+    #[test]
+    fn cases_with_label_emits_display_name_per_case() {
+        let source = r#"@test("basic").cases(
+    test.case("1 + 1", a=1, b=1, expected=2),
+    test.case("1 + 2", a=1, b=2, expected=3),
+)
+def addition(a, b, expected):
+    pass
+"#;
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
+        assert_eq!(items.len(), 2);
+        for item in &items {
+            assert_eq!(item.display_name.as_deref(), Some("basic"));
+            assert_eq!(item.name, "addition");
+        }
+        let labels: Vec<_> = items
+            .iter()
+            .map(|i| i.case_label.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(labels, vec!["1 + 1", "1 + 2"]);
+    }
+
+    #[test]
+    fn cases_with_label_kwarg_form_emits_display_name() {
+        let source = r#"@test(name="square").cases(zero={"n": 0}, one={"n": 1})
+def fn(n):
+    pass
+"#;
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
+        assert_eq!(items.len(), 2);
+        for item in &items {
+            assert_eq!(item.display_name.as_deref(), Some("square"));
+        }
+    }
+
+    #[test]
+    fn cases_with_label_inherits_tags() {
+        let source = r#"@test("slow path", tags=["slow"]).cases(a={}, b={})
+def fn():
+    pass
+"#;
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
+        assert_eq!(items.len(), 2);
+        for item in &items {
+            assert_eq!(item.tags, vec!["slow".to_string()]);
+            assert_eq!(item.display_name.as_deref(), Some("slow path"));
+        }
     }
 
     #[test]

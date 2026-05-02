@@ -303,6 +303,26 @@ def _validate_cases_table(table: CaseTable) -> None:
             raise TypeError(msg)
 
 
+def _make_cases_decorator(
+    positional: tuple[object, ...],
+    kwargs: dict[str, CaseArgs],
+) -> Callable[[_Fn], _Fn]:
+    """Build the runtime decorator shared by ``test.cases`` entry points.
+
+    Both ``_TestBuilder.cases`` and ``_TestDecorator.cases`` route through
+    here so the validation rules and stamping behaviour stay identical
+    across the bare and labelled spellings.
+    """
+    table = _build_cases_table(positional, kwargs)
+    _validate_cases_table(table)
+
+    def decorator(f: _Fn) -> _Fn:
+        _stamp_cases(f, table)
+        return f
+
+    return decorator
+
+
 def _build_cases_table(
     positional: tuple[object, ...],
     kwargs: dict[str, CaseArgs],
@@ -525,6 +545,62 @@ class _XfailMarker(_Marker, attr="__tryke_xfail__"):
         return decorator
 
 
+class _TestDecorator:
+    """Decorator returned by ``@test(...)`` when called with metadata.
+
+    Acts as a plain decorator (forwarding the decorated function unchanged
+    at runtime — the metadata is consumed by static discovery) and also
+    exposes :meth:`cases` so that ``@test("label").cases(...)`` parametrises
+    the test while keeping the function-level display name.
+    """
+
+    __slots__ = ()
+
+    def __call__(self, fn: _AnyTestFn, /) -> _AnyTestFn:
+        return fn
+
+    @overload
+    def cases[**P](
+        self,
+        *specs: _CaseSpec[P],
+    ) -> Callable[[Callable[P, None]], Callable[P, None]]: ...
+    @overload
+    def cases(
+        self,
+        positional: list[tuple[str, CaseArgs]],
+        /,
+    ) -> Callable[[_Fn], _Fn]: ...
+    @overload
+    def cases(
+        self,
+        /,
+        **kwargs: CaseArgs,
+    ) -> Callable[[_Fn], _Fn]: ...
+
+    def cases(
+        self,
+        *positional: object,
+        **kwargs: CaseArgs,
+    ) -> Callable[[_Fn], _Fn]:
+        """Parametrise a labelled test over multiple named cases.
+
+        Equivalent to :meth:`_TestBuilder.cases` but reachable through the
+        ``@test("label")`` decorator so callers can supply a function-level
+        display name and a case table in a single decoration.
+
+        Example:
+            ```python
+            @test("basic").cases(
+                test.case("1 + 1", a=1, b=1, expected=2),
+                test.case("1 + 2", a=1, b=2, expected=3),
+            )
+            def addition(a: int, b: int, expected: int) -> None:
+                expect(a + b).to_equal(expected)
+            ```
+        """
+        return _make_cases_decorator(positional, kwargs)
+
+
 class _TestBuilder:
     """Decorator for marking functions as tests.
 
@@ -561,7 +637,7 @@ class _TestBuilder:
     @overload
     def __call__(self, fn: _AnyTestFn, /) -> _AnyTestFn: ...
     @overload
-    def __call__(self, name: str, /) -> _Decorator: ...
+    def __call__(self, name: str, /) -> _TestDecorator: ...
     @overload
     def __call__(
         self,
@@ -570,7 +646,7 @@ class _TestBuilder:
         *,
         name: str | None = None,
         tags: list[str] | None = None,
-    ) -> _Decorator: ...
+    ) -> _TestDecorator: ...
 
     def __call__(
         self,
@@ -583,7 +659,10 @@ class _TestBuilder:
         """Register a function as a test.
 
         Can be used as a bare decorator (`@test`) or called with keyword
-        arguments (`@test(name="...", tags=[...])`) to set metadata.
+        arguments (`@test(name="...", tags=[...])`) to set metadata. The
+        parametrised form returns a :class:`_TestDecorator`, which acts as
+        a plain decorator and also exposes ``.cases(...)`` so labelled
+        tests can be parametrised in one decoration.
 
         Args:
             fn: The test function (when used as a bare decorator).
@@ -592,11 +671,7 @@ class _TestBuilder:
         """
         if callable(fn):
             return fn
-
-        def decorator(f: Callable[[], None]) -> Callable[[], None]:
-            return f
-
-        return decorator
+        return _TestDecorator()
 
     def case[**P](
         self,
@@ -684,14 +759,7 @@ class _TestBuilder:
             TypeError: If no cases are provided, forms are mixed, two
                 cases share a label, or cases disagree on key sets.
         """
-        table = _build_cases_table(positional, kwargs)
-        _validate_cases_table(table)
-
-        def decorator(f: _Fn) -> _Fn:
-            _stamp_cases(f, table)
-            return f
-
-        return decorator
+        return _make_cases_decorator(positional, kwargs)
 
     def skip_if(
         self,

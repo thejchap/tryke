@@ -53,3 +53,12 @@ def square(n: int, expected: int) -> None:
 )
 def upper(name: str, upper: str) -> None:
     expect(name.upper(), "uppercased name matches").to_equal(upper)
+
+
+@test("basic").cases(
+    test.case("1 + 1", a=1, b=1, expected=2),
+    test.case("1 + 2", a=1, b=2, expected=3),
+    test.case("1 + 3", a=1, b=3, expected=4),
+)
+def labelled_addition(a: int, b: int, expected: int) -> None:
+    expect(a + b, "a + b matches expected").to_equal(expected)

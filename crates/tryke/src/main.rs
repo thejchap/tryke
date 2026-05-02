@@ -2,7 +2,7 @@ use std::{env, time::Instant};
 
 use anyhow::Result;
 use clap::Parser;
-use log::debug;
+use log::{debug, warn};
 use tryke::cli::{Cli, Commands, ReporterFormat};
 use tryke::discovery::{
     discover_tests, discover_tests_changed_first, discover_tests_for_paths, resolved_excludes,
@@ -54,7 +54,16 @@ fn build_reporter(
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let cli_filter = cli.verbose.log_level_filter();
-    let tryke_log = env::var("TRYKE_LOG").ok();
+    // Resolve `TRYKE_LOG` with `TRYKE_WORKER_LOG` as a one-cycle
+    // deprecated alias. Doing the alias check here (rather than in the
+    // python worker) means the deprecation warning fires exactly once
+    // per `tryke` invocation — moving it to the worker side fired it
+    // once per spawned worker process, which spammed multi-worker pools
+    // and watch-mode restarts.
+    let tryke_log_legacy = env::var("TRYKE_WORKER_LOG").ok();
+    let tryke_log = env::var("TRYKE_LOG")
+        .ok()
+        .or_else(|| tryke_log_legacy.clone());
     // Rust-side default for env_logger when `RUST_LOG` is unset. `RUST_LOG`
     // wins natively because we use `Builder::from_env`. Precedence chain:
     // `RUST_LOG` > `TRYKE_LOG` > `-v`/`-q` flag > `warn`.
@@ -63,6 +72,12 @@ fn main() -> Result<()> {
         env_logger::Env::default().default_filter_or(rust_default.as_str().to_ascii_lowercase()),
     )
     .init();
+    if env::var("TRYKE_LOG").is_err() && tryke_log_legacy.is_some() {
+        warn!(
+            "TRYKE_WORKER_LOG is deprecated; use TRYKE_LOG instead \
+             (it propagates to both rust and python workers)"
+        );
+    }
     debug!("{cli:?}");
 
     // Cross-language verbosity for spawned python workers. `RUST_LOG` is
@@ -72,7 +87,12 @@ fn main() -> Result<()> {
     // verbosity than the `Warn` default.
     let worker_log = tryke_config::worker_log_level(tryke_log.as_deref(), cli_filter);
 
-    let verbosity = Verbosity::from_level_filter(cli_filter);
+    // Reporter UI verbosity follows the cross-language umbrella, not the
+    // raw CLI flag — otherwise `TRYKE_LOG=info` would light up logs but
+    // leave the text reporter in its `Normal` mode, contradicting the
+    // "single knob" promise. `RUST_LOG` is deliberately not consulted
+    // here: it's a rust-internal filter, not a user-facing UI knob.
+    let verbosity = Verbosity::from_level_filter(rust_default);
 
     let rt = tokio::runtime::Runtime::new()?;
     match &cli.command {

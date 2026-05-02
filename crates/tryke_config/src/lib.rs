@@ -341,10 +341,12 @@ mod tests {
         // `C:foo\python.exe` is drive-relative on Windows — it has a
         // `Component::Prefix` but no root and is not `is_absolute()`.
         // Rewriting it onto the config root would mangle the value.
+        // Written via a TOML literal string (single quotes) so backslashes
+        // are passed through verbatim, no escape processing.
         let dir = tempdir();
         fs::write(
             dir.path().join("pyproject.toml"),
-            "[tool.tryke]\npython = 'C:foo\\\\python.exe'\n",
+            "[tool.tryke]\npython = 'C:foo\\python.exe'\n",
         )
         .expect("write pyproject");
         let config = load_effective_config(dir.path());

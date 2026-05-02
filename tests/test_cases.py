@@ -191,6 +191,46 @@ with describe("test.cases composes with modifiers"):
         expect(x, "x equals -1 (expected to fail)").to_equal(-1)
 
 
+with describe("test.cases composes with @test(label)"):
+
+    @test("basic").cases(
+        test.case("1 + 1", a=1, b=1, expected=2),
+        test.case("1 + 2", a=1, b=2, expected=3),
+        test.case("1 + 3", a=1, b=3, expected=4),
+    )
+    def labelled_addition(a: int, b: int, expected: int) -> None:
+        expect(a + b, "a + b matches expected").to_equal(expected)
+
+    @test
+    def labelled_cases_stamp_attribute() -> None:
+        @test("basic").cases(
+            test.case("1 + 1", a=1, b=1, expected=2),
+            test.case("1 + 2", a=1, b=2, expected=3),
+        )
+        def fn(a: int, b: int, expected: int) -> None:  # noqa: ARG001
+            return
+
+        if not isinstance(fn, CasesMarked):
+            msg = "decorator should produce a CasesMarked function"
+            raise TypeError(msg)
+        labels = [e.label for e in fn.__tryke_cases__]
+        expect(labels, "labelled cases preserve order").to_equal(["1 + 1", "1 + 2"])
+
+    @test
+    def labelled_cases_kwargs_form() -> None:
+        @test(name="square").cases(zero={"n": 0}, one={"n": 1})
+        def fn(n: int) -> None:  # noqa: ARG001
+            return
+
+        if not isinstance(fn, CasesMarked):
+            msg = "decorator should produce a CasesMarked function"
+            raise TypeError(msg)
+        expect(
+            [e.label for e in fn.__tryke_cases__],
+            "kwargs labels preserved through @test(name=...).cases",
+        ).to_equal(["zero", "one"])
+
+
 with describe("test.cases rejects kwarg / fixture collision"):
 
     @test

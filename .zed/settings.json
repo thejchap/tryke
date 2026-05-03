@@ -1,0 +1,48 @@
+{
+  "inlay_hints": {
+    "enabled": true,
+    "show_background": true,
+    "show_parameter_hints": true,
+    "show_other_hints": true,
+    "show_value_hints": true,
+    "show_type_hints": true,
+  },
+  "languages": {
+    "Python": {
+      "format_on_save": "on",
+      "language_servers": [
+        "ty",
+        "!pyright",
+        "!basedpyright",
+        "ruff"
+      ],
+      "formatter": [
+        {
+          "code_action": "source.organizeImports.ruff",
+        },
+        {
+          "code_action": "source.fixAll.ruff",
+        },
+        {
+          "language_server": {
+            "name": "ruff",
+          },
+        },
+      ],
+      "enable_language_server": true,
+      "inlay_hints": {
+        "enabled": true,
+        "show_parameter_hints": true,
+        "show_other_hints": true,
+        "show_value_hints": true,
+        "show_type_hints": true,
+        "show_background": true,
+      },
+    },
+  },
+  "document_folding_ranges": "on",
+  "document_symbols": "on",
+  "semantic_tokens": "combined",
+  "format_on_save": "on",
+  "formatter": "language_server",
+}

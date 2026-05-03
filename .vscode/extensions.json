@@ -1,0 +1,9 @@
+{
+  "recommendations": [
+    "thejchap.tryke-vscode",
+    "astral-sh.ty",
+    "charliermarsh.ruff",
+    "fill-labs.dependi",
+    "rust-lang.rust-analyzer"
+  ]
+}

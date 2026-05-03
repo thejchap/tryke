@@ -29,5 +29,7 @@
   "ruff.fixAll": true,
   "ruff.lint.enable": true,
   "ruff.showSyntaxErrors": true,
-  "ruff.organizeImports": true
+  "ruff.organizeImports": true,
+  "explorer.excludeGitIgnore": true,
+  "ty.path": ["${workspaceFolder}/.venv/bin/ty"]
 }

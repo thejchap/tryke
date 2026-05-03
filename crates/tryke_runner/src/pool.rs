@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use log::{debug, trace};
+use log::{LevelFilter, debug, trace};
 
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::Stream;
@@ -57,8 +57,15 @@ pub struct WorkerPool {
 }
 
 impl WorkerPool {
+    /// Build a pool whose workers receive `TRYKE_LOG=<log_level>` on spawn.
+    ///
+    /// Pass `LevelFilter::Off` to leave workers silent (the env var is
+    /// then not set on the child, so the worker's
+    /// `_configure_logging_from_env` no-ops). Production callers use
+    /// `tryke_config::worker_log_level` to derive this from CLI flags
+    /// + the `TRYKE_LOG` env var.
     #[must_use]
-    pub fn new(size: usize, python_bin: &str, root: &Path) -> Self {
+    pub fn new(size: usize, python_bin: &str, root: &Path, log_level: LevelFilter) -> Self {
         let mut python_path = vec![root.to_path_buf()];
         // pyproject.toml declares python-source = "python" — add it to
         // PYTHONPATH so the tryke package is importable even without a venv.
@@ -66,7 +73,7 @@ impl WorkerPool {
         if src_dir.is_dir() {
             python_path.push(src_dir);
         }
-        Self::with_python_path(size, python_bin, root, &python_path)
+        Self::with_python_path(size, python_bin, root, &python_path, log_level)
     }
 
     #[must_use]
@@ -75,6 +82,7 @@ impl WorkerPool {
         python_bin: &str,
         root: &Path,
         python_path: &[PathBuf],
+        log_level: LevelFilter,
     ) -> Self {
         let size = size.max(1);
         let python_path = python_path.to_vec();
@@ -90,6 +98,7 @@ impl WorkerPool {
                 bin,
                 python_path.clone(),
                 root.clone(),
+                log_level,
                 work_rx,
                 ctrl_rx,
             ));
@@ -169,12 +178,13 @@ async fn ensure_worker<'a>(
     python_bin: &str,
     path_refs: &[&Path],
     root: &Path,
+    log_level: LevelFilter,
 ) -> Option<&'a mut WorkerProcess> {
     if state.process.is_some() {
         return state.process.as_mut();
     }
     trace!("worker_task: spawning process");
-    let mut w = match WorkerProcess::spawn(python_bin, path_refs, root) {
+    let mut w = match WorkerProcess::spawn(python_bin, path_refs, root, log_level) {
         Ok(w) => w,
         Err(e) => {
             debug!("worker_task: spawn failed: {e}");
@@ -205,10 +215,11 @@ async fn run_single_test(
     python_bin: &str,
     path_refs: &[&Path],
     root: &Path,
+    log_level: LevelFilter,
     test: tryke_types::TestItem,
     result_tx: &mpsc::UnboundedSender<TestResult>,
 ) {
-    let Some(w) = ensure_worker(state, python_bin, path_refs, root).await else {
+    let Some(w) = ensure_worker(state, python_bin, path_refs, root, log_level).await else {
         let _ = result_tx.send(TestResult {
             test,
             outcome: TestOutcome::Error {
@@ -255,6 +266,7 @@ async fn register_hooks_for_unit(
     python_bin: &str,
     path_refs: &[&Path],
     root: &Path,
+    log_level: LevelFilter,
     hooks: &[HookItem],
     tests: &[tryke_types::TestItem],
 ) {
@@ -292,7 +304,7 @@ async fn register_hooks_for_unit(
             .hook_cache
             .insert(test.module_path.clone(), params.clone());
 
-        let Some(w) = ensure_worker(state, python_bin, path_refs, root).await else {
+        let Some(w) = ensure_worker(state, python_bin, path_refs, root, log_level).await else {
             continue;
         };
         if let Err(e) = w.register_hooks(params).await {
@@ -309,12 +321,13 @@ async fn handle_ctrl(
     python_bin: &str,
     path_refs: &[&Path],
     root: &Path,
+    log_level: LevelFilter,
     ctrl: WorkerCtrl,
 ) {
     match ctrl {
         WorkerCtrl::Ping(ack_tx) => {
             trace!("worker_task: ping (pre-warm)");
-            let _ = ensure_worker(state, python_bin, path_refs, root).await;
+            let _ = ensure_worker(state, python_bin, path_refs, root, log_level).await;
             let _ = ack_tx.send(());
         }
         WorkerCtrl::Restart(ack_tx) => {
@@ -325,7 +338,7 @@ async fn handle_ctrl(
             // Eagerly respawn so the next Unit doesn't pay Python startup
             // latency. ensure_worker replays cached register_hooks against
             // the fresh process, mirroring the crash-recovery path.
-            let _ = ensure_worker(state, python_bin, path_refs, root).await;
+            let _ = ensure_worker(state, python_bin, path_refs, root, log_level).await;
             let _ = ack_tx.send(());
         }
     }
@@ -336,11 +349,21 @@ async fn handle_unit(
     python_bin: &str,
     path_refs: &[&Path],
     root: &Path,
+    log_level: LevelFilter,
     unit: WorkUnit,
     result_tx: mpsc::UnboundedSender<TestResult>,
 ) {
     if !unit.hooks.is_empty() {
-        register_hooks_for_unit(state, python_bin, path_refs, root, &unit.hooks, &unit.tests).await;
+        register_hooks_for_unit(
+            state,
+            python_bin,
+            path_refs,
+            root,
+            log_level,
+            &unit.hooks,
+            &unit.tests,
+        )
+        .await;
     }
     let finalize_modules: std::collections::HashSet<String> = if unit.hooks.is_empty() {
         std::collections::HashSet::new()
@@ -349,7 +372,10 @@ async fn handle_unit(
     };
     for test in unit.tests {
         trace!("worker_task: running test {}", test.name);
-        run_single_test(state, python_bin, path_refs, root, test, &result_tx).await;
+        run_single_test(
+            state, python_bin, path_refs, root, log_level, test, &result_tx,
+        )
+        .await;
     }
     for module in finalize_modules {
         if let Some(w) = state.process.as_mut()
@@ -364,6 +390,7 @@ async fn worker_task(
     python_bin: String,
     python_path: Vec<std::path::PathBuf>,
     root: PathBuf,
+    log_level: LevelFilter,
     work_rx: async_channel::Receiver<WorkerMsg>,
     mut ctrl_rx: mpsc::UnboundedReceiver<WorkerCtrl>,
 ) {
@@ -380,13 +407,21 @@ async fn worker_task(
             biased;
             ctrl = ctrl_rx.recv() => {
                 let Some(ctrl) = ctrl else { break };
-                handle_ctrl(&mut state, &python_bin, &path_refs, &root, ctrl).await;
+                handle_ctrl(&mut state, &python_bin, &path_refs, &root, log_level, ctrl).await;
             }
             msg = work_rx.recv() => {
                 match msg {
                     Ok(WorkerMsg::Unit(unit, result_tx)) => {
-                        handle_unit(&mut state, &python_bin, &path_refs, &root, unit, result_tx)
-                            .await;
+                        handle_unit(
+                            &mut state,
+                            &python_bin,
+                            &path_refs,
+                            &root,
+                            log_level,
+                            unit,
+                            result_tx,
+                        )
+                        .await;
                     }
                     Ok(WorkerMsg::Shutdown) | Err(_) => break,
                 }
@@ -492,6 +527,7 @@ def test_third(n: int = Depends(counter)) -> None:
             &test_python_bin(),
             dir.path(),
             &[dir.path().to_path_buf(), python_package_dir()],
+            LevelFilter::Off,
         );
         pool.warm().await;
 
@@ -576,6 +612,7 @@ def test_noop() -> None:
             &test_python_bin(),
             dir.path(),
             &[dir.path().to_path_buf(), python_package_dir()],
+            LevelFilter::Off,
         );
         pool.warm().await;
 
@@ -624,6 +661,7 @@ def test_noop() -> None:
             &test_python_bin(),
             dir.path(),
             &[dir.path().to_path_buf(), python_package_dir()],
+            LevelFilter::Off,
         );
         // No warm() — workers are not yet spawned.
         let restarted =

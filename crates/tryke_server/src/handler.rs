@@ -300,6 +300,7 @@ mod tests {
     use std::{fs, sync::Arc};
 
     use bytes::Bytes;
+    use log::LevelFilter;
     use tokio::{
         io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
         net::{TcpListener, TcpStream},
@@ -322,6 +323,7 @@ mod tests {
             1,
             &test_python_bin(),
             std::path::Path::new("."),
+            LevelFilter::Off,
         ))
     }
 
@@ -524,7 +526,12 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let dir = make_root();
         let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
-        let pool = Arc::new(WorkerPool::new(1, "python3", std::path::Path::new(".")));
+        let pool = Arc::new(WorkerPool::new(
+            1,
+            "python3",
+            std::path::Path::new("."),
+            LevelFilter::Off,
+        ));
 
         let (bcast_tx, _) = broadcast::channel::<Bytes>(64);
         let bcast_tx_clone = bcast_tx.clone();

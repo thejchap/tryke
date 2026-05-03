@@ -28,7 +28,7 @@ virtualenv so you can import and test the python bindings locally.
 
 ## python tests
 
-run `cargo run test` to test tryke's own python code, using tryke
+run `cargo run -- test` to test tryke's own python code, using tryke
 
 ## rust tests
 

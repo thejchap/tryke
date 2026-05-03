@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::Result;
 use console::{Key, Term};
-use log::debug;
+use log::{LevelFilter, debug};
 use tryke_discovery::Discoverer;
 use tryke_reporter::Reporter;
 use tryke_runner::{DistMode, WorkerPool};
@@ -115,6 +115,7 @@ pub async fn run_watch(
     reporter: &mut dyn Reporter,
     root: Option<&Path>,
     python: &str,
+    log_level: LevelFilter,
     excludes: &[String],
     test_filter: &TestFilter,
     maxfail: Option<usize>,
@@ -127,7 +128,7 @@ pub async fn run_watch(
     let mut discoverer = Discoverer::new_with_excludes(root, excludes);
 
     let pool_size = workers.unwrap_or_else(worker_pool_size);
-    let pool = WorkerPool::new(pool_size, python, root);
+    let pool = WorkerPool::new(pool_size, python, root, log_level);
     pool.warm().await;
 
     clear_if_tty();
@@ -252,6 +253,7 @@ mod tests {
             &test_python_bin(),
             dir.path(),
             &[dir.path().to_path_buf(), python_dir],
+            LevelFilter::Off,
         );
         // Returns () — the important behavior is that it does NOT propagate the
         // underlying `report_cycle` Err that `tryke test` relies on for exit code.

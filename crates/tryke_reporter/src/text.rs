@@ -22,6 +22,24 @@ pub enum Verbosity {
     Verbose,
 }
 
+impl Verbosity {
+    /// Map a `log::LevelFilter` (the resolved CLI/env verbosity) to the
+    /// reporter's UI knob. `Off` and `Error` mean the user asked for less
+    /// noise (e.g., `-q`); `Warn` is the default; anything more verbose
+    /// (`Info`/`Debug`/`Trace` from `-v`) flips the reporter into its
+    /// detailed mode.
+    #[must_use]
+    pub fn from_level_filter(filter: log::LevelFilter) -> Self {
+        match filter {
+            log::LevelFilter::Off | log::LevelFilter::Error => Self::Quiet,
+            log::LevelFilter::Warn => Self::Normal,
+            log::LevelFilter::Info | log::LevelFilter::Debug | log::LevelFilter::Trace => {
+                Self::Verbose
+            }
+        }
+    }
+}
+
 pub struct TextReporter<W: io::Write = io::Stdout> {
     writer: W,
     current_file: Option<PathBuf>,

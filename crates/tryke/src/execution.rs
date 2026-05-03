@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use log::LevelFilter;
 use tokio_stream::StreamExt;
 use tryke_reporter::Reporter;
 use tryke_runner::{DistMode, WorkerPool, partition_with_hooks};
@@ -15,6 +16,7 @@ pub async fn run_tests(
     reporter: &mut dyn Reporter,
     root: &std::path::Path,
     python: &str,
+    log_level: LevelFilter,
     tests: Vec<tryke_types::TestItem>,
     hooks: &[HookItem],
     maxfail: Option<usize>,
@@ -24,7 +26,7 @@ pub async fn run_tests(
     changed_selection: Option<ChangedSelectionSummary>,
 ) -> Result<RunSummary> {
     let pool_size = workers.unwrap_or_else(|| tests.len().min(worker_pool_size()));
-    let pool = WorkerPool::new(pool_size, python, root);
+    let pool = WorkerPool::new(pool_size, python, root, log_level);
     pool.warm().await;
     let summary = report_cycle(
         reporter,
@@ -250,6 +252,7 @@ mod tests {
             reporter,
             dir.path(),
             &test_python_bin(),
+            LevelFilter::Off,
             tests,
             &[],
             None,
@@ -317,6 +320,7 @@ mod tests {
             &test_python_bin(),
             dir.path(),
             &[dir.path().to_path_buf(), python_dir],
+            LevelFilter::Off,
         );
         assert!(
             run_cycle(&mut reporter, &mut discoverer, &pool)
@@ -331,7 +335,7 @@ mod tests {
         std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
         let mut discoverer = Discoverer::new(dir.path());
         let mut reporter = JSONReporter::with_writer(Vec::new());
-        let pool = WorkerPool::new(1, &test_python_bin(), dir.path());
+        let pool = WorkerPool::new(1, &test_python_bin(), dir.path(), LevelFilter::Off);
         assert!(
             run_cycle(&mut reporter, &mut discoverer, &pool)
                 .await
@@ -351,6 +355,7 @@ mod tests {
                 &mut reporter,
                 dir.path(),
                 &test_python_bin(),
+                LevelFilter::Off,
                 tests,
                 &[],
                 None,
@@ -398,6 +403,7 @@ def test_failing():
             &test_python_bin(),
             dir.path(),
             &[dir.path().to_path_buf(), python_dir],
+            LevelFilter::Off,
         );
         pool.warm().await;
         let units = partition_with_hooks(tests, &[], DistMode::Test).units;
@@ -446,6 +452,7 @@ def test_failing():
             &test_python_bin(),
             dir.path(),
             &[dir.path().to_path_buf(), python_dir],
+            LevelFilter::Off,
         );
         let result = report_cycle(
             &mut reporter,
@@ -484,6 +491,7 @@ def test_failing():
             &test_python_bin(),
             dir.path(),
             &[dir.path().to_path_buf(), python_dir],
+            LevelFilter::Off,
         );
         let summary = report_cycle(
             &mut reporter,

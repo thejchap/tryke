@@ -2180,6 +2180,7 @@ dependencies = [
 name = "tryke_config"
 version = "0.0.26"
 dependencies = [
+ "log",
  "serde",
  "tempfile",
  "toml",
@@ -2218,6 +2219,7 @@ dependencies = [
  "console 0.15.11",
  "ctrlc",
  "indicatif",
+ "log",
  "miette",
  "owo-colors",
  "serde",

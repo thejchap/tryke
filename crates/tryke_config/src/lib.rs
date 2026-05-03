@@ -116,6 +116,48 @@ pub fn resolve_python(cli_override: Option<&str>, config: &TrykeConfig) -> Strin
         .unwrap_or_else(|| default_python().to_owned())
 }
 
+/// Default `RUST_LOG`-style filter directive when `RUST_LOG` is unset.
+///
+/// `env_logger` honors `RUST_LOG` natively for fine-grained per-module
+/// filtering; this only computes the fallback used when the user hasn't
+/// set it. Precedence: `TRYKE_LOG` env > CLI flag.
+///
+/// `TRYKE_LOG` is a bare level name (`off`/`error`/`warn`/`info`/`debug`/
+/// `trace`); `RUST_LOG`'s `tryke=info,hyper=warn` syntax is intentionally
+/// not supported here — power users with that need just set `RUST_LOG`.
+#[must_use]
+pub fn rust_log_default(tryke_log_env: Option<&str>, cli: log::LevelFilter) -> log::LevelFilter {
+    parse_level(tryke_log_env).unwrap_or(cli)
+}
+
+/// Level forwarded to spawned python workers via `TRYKE_LOG`.
+///
+/// Precedence: `TRYKE_LOG` env (if set) > CLI flag (only when explicitly
+/// more verbose than `Warn` — i.e., the user passed at least one `-v`).
+/// Returns `Off` when the worker should stay silent; callers should not
+/// set the env var on the child in that case so the worker preserves its
+/// "no chatter unless asked" default.
+///
+/// `RUST_LOG` is deliberately not consulted: it's a rust-specific
+/// convention from `env_logger`, and silently translating its
+/// per-module filter syntax into a python log level is a footgun.
+/// `TRYKE_LOG` is the cross-language umbrella.
+#[must_use]
+pub fn worker_log_level(tryke_log_env: Option<&str>, cli: log::LevelFilter) -> log::LevelFilter {
+    if let Some(level) = parse_level(tryke_log_env) {
+        return level;
+    }
+    if cli > log::LevelFilter::Warn {
+        cli
+    } else {
+        log::LevelFilter::Off
+    }
+}
+
+fn parse_level(s: Option<&str>) -> Option<log::LevelFilter> {
+    s.and_then(|v| v.trim().parse::<log::LevelFilter>().ok())
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct PyprojectToml {
     tool: Option<PyprojectTool>,
@@ -351,5 +393,61 @@ mod tests {
         .expect("write pyproject");
         let config = load_effective_config(dir.path());
         assert_eq!(config.python.as_deref(), Some("C:foo\\python.exe"));
+    }
+
+    #[test]
+    fn rust_log_default_uses_tryke_log_env_when_set() {
+        let level = rust_log_default(Some("debug"), log::LevelFilter::Warn);
+        assert_eq!(level, log::LevelFilter::Debug);
+    }
+
+    #[test]
+    fn rust_log_default_falls_back_to_cli_when_env_unset() {
+        let level = rust_log_default(None, log::LevelFilter::Info);
+        assert_eq!(level, log::LevelFilter::Info);
+    }
+
+    #[test]
+    fn rust_log_default_falls_back_to_cli_when_env_unparseable() {
+        // Garbage values fall through rather than blowing up — RUST_LOG
+        // could carry per-module filters we don't try to interpret here.
+        let level = rust_log_default(Some("tryke=info,hyper=warn"), log::LevelFilter::Warn);
+        assert_eq!(level, log::LevelFilter::Warn);
+    }
+
+    #[test]
+    fn worker_log_level_uses_tryke_log_env() {
+        let level = worker_log_level(Some("INFO"), log::LevelFilter::Warn);
+        assert_eq!(level, log::LevelFilter::Info);
+    }
+
+    #[test]
+    fn worker_log_level_propagates_explicit_verbose_flag() {
+        let level = worker_log_level(None, log::LevelFilter::Debug);
+        assert_eq!(level, log::LevelFilter::Debug);
+    }
+
+    #[test]
+    fn worker_log_level_stays_off_at_default_warn() {
+        // No env, no explicit `-v` → workers stay silent; preserves the
+        // pre-existing "no chatter unless asked" default for python.
+        let level = worker_log_level(None, log::LevelFilter::Warn);
+        assert_eq!(level, log::LevelFilter::Off);
+    }
+
+    #[test]
+    fn worker_log_level_stays_off_when_quiet() {
+        // `-q` (Error) is even less verbose than the Warn default, so the
+        // worker definitely shouldn't be lit up.
+        let level = worker_log_level(None, log::LevelFilter::Error);
+        assert_eq!(level, log::LevelFilter::Off);
+    }
+
+    #[test]
+    fn worker_log_level_env_wins_over_cli() {
+        // User explicitly set TRYKE_LOG, even though they also passed `-q`
+        // — env intent dominates the flag.
+        let level = worker_log_level(Some("info"), log::LevelFilter::Error);
+        assert_eq!(level, log::LevelFilter::Info);
     }
 }

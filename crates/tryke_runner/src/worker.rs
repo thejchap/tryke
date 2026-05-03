@@ -790,11 +790,19 @@ mod tests {
     }
 
     /// Reproducer for the "tryke hangs at `finalize_hooks`" bug: when the
-    /// worker writes more than the kernel pipe buffer (~64 KiB) to stderr
-    /// without anyone draining it, the worker's next stderr write blocks
-    /// and it stops responding to RPCs. The drainer task spawned in
-    /// `WorkerProcess::spawn` must keep the pipe empty so RPC flow is
-    /// unaffected.
+    /// worker writes more than the kernel pipe buffer (~64 KiB on Linux,
+    /// ~4 KiB on Windows) to stderr without anyone draining it, the
+    /// worker's next stderr write blocks and it stops responding to
+    /// RPCs. The drainer task spawned in `WorkerProcess::spawn` must
+    /// keep the pipe empty so RPC flow is unaffected.
+    ///
+    /// Test contract is binary: either the drainer prevents the deadlock
+    /// and `done` arrives on stdout, or it doesn't. The cap-retention
+    /// property is covered by the `append_stderr_*` unit tests above and
+    /// is intentionally NOT asserted here — re-asserting it via a second
+    /// post-exit polling loop introduced wall-clock flakiness on slow
+    /// Windows runners without adding any signal a unit test wouldn't
+    /// catch.
     ///
     /// Uses `python3` (already a project dependency) for portability and
     /// routes through the same `spawn_stderr_drainer` helper as
@@ -802,11 +810,18 @@ mod tests {
     /// path would deadlock this test too.
     #[tokio::test]
     async fn worker_continues_after_large_stderr_write() {
+        // 256 KiB is comfortably above both Linux's 64 KiB pipe buffer
+        // and Windows's 4 KiB default — enough to deadlock without a
+        // drainer. Larger values (we used to write 1 MiB) just make the
+        // test slower without proving anything additional.
+        const STDERR_BYTES: usize = 256 * 1024;
         let mut child = tokio::process::Command::new("python3")
             .args([
                 "-c",
-                "import sys; sys.stderr.write('X' * (1 << 20)); \
-                 sys.stderr.flush(); print('done', flush=True)",
+                &format!(
+                    "import sys; sys.stderr.write('X' * {STDERR_BYTES}); \
+                     sys.stderr.flush(); print('done', flush=True)"
+                ),
             ])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -821,27 +836,16 @@ mod tests {
 
         let mut stdout = BufReader::new(child.stdout.take().expect("no stdout"));
         let mut line = String::new();
-        let read = tokio::time::timeout(Duration::from_secs(5), stdout.read_line(&mut line))
+        // 30s catches a real deadlock (which would never finish) while
+        // tolerating Windows python startup + scheduler jitter. Past 5s
+        // budgets occasionally tripped on Windows × 3.14 even though no
+        // deadlock occurred.
+        tokio::time::timeout(Duration::from_secs(30), stdout.read_line(&mut line))
             .await
-            .expect("stdout read timed out — drainer not keeping up with stderr");
-        assert!(read.is_ok());
+            .expect("stdout read timed out — drainer deadlocked")
+            .expect("stdout read errored");
         assert_eq!(line.trim(), "done");
 
         let _ = child.wait().await;
-        // The drainer task runs concurrently and may not have read all
-        // remaining pipe bytes by the time the child exits. Poll until
-        // it reaches the expected cap rather than asserting immediately.
-        let buffered = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let n = stderr_buf.lock().unwrap().len();
-                if n == STDERR_RETAIN_BYTES {
-                    break n;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("stderr drainer did not retain expected bytes after child exit");
-        assert_eq!(buffered, STDERR_RETAIN_BYTES);
     }
 }

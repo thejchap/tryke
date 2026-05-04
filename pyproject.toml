@@ -87,4 +87,9 @@ dev = [
   "mkdocstrings-python>=1.16.12",
   "pygments-ansi-color>=0.3.0",
   "tryke",
+  # Pygments 2.20 added `html.escape` around the formatter's `filename`
+  # option, which crashes on the `None` that pymdown-extensions 10.21's
+  # `BlockHtmlFormatter` passes through when a code block has no title.
+  # Drop this pin once pymdown-extensions stops passing None.
+  "pygments<2.20",
 ]

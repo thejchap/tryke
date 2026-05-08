@@ -45,6 +45,7 @@ pub struct NextReporter<W: Write = io::Stdout> {
     start: Instant,
     subcommand_label: &'static str,
     watch_hint: Option<String>,
+    clear_armed: bool,
 }
 
 impl NextReporter {
@@ -63,6 +64,7 @@ impl NextReporter {
             start: Instant::now(),
             subcommand_label: "tryke test",
             watch_hint: None,
+            clear_armed: false,
         }
     }
 }
@@ -90,6 +92,7 @@ impl<W: Write> NextReporter<W> {
             start: Instant::now(),
             subcommand_label: "tryke test",
             watch_hint: None,
+            clear_armed: false,
         }
     }
 
@@ -181,6 +184,10 @@ fn styled_left_label(test: &TestItem) -> String {
 
 impl<W: Write> Reporter for NextReporter<W> {
     fn on_run_start(&mut self, tests: &[TestItem]) {
+        if self.clear_armed {
+            crate::clear::clear_terminal_if_tty();
+            self.clear_armed = false;
+        }
         self.total = tests.len() as u64;
         self.completed = 0;
         self.passed = 0;
@@ -307,6 +314,10 @@ impl<W: Write> Reporter for NextReporter<W> {
 
     fn set_watch_hint(&mut self, hint: Option<String>) {
         self.watch_hint = hint;
+    }
+
+    fn arm_clear(&mut self) {
+        self.clear_armed = true;
     }
 }
 

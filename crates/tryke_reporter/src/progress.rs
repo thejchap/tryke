@@ -136,6 +136,10 @@ impl<R: Reporter> Reporter for ProgressReporter<R> {
     fn set_watch_hint(&mut self, hint: Option<String>) {
         self.inner.set_watch_hint(hint);
     }
+
+    fn arm_clear(&mut self) {
+        self.inner.arm_clear();
+    }
 }
 
 #[cfg(test)]

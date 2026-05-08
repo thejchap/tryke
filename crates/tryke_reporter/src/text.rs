@@ -47,6 +47,7 @@ pub struct TextReporter<W: io::Write = io::Stdout> {
     verbosity: Verbosity,
     subcommand_label: &'static str,
     watch_hint: Option<String>,
+    clear_armed: bool,
 }
 
 impl TextReporter {
@@ -59,6 +60,7 @@ impl TextReporter {
             verbosity: Verbosity::Normal,
             subcommand_label: "tryke test",
             watch_hint: None,
+            clear_armed: false,
         }
     }
 
@@ -71,6 +73,7 @@ impl TextReporter {
             verbosity,
             subcommand_label: "tryke test",
             watch_hint: None,
+            clear_armed: false,
         }
     }
 }
@@ -90,6 +93,7 @@ impl<W: io::Write> TextReporter<W> {
             verbosity: Verbosity::Normal,
             subcommand_label: "tryke test",
             watch_hint: None,
+            clear_armed: false,
         }
     }
 
@@ -101,11 +105,24 @@ impl<W: io::Write> TextReporter<W> {
             verbosity,
             subcommand_label: "tryke test",
             watch_hint: None,
+            clear_armed: false,
         }
     }
 
     pub fn into_writer(self) -> W {
         self.writer
+    }
+
+    /// Honor the most recent `arm_clear()` before producing any new
+    /// visible output. Called from every method that writes to the
+    /// terminal so the clear lands on the first byte of new content,
+    /// regardless of whether that's the run header, a discovery
+    /// warning, or a discovery error.
+    fn flush_pending_clear(&mut self) {
+        if self.clear_armed {
+            crate::clear::clear_terminal_if_tty();
+            self.clear_armed = false;
+        }
     }
 }
 
@@ -149,6 +166,7 @@ fn format_duration(d: Duration) -> String {
 
 impl<W: io::Write> Reporter for TextReporter<W> {
     fn on_run_start(&mut self, _tests: &[TestItem]) {
+        self.flush_pending_clear();
         self.current_file = None;
         self.current_groups.clear();
         let _ = writeln!(
@@ -439,6 +457,7 @@ impl<W: io::Write> Reporter for TextReporter<W> {
     }
 
     fn on_discovery_error(&mut self, error: &DiscoveryError) {
+        self.flush_pending_clear();
         let _ = writeln!(
             self.writer,
             "{} {}: {}",
@@ -456,7 +475,12 @@ impl<W: io::Write> Reporter for TextReporter<W> {
         self.watch_hint = hint;
     }
 
+    fn arm_clear(&mut self) {
+        self.clear_armed = true;
+    }
+
     fn on_discovery_warning(&mut self, warning: &DiscoveryWarning) {
+        self.flush_pending_clear();
         match warning.kind {
             DiscoveryWarningKind::DynamicImports => {
                 let _ = writeln!(
@@ -500,6 +524,18 @@ mod tests {
 
     fn output(reporter: &TextReporter<Vec<u8>>) -> String {
         String::from_utf8_lossy(&reporter.writer).into_owned()
+    }
+
+    #[test]
+    fn arm_clear_is_consumed_by_first_output() {
+        // The flag should disarm itself after the first visible output
+        // method fires, so a single `arm_clear` doesn't clobber later
+        // events in the same cycle.
+        let mut r = reporter();
+        r.arm_clear();
+        assert!(r.clear_armed);
+        r.on_run_start(&[]);
+        assert!(!r.clear_armed, "first output should consume the flag");
     }
 
     #[test]

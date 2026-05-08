@@ -46,13 +46,6 @@ fn spawn_quit_listener(quit: Arc<AtomicBool>) {
     });
 }
 
-fn clear_if_tty() {
-    use std::io::IsTerminal;
-    if std::io::stdout().is_terminal() {
-        let _ = clearscreen::clear();
-    }
-}
-
 fn emit_discovery_warnings(reporter: &mut dyn Reporter, discoverer: &Discoverer) {
     for path in discoverer.dynamic_import_files() {
         let message = format!(
@@ -127,7 +120,11 @@ async fn run_initial_cycle(
     let disc_dur = disc_start.elapsed();
     emit_discovery_warnings(reporter, discoverer);
     if run_now {
-        clear_if_tty();
+        // Defer the clear to the reporter so the screen is wiped at
+        // the moment results begin streaming, not before discovery
+        // and worker warmup. Reporters that aren't TTY-facing treat
+        // this as a no-op.
+        reporter.arm_clear();
         let tests = test_filter.apply(initial_tests);
         let hooks = discoverer.hooks();
         run_watch_cycle(reporter, tests, &hooks, pool, maxfail, dist, Some(disc_dur)).await;
@@ -235,8 +232,13 @@ pub async fn run_watch(
             );
             pool.restart_workers().await;
         }
+        // Arm before the heavy rediscover so the previous cycle's
+        // output stays on screen while discovery + worker warmup
+        // happens. The reporter clears at the moment new content is
+        // about to land (warning, error, or run start), eliminating
+        // the blank-screen gap that's painful on large suites.
+        reporter.arm_clear();
         discoverer.rediscover_changed(&paths);
-        clear_if_tty();
         let disc_start = Instant::now();
         // When `--all` is set, rerun the full test set on every change instead
         // of restricting to tests transitively affected by the changed files.

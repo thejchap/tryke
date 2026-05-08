@@ -8,6 +8,7 @@ use crate::Reporter;
 pub struct DotReporter<W: io::Write = io::Stdout> {
     writer: W,
     watch_hint: Option<String>,
+    clear_armed: bool,
 }
 
 impl DotReporter {
@@ -16,6 +17,7 @@ impl DotReporter {
         Self {
             writer: io::stdout(),
             watch_hint: None,
+            clear_armed: false,
         }
     }
 }
@@ -31,6 +33,7 @@ impl<W: io::Write> DotReporter<W> {
         Self {
             writer,
             watch_hint: None,
+            clear_armed: false,
         }
     }
 
@@ -41,6 +44,10 @@ impl<W: io::Write> DotReporter<W> {
 
 impl<W: io::Write> Reporter for DotReporter<W> {
     fn on_run_start(&mut self, _tests: &[TestItem]) {
+        if self.clear_armed {
+            crate::clear::clear_terminal_if_tty();
+            self.clear_armed = false;
+        }
         let _ = writeln!(
             self.writer,
             "{} {}",
@@ -75,6 +82,10 @@ impl<W: io::Write> Reporter for DotReporter<W> {
 
     fn set_watch_hint(&mut self, hint: Option<String>) {
         self.watch_hint = hint;
+    }
+
+    fn arm_clear(&mut self) {
+        self.clear_armed = true;
     }
 }
 

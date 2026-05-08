@@ -58,6 +58,7 @@ pub struct SugarReporter<W: Write = io::Stdout> {
     start: Instant,
     subcommand_label: &'static str,
     watch_hint: Option<String>,
+    clear_armed: bool,
 }
 
 impl SugarReporter {
@@ -78,6 +79,7 @@ impl SugarReporter {
             start: Instant::now(),
             subcommand_label: "tryke test",
             watch_hint: None,
+            clear_armed: false,
         }
     }
 }
@@ -105,6 +107,7 @@ impl<W: Write> SugarReporter<W> {
             start: Instant::now(),
             subcommand_label: "tryke test",
             watch_hint: None,
+            clear_armed: false,
         }
     }
 
@@ -253,6 +256,10 @@ fn strip_ansi_count_chars(s: &str) -> usize {
 
 impl<W: Write> Reporter for SugarReporter<W> {
     fn on_run_start(&mut self, tests: &[TestItem]) {
+        if self.clear_armed {
+            crate::clear::clear_terminal_if_tty();
+            self.clear_armed = false;
+        }
         self.total_tests = tests.len() as u64;
         self.completed_tests = 0;
         self.total_files = tests.iter().map(file_label).collect::<HashSet<_>>().len() as u64;
@@ -323,6 +330,10 @@ impl<W: Write> Reporter for SugarReporter<W> {
 
     fn set_watch_hint(&mut self, hint: Option<String>) {
         self.watch_hint = hint;
+    }
+
+    fn arm_clear(&mut self) {
+        self.clear_armed = true;
     }
 }
 

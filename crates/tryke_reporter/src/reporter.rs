@@ -18,6 +18,13 @@ pub trait Reporter {
     /// changes..."). Reporters that don't render the summary line can
     /// ignore this.
     fn set_watch_hint(&mut self, _hint: Option<String>) {}
+    /// Arm the reporter to clear the terminal once, immediately before
+    /// the next visible output (typically `on_run_start`). Watch mode
+    /// uses this to defer the clear until results are about to stream
+    /// in, so the user doesn't see a blank screen during the discovery
+    /// and worker-warmup gap between a file save and the first test
+    /// event. Reporters that don't render to a TTY can ignore this.
+    fn arm_clear(&mut self) {}
 }
 
 #[cfg(test)]

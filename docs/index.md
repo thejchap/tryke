@@ -105,7 +105,7 @@ uvx tryke test
 <!-- REPORTER:text:START -->
 
 ```ansi
-[1mtryke test[0m [2mv0.0.25[0m
+[1mtryke test[0m [2mv0.0.27[0m
 
 sample.py:
   users

@@ -8,6 +8,12 @@ use crate::Reporter;
 pub struct DotReporter<W: io::Write = io::Stdout> {
     writer: W,
     watch_hint: Option<String>,
+    clear_armed: bool,
+    clear_enabled: bool,
+    /// See `TextReporter::header_pending` for rationale — defers the
+    /// header until the first content event so an armed cycle keeps
+    /// the previous run on screen through worker warmup.
+    header_pending: bool,
 }
 
 impl DotReporter {
@@ -16,6 +22,9 @@ impl DotReporter {
         Self {
             writer: io::stdout(),
             watch_hint: None,
+            clear_armed: false,
+            clear_enabled: crate::clear::stdout_is_terminal(),
+            header_pending: false,
         }
     }
 }
@@ -31,16 +40,26 @@ impl<W: io::Write> DotReporter<W> {
         Self {
             writer,
             watch_hint: None,
+            clear_armed: false,
+            clear_enabled: false,
+            header_pending: false,
         }
     }
 
     pub fn into_writer(self) -> W {
         self.writer
     }
-}
 
-impl<W: io::Write> Reporter for DotReporter<W> {
-    fn on_run_start(&mut self, _tests: &[TestItem]) {
+    fn flush_pending_clear(&mut self) {
+        if self.clear_armed {
+            if self.clear_enabled {
+                crate::clear::clear_terminal();
+            }
+            self.clear_armed = false;
+        }
+    }
+
+    fn write_header(&mut self) {
         let _ = writeln!(
             self.writer,
             "{} {}",
@@ -50,7 +69,26 @@ impl<W: io::Write> Reporter for DotReporter<W> {
         let _ = writeln!(self.writer);
     }
 
+    fn flush_pending_header(&mut self) {
+        if self.header_pending {
+            self.flush_pending_clear();
+            self.write_header();
+            self.header_pending = false;
+        }
+    }
+}
+
+impl<W: io::Write> Reporter for DotReporter<W> {
+    fn on_run_start(&mut self, _tests: &[TestItem]) {
+        if self.clear_armed {
+            self.header_pending = true;
+        } else {
+            self.write_header();
+        }
+    }
+
     fn on_test_complete(&mut self, result: &TestResult) {
+        self.flush_pending_header();
         let ch = match &result.outcome {
             TestOutcome::Passed => ".".green().to_string(),
             TestOutcome::Failed { .. } => "F".red().to_string(),
@@ -65,6 +103,7 @@ impl<W: io::Write> Reporter for DotReporter<W> {
     }
 
     fn on_run_complete(&mut self, summary: &RunSummary) {
+        self.flush_pending_header();
         let _ = writeln!(self.writer);
         crate::summary::write_summary_with_hint(
             &mut self.writer,
@@ -75,6 +114,22 @@ impl<W: io::Write> Reporter for DotReporter<W> {
 
     fn set_watch_hint(&mut self, hint: Option<String>) {
         self.watch_hint = hint;
+    }
+
+    fn arm_clear(&mut self) {
+        self.clear_armed = true;
+    }
+
+    fn on_scheduler_warning(&mut self, message: &str) {
+        self.flush_pending_header();
+        let _ = writeln!(self.writer, "{} {message}", "warning:".yellow().bold());
+    }
+
+    fn on_watch_idle(&mut self, info: &crate::reporter::WatchIdleInfo<'_>) {
+        self.flush_pending_clear();
+        self.header_pending = false;
+        self.write_header();
+        crate::summary::write_idle_summary(&mut self.writer, info);
     }
 }
 

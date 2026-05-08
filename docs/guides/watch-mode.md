@@ -8,7 +8,11 @@ Watch mode monitors your project for file changes and reruns only the affected t
 tryke test --watch
 ```
 
-Tryke watches all `.py` files in the project, respecting `.gitignore`. When a file changes, it:
+On startup Tryke pre-warms the worker pool and runs discovery to
+build the import graph (so it can answer "which tests are affected?"
+on the first save). It then enters an idle state — no tests are
+**executed** until you save a file. Pass `--now` to also run the full
+test set on startup. Either way, once a file changes, Tryke:
 
 1. Identifies which modules were modified
 2. Walks the import graph to find all tests that depend on the changed modules
@@ -16,6 +20,15 @@ Tryke watches all `.py` files in the project, respecting `.gitignore`. When a fi
 4. Reruns only the affected tests
 
 This gives you fast feedback without rerunning the entire suite. Restarting the workers (rather than calling `importlib.reload` in-process) avoids the classic reload pitfalls — stale class objects, captured closures, and decorator-bound state from the old definitions are all dropped because the interpreter itself is gone.
+
+## Keyboard shortcuts
+
+Watch mode listens for keypresses while it waits between runs:
+
+| Key           | Action                                                                  |
+| ------------- | ----------------------------------------------------------------------- |
+| `q` / `esc`   | Quit                                                                    |
+| `enter`       | Run all discovered tests against fresh workers (ignores affected-only). |
 
 ## How affected tests are determined
 
@@ -73,6 +86,19 @@ tryke test --watch -j 4
 ```
 
 See [concurrency](../concepts/concurrency.md) for details on the worker pool.
+
+### Run tests immediately on startup
+
+By default watch mode does not run any tests until the first file change.
+Pass `--now` to run the full test set as soon as the watcher comes up:
+
+```bash
+tryke test --watch --now
+```
+
+This is useful when you want the watcher to behave like a continuous
+test runner that always gives you a baseline result without waiting
+for a save.
 
 ### Run all tests on every change
 

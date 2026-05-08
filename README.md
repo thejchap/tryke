@@ -72,7 +72,7 @@ uvx tryke test
 <!-- REPORTER:text:plain:START -->
 
 ```text
-tryke test v0.0.25
+tryke test v0.0.27
 
 sample.py:
   users

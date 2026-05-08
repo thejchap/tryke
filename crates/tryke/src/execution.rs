@@ -139,7 +139,11 @@ pub async fn report_cycle(
     let mut hit_maxfail = false;
     let partition = partition_with_hooks(run_tests, hooks, dist);
     for w in &partition.warnings {
-        eprintln!("warning: {w}");
+        // Route through the reporter so TTY-facing reporters can
+        // flush any deferred watch-mode clear/header before the
+        // warning lands — otherwise the first `on_test_complete`'s
+        // clear would scrub it off the screen.
+        reporter.on_scheduler_warning(w);
     }
     let mut stream = pool.run(partition.units);
     while let Some(result) = stream.next().await {

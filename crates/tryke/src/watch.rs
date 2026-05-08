@@ -12,7 +12,7 @@ use anyhow::Result;
 use console::{Key, Term};
 use log::{LevelFilter, debug};
 use tryke_discovery::Discoverer;
-use tryke_reporter::Reporter;
+use tryke_reporter::{Reporter, reporter::WatchIdleInfo};
 use tryke_runner::{DistMode, WorkerPool};
 use tryke_types::{DiscoveryWarning, DiscoveryWarningKind, HookItem, filter::TestFilter};
 
@@ -23,10 +23,19 @@ use crate::execution::{report_cycle, worker_pool_size};
 /// long enough to avoid burning CPU on a tight poll.
 const QUIT_POLL_INTERVAL: Duration = Duration::from_millis(150);
 
+/// Atomic flags driven by the keyboard listener thread; the watch
+/// loop polls these alongside the file-change channel.
+#[derive(Default)]
+struct WatchKeys {
+    quit: AtomicBool,
+    run_all: AtomicBool,
+}
+
 /// Spawn a thread that reads single keypresses from stdin and flips
-/// `quit` to `true` when the user presses `q` (or `Q`, or Escape).
-/// No-op when stdin isn't a TTY (CI, piped input).
-fn spawn_quit_listener(quit: Arc<AtomicBool>) {
+/// `keys` accordingly: `q`/`Q`/Escape sets `quit`; Enter sets
+/// `run_all` (consumed once by the watch loop to trigger an explicit
+/// full-suite run). No-op when stdin isn't a TTY (CI, piped input).
+fn spawn_key_listener(keys: Arc<WatchKeys>) {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
         return;
@@ -36,21 +45,17 @@ fn spawn_quit_listener(quit: Arc<AtomicBool>) {
         loop {
             match term.read_key() {
                 Ok(Key::Char('q' | 'Q') | Key::Escape) => {
-                    quit.store(true, Ordering::SeqCst);
+                    keys.quit.store(true, Ordering::SeqCst);
                     break;
+                }
+                Ok(Key::Enter) => {
+                    keys.run_all.store(true, Ordering::SeqCst);
                 }
                 Err(_) => break,
                 Ok(_) => continue,
             }
         }
     });
-}
-
-fn clear_if_tty() {
-    use std::io::IsTerminal;
-    if std::io::stdout().is_terminal() {
-        let _ = clearscreen::clear();
-    }
 }
 
 fn emit_discovery_warnings(reporter: &mut dyn Reporter, discoverer: &Discoverer) {
@@ -107,6 +112,47 @@ async fn run_watch_cycle(
     }
 }
 
+/// Perform startup discovery and, when `run_now` is set, the initial
+/// test cycle. Discovery runs unconditionally so the import graph is
+/// ready to answer "which tests are affected?" on the first file
+/// change. When `run_now` is false we hand the reporter an idle frame
+/// (header + Tests/Start/Discovery block + IDLE badge) so the
+/// terminal communicates clearly that the watcher is alive and
+/// waiting.
+async fn run_initial_cycle(
+    reporter: &mut dyn Reporter,
+    discoverer: &mut Discoverer,
+    test_filter: &TestFilter,
+    pool: &WorkerPool,
+    maxfail: Option<usize>,
+    dist: DistMode,
+    run_now: bool,
+) {
+    // Arm before any reporter output so the deferred clear lands on
+    // the first warning, run-start, or idle frame — whichever fires
+    // first. The reporter's `flush_pending_clear` (called from each
+    // of those paths) consumes the flag, so warnings emitted just
+    // before `on_watch_idle` aren't wiped by a second clear inside
+    // the idle render.
+    reporter.arm_clear();
+    let disc_start = Instant::now();
+    let initial_tests = discoverer.rediscover();
+    let disc_dur = disc_start.elapsed();
+    emit_discovery_warnings(reporter, discoverer);
+    if run_now {
+        let tests = test_filter.apply(initial_tests);
+        let hooks = discoverer.hooks();
+        run_watch_cycle(reporter, tests, &hooks, pool, maxfail, dist, Some(disc_dur)).await;
+    } else {
+        let start_time = chrono::Local::now().format("%H:%M:%S").to_string();
+        reporter.on_watch_idle(&WatchIdleInfo {
+            hint: "Waiting for file changes...",
+            start_time: Some(&start_time),
+            discovery_duration: Some(disc_dur),
+        });
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "Watch options map directly to CLI flags; grouping into a struct would add indirection without clear benefit."
@@ -122,6 +168,7 @@ pub async fn run_watch(
     workers: Option<usize>,
     dist: DistMode,
     all_tests: bool,
+    run_now: bool,
 ) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let root = root.unwrap_or(&cwd);
@@ -131,24 +178,45 @@ pub async fn run_watch(
     let pool = WorkerPool::new(pool_size, python, root, log_level);
     pool.warm().await;
 
-    clear_if_tty();
-    let disc_start = Instant::now();
-    let tests = test_filter.apply(discoverer.rediscover());
-    let hooks = discoverer.hooks();
-    let disc_dur = Some(disc_start.elapsed());
-    emit_discovery_warnings(reporter, &discoverer);
-    run_watch_cycle(reporter, tests, &hooks, &pool, maxfail, dist, disc_dur).await;
+    run_initial_cycle(
+        reporter,
+        &mut discoverer,
+        test_filter,
+        &pool,
+        maxfail,
+        dist,
+        run_now,
+    )
+    .await;
 
     let (tx, rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
     let _debouncer = tryke_server::watcher::spawn_watcher(root, excludes, tx)?;
     let mut change_filter = tryke_server::watcher::ChangeFilter::new();
 
-    let quit = Arc::new(AtomicBool::new(false));
-    spawn_quit_listener(Arc::clone(&quit));
+    let keys = Arc::new(WatchKeys::default());
+    spawn_key_listener(Arc::clone(&keys));
 
     loop {
-        if quit.load(Ordering::SeqCst) {
+        if keys.quit.load(Ordering::SeqCst) {
             break;
+        }
+        // Explicit "run all tests" beats any queued file events:
+        // drain the channel so we don't fire a duplicate cycle right
+        // after, then run the full discovered set against fresh
+        // workers.
+        if keys.run_all.swap(false, Ordering::SeqCst) {
+            while rx.try_recv().is_ok() {}
+            pool.restart_workers().await;
+            reporter.arm_clear();
+            let disc_start = Instant::now();
+            discoverer.rediscover();
+            let raw_tests = discoverer.tests();
+            let tests = test_filter.apply(raw_tests);
+            let hooks = discoverer.hooks();
+            let disc_dur = Some(disc_start.elapsed());
+            emit_discovery_warnings(reporter, &discoverer);
+            run_watch_cycle(reporter, tests, &hooks, &pool, maxfail, dist, disc_dur).await;
+            continue;
         }
         let first = match rx.recv_timeout(QUIT_POLL_INTERVAL) {
             Ok(paths) => paths,
@@ -199,9 +267,17 @@ pub async fn run_watch(
             );
             pool.restart_workers().await;
         }
-        discoverer.rediscover_changed(&paths);
-        clear_if_tty();
+        // Arm before the heavy rediscover so the previous cycle's
+        // output stays on screen while discovery + worker warmup
+        // happens. The reporter clears at the moment new content is
+        // about to land (warning, error, or run start), eliminating
+        // the blank-screen gap that's painful on large suites.
+        reporter.arm_clear();
+        // Time the full discovery work — `rediscover_changed` is the
+        // expensive part on large suites, so it has to be inside the
+        // measured window for `disc_dur` to mean anything.
         let disc_start = Instant::now();
+        discoverer.rediscover_changed(&paths);
         // When `--all` is set, rerun the full test set on every change instead
         // of restricting to tests transitively affected by the changed files.
         // Useful when the import graph misses dependencies (dynamic imports,
@@ -259,5 +335,78 @@ mod tests {
         // underlying `report_cycle` Err that `tryke test` relies on for exit code.
         run_watch_cycle(&mut reporter, tests, &[], &pool, None, DistMode::Test, None).await;
         pool.shutdown();
+    }
+
+    /// Reporter that just tallies how many runs / tests it saw, so the
+    /// `run_now` gating can be asserted without parsing reporter output.
+    #[derive(Default)]
+    struct CountingReporter {
+        run_starts: usize,
+        test_completes: usize,
+        run_completes: usize,
+    }
+
+    impl Reporter for CountingReporter {
+        fn on_run_start(&mut self, _tests: &[tryke_types::TestItem]) {
+            self.run_starts += 1;
+        }
+        fn on_test_complete(&mut self, _result: &tryke_types::TestResult) {
+            self.test_completes += 1;
+        }
+        fn on_run_complete(&mut self, _summary: &tryke_types::RunSummary) {
+            self.run_completes += 1;
+        }
+    }
+
+    async fn run_initial_cycle_for_test(run_now: bool) -> CountingReporter {
+        let python_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../python")
+            .canonicalize()
+            .expect("python/ dir must exist");
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        std::fs::write(
+            dir.path().join("test_ok.py"),
+            "from tryke import test, expect\n\n@test\ndef test_ok():\n    expect(1).to_equal(1)\n",
+        )
+        .expect("write test file");
+        let mut discoverer = Discoverer::new_with_excludes(dir.path(), &[]);
+        let test_filter = TestFilter::from_args(&[], None, None).expect("filter");
+        let pool = WorkerPool::with_python_path(
+            1,
+            &test_python_bin(),
+            dir.path(),
+            &[dir.path().to_path_buf(), python_dir],
+            LevelFilter::Off,
+        );
+        let mut reporter = CountingReporter::default();
+        run_initial_cycle(
+            &mut reporter,
+            &mut discoverer,
+            &test_filter,
+            &pool,
+            None,
+            DistMode::Test,
+            run_now,
+        )
+        .await;
+        pool.shutdown();
+        reporter
+    }
+
+    #[tokio::test]
+    async fn run_initial_cycle_skips_tests_when_run_now_is_false() {
+        let reporter = run_initial_cycle_for_test(false).await;
+        assert_eq!(reporter.run_starts, 0, "no run should fire on idle startup");
+        assert_eq!(reporter.test_completes, 0);
+        assert_eq!(reporter.run_completes, 0);
+    }
+
+    #[tokio::test]
+    async fn run_initial_cycle_runs_tests_when_run_now_is_true() {
+        let reporter = run_initial_cycle_for_test(true).await;
+        assert_eq!(reporter.run_starts, 1, "exactly one initial run expected");
+        assert_eq!(reporter.test_completes, 1);
+        assert_eq!(reporter.run_completes, 1);
     }
 }

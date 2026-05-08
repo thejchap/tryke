@@ -4,6 +4,26 @@ use std::time::Duration;
 use owo_colors::OwoColorize;
 use tryke_types::RunSummary;
 
+use crate::reporter::WatchIdleInfo;
+
+/// Keyboard shortcuts shown beneath the summary/idle badge in watch
+/// mode. Stacked vertically with keys right-aligned in the same
+/// column as the `Tests` / `Discovery` labels so the footer reads as
+/// a continuation of the summary block.
+const WATCH_KEYBINDINGS: &[(&str, &str)] = &[("q / esc", "Quit"), ("enter", "Run all tests")];
+
+/// Width of the right-aligned label column shared by `Tests`,
+/// `Start at`, `Duration`, and the watch keybinding keys.
+const LABEL_COLUMN_WIDTH: usize = 11;
+
+fn write_watch_keybindings<W: io::Write>(writer: &mut W) {
+    let _ = writeln!(writer);
+    for (key, label) in WATCH_KEYBINDINGS {
+        let pad = " ".repeat(LABEL_COLUMN_WIDTH.saturating_sub(key.len()));
+        let _ = writeln!(writer, "{pad}{}  {}", (*key).bold(), (*label).dimmed());
+    }
+}
+
 fn format_duration(d: Duration) -> String {
     let ms = d.as_secs_f64() * 1000.0;
     if ms < 1000.0 {
@@ -161,9 +181,41 @@ pub fn write_summary_with_hint<W: io::Write>(
     let _ = writeln!(writer);
     if let Some(hint) = watch_hint {
         let _ = writeln!(writer, " {badge} {}", hint.dimmed());
+        write_watch_keybindings(writer);
     } else {
         let _ = writeln!(writer, " {badge}");
     }
+}
+
+/// Render the idle frame shown when watch mode is awaiting the first
+/// file change. Mirrors the live-run summary layout (Tests / Start at
+/// / Duration block plus a trailing badge) but stamps an `IDLE` badge
+/// in blue and reports the discovery duration only — no test
+/// execution has happened yet.
+pub fn write_idle_summary<W: io::Write>(writer: &mut W, info: &WatchIdleInfo<'_>) {
+    let badge = format!("{}", " IDLE ".on_blue().black().bold());
+
+    let _ = writeln!(writer);
+
+    let _ = writeln!(
+        writer,
+        "      {}  {} {}",
+        "Tests".dimmed(),
+        "No tests run yet".dimmed(),
+        "(0)".dimmed()
+    );
+
+    if let Some(t) = info.start_time {
+        let _ = writeln!(writer, "   {}  {}", "Start at".dimmed(), t);
+    }
+
+    if let Some(d) = info.discovery_duration {
+        let _ = writeln!(writer, "  {}  {}", "Discovery".dimmed(), format_duration(d));
+    }
+
+    let _ = writeln!(writer);
+    let _ = writeln!(writer, " {badge} {}", info.hint.dimmed());
+    write_watch_keybindings(writer);
 }
 
 #[cfg(test)]
@@ -570,17 +622,20 @@ mod tests {
                 start_time: None,
                 changed_selection: None,
             },
-            Some("Waiting for file changes... press q to quit"),
+            Some("Waiting for file changes..."),
         );
         let out = String::from_utf8(buf).expect("utf-8");
         assert!(out.contains("PASS"));
-        assert!(out.contains("Waiting for file changes... press q to quit"));
+        assert!(out.contains("Waiting for file changes..."));
         // Hint should be on the same line as the badge.
         let badge_line = out
             .lines()
             .find(|l| l.contains("PASS"))
             .expect("badge line");
         assert!(badge_line.contains("Waiting"));
+        // Keybindings render on a separate line below the badge.
+        assert!(out.contains("Quit"));
+        assert!(out.contains("Run all tests"));
     }
 
     #[test]

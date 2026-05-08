@@ -1,4 +1,16 @@
+use std::time::Duration;
+
 use tryke_types::{DiscoveryError, DiscoveryWarning, RunSummary, TestItem, TestResult};
+
+/// Snapshot of state shown to the user when watch mode is idle —
+/// after startup or after a no-op cycle, before the first save.
+/// The reporter renders this in place of a real run summary so the
+/// terminal isn't blank while the user waits.
+pub struct WatchIdleInfo<'a> {
+    pub hint: &'a str,
+    pub start_time: Option<&'a str>,
+    pub discovery_duration: Option<Duration>,
+}
 
 pub trait Reporter {
     fn on_run_start(&mut self, tests: &[TestItem]);
@@ -18,6 +30,29 @@ pub trait Reporter {
     /// changes..."). Reporters that don't render the summary line can
     /// ignore this.
     fn set_watch_hint(&mut self, _hint: Option<String>) {}
+    /// Arm the reporter to clear the terminal once, immediately before
+    /// the next visible output (typically `on_run_start`). Watch mode
+    /// uses this to defer the clear until results are about to stream
+    /// in, so the user doesn't see a blank screen during the discovery
+    /// and worker-warmup gap between a file save and the first test
+    /// event. Reporters that don't render to a TTY can ignore this.
+    fn arm_clear(&mut self) {}
+    /// Render the idle frame shown when watch mode is awaiting the
+    /// first file change (no run has started yet). TTY-facing
+    /// reporters paint a header + IDLE badge with the supplied hint;
+    /// non-TTY reporters can ignore this.
+    fn on_watch_idle(&mut self, _info: &WatchIdleInfo<'_>) {}
+    /// Surface a non-fatal scheduler warning emitted between
+    /// `on_run_start` and the first `on_test_complete` (e.g. dist
+    /// upgrades forced by per-scope fixtures). Routing through the
+    /// reporter — instead of `eprintln!` — lets watch-mode reporters
+    /// flush any deferred clear/header *before* writing the warning,
+    /// so it isn't wiped from the screen when the first test event
+    /// triggers the clear. Default impl preserves the historical
+    /// behavior for non-TTY reporters: write to stderr.
+    fn on_scheduler_warning(&mut self, message: &str) {
+        eprintln!("warning: {message}");
+    }
 }
 
 #[cfg(test)]

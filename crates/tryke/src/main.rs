@@ -100,6 +100,7 @@ fn main() -> Result<()> {
             include,
             watch,
             all,
+            now,
             python,
         } => {
             if base_branch.is_some() && !changed && !changed_first {
@@ -111,7 +112,7 @@ fn main() -> Result<()> {
             let mut rep = build_reporter(reporter, verbosity, cli.no_progress);
             if *watch {
                 rep.set_subcommand_label("tryke test --watch");
-                rep.set_watch_hint(Some("Waiting for file changes... press q to quit".into()));
+                rep.set_watch_hint(Some("Waiting for file changes...".into()));
                 let cwd = env::current_dir()?;
                 let root_path = root.as_deref().unwrap_or(&cwd);
                 let excludes = resolved_excludes(root_path, exclude, include);
@@ -130,6 +131,7 @@ fn main() -> Result<()> {
                     *workers,
                     (*dist).into(),
                     *all,
+                    *now,
                 ));
             }
             if let Some(p) = port {
@@ -798,6 +800,38 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn watch_now_flag_defaults_to_false() {
+        let cli = Cli::try_parse_from(["tryke", "test", "--watch"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Test {
+                watch: true,
+                now: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn watch_now_flag_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "test", "--watch", "--now"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Test {
+                watch: true,
+                now: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn now_requires_watch() {
+        let result = Cli::try_parse_from(["tryke", "test", "--now"]);
+        assert!(result.is_err(), "--now without --watch should error");
     }
 
     #[test]

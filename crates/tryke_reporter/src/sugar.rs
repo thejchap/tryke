@@ -43,6 +43,10 @@ fn red_bar_template() -> String {
     )
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Each flag captures an independent piece of run state; collapsing them into an enum would tangle the state machine."
+)]
 pub struct SugarReporter<W: Write = io::Stdout> {
     writer: W,
     live: LiveArea,
@@ -58,6 +62,9 @@ pub struct SugarReporter<W: Write = io::Stdout> {
     start: Instant,
     subcommand_label: &'static str,
     watch_hint: Option<String>,
+    clear_armed: bool,
+    clear_enabled: bool,
+    header_pending: bool,
 }
 
 impl SugarReporter {
@@ -78,6 +85,9 @@ impl SugarReporter {
             start: Instant::now(),
             subcommand_label: "tryke test",
             watch_hint: None,
+            clear_armed: false,
+            clear_enabled: crate::clear::stdout_is_terminal(),
+            header_pending: false,
         }
     }
 }
@@ -105,11 +115,41 @@ impl<W: Write> SugarReporter<W> {
             start: Instant::now(),
             subcommand_label: "tryke test",
             watch_hint: None,
+            clear_armed: false,
+            clear_enabled: false,
+            header_pending: false,
         }
     }
 
     pub fn into_writer(self) -> W {
         self.writer
+    }
+
+    fn flush_pending_clear(&mut self) {
+        if self.clear_armed {
+            if self.clear_enabled {
+                crate::clear::clear_terminal();
+            }
+            self.clear_armed = false;
+        }
+    }
+
+    fn write_header(&mut self) {
+        let header = format!(
+            "{} {}",
+            self.subcommand_label.bold(),
+            format!("v{}", env!("CARGO_PKG_VERSION")).dimmed()
+        );
+        self.live.println(&mut self.writer, &header);
+        self.live.println(&mut self.writer, "");
+    }
+
+    fn flush_pending_header(&mut self) {
+        if self.header_pending {
+            self.flush_pending_clear();
+            self.write_header();
+            self.header_pending = false;
+        }
     }
 
     fn ensure_bar_started(&mut self) {
@@ -264,16 +304,15 @@ impl<W: Write> Reporter for SugarReporter<W> {
         self.started = false;
         self.failure_seen = false;
 
-        let header = format!(
-            "{} {}",
-            self.subcommand_label.bold(),
-            format!("v{}", env!("CARGO_PKG_VERSION")).dimmed()
-        );
-        self.live.println(&mut self.writer, &header);
-        self.live.println(&mut self.writer, "");
+        if self.clear_armed {
+            self.header_pending = true;
+        } else {
+            self.write_header();
+        }
     }
 
     fn on_test_complete(&mut self, result: &TestResult) {
+        self.flush_pending_header();
         self.ensure_bar_started();
 
         // File transition: commit the previous file's accumulated marks
@@ -301,6 +340,7 @@ impl<W: Write> Reporter for SugarReporter<W> {
     }
 
     fn on_run_complete(&mut self, run_summary: &RunSummary) {
+        self.flush_pending_header();
         self.commit_current_file();
         self.live.finish_and_clear();
 
@@ -323,6 +363,23 @@ impl<W: Write> Reporter for SugarReporter<W> {
 
     fn set_watch_hint(&mut self, hint: Option<String>) {
         self.watch_hint = hint;
+    }
+
+    fn arm_clear(&mut self) {
+        self.clear_armed = true;
+    }
+
+    fn on_scheduler_warning(&mut self, message: &str) {
+        self.flush_pending_header();
+        let line = format!("{} {message}", "warning:".yellow().bold());
+        self.live.println(&mut self.writer, &line);
+    }
+
+    fn on_watch_idle(&mut self, info: &crate::reporter::WatchIdleInfo<'_>) {
+        self.flush_pending_clear();
+        self.header_pending = false;
+        self.write_header();
+        summary::write_idle_summary(&mut self.writer, info);
     }
 }
 

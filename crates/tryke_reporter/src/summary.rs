@@ -6,6 +6,21 @@ use tryke_types::RunSummary;
 
 use crate::reporter::WatchIdleInfo;
 
+/// Keyboard shortcuts shown beneath the summary/idle badge in watch
+/// mode. Order matters — they're rendered left-to-right joined with a
+/// dimmed bullet separator, so the most-used keys come first.
+const WATCH_KEYBINDINGS: &[(&str, &str)] = &[("q", "Quit"), ("enter", "Run all tests")];
+
+fn write_watch_keybindings<W: io::Write>(writer: &mut W) {
+    let separator = format!("  {}  ", "·".dimmed());
+    let bindings = WATCH_KEYBINDINGS
+        .iter()
+        .map(|(key, label)| format!("{}{} {}", (*key).bold(), ":".dimmed(), (*label).dimmed()))
+        .collect::<Vec<_>>()
+        .join(&separator);
+    let _ = writeln!(writer, " {bindings}");
+}
+
 fn format_duration(d: Duration) -> String {
     let ms = d.as_secs_f64() * 1000.0;
     if ms < 1000.0 {
@@ -163,6 +178,7 @@ pub fn write_summary_with_hint<W: io::Write>(
     let _ = writeln!(writer);
     if let Some(hint) = watch_hint {
         let _ = writeln!(writer, " {badge} {}", hint.dimmed());
+        write_watch_keybindings(writer);
     } else {
         let _ = writeln!(writer, " {badge}");
     }
@@ -182,7 +198,7 @@ pub fn write_idle_summary<W: io::Write>(writer: &mut W, info: &WatchIdleInfo<'_>
         writer,
         "      {}  {} {}",
         "Tests".dimmed(),
-        "no tests run yet".dimmed(),
+        "No tests run yet".dimmed(),
         "(0)".dimmed()
     );
 
@@ -196,6 +212,7 @@ pub fn write_idle_summary<W: io::Write>(writer: &mut W, info: &WatchIdleInfo<'_>
 
     let _ = writeln!(writer);
     let _ = writeln!(writer, " {badge} {}", info.hint.dimmed());
+    write_watch_keybindings(writer);
 }
 
 #[cfg(test)]
@@ -602,17 +619,20 @@ mod tests {
                 start_time: None,
                 changed_selection: None,
             },
-            Some("Waiting for file changes... press q to quit"),
+            Some("Waiting for file changes..."),
         );
         let out = String::from_utf8(buf).expect("utf-8");
         assert!(out.contains("PASS"));
-        assert!(out.contains("Waiting for file changes... press q to quit"));
+        assert!(out.contains("Waiting for file changes..."));
         // Hint should be on the same line as the badge.
         let badge_line = out
             .lines()
             .find(|l| l.contains("PASS"))
             .expect("badge line");
         assert!(badge_line.contains("Waiting"));
+        // Keybindings render on a separate line below the badge.
+        assert!(out.contains("Quit"));
+        assert!(out.contains("Run all tests"));
     }
 
     #[test]

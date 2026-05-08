@@ -21,6 +21,15 @@ test set on startup. Either way, once a file changes, Tryke:
 
 This gives you fast feedback without rerunning the entire suite. Restarting the workers (rather than calling `importlib.reload` in-process) avoids the classic reload pitfalls — stale class objects, captured closures, and decorator-bound state from the old definitions are all dropped because the interpreter itself is gone.
 
+## Keyboard shortcuts
+
+Watch mode listens for keypresses while it waits between runs:
+
+| Key            | Action                                                                  |
+| -------------- | ----------------------------------------------------------------------- |
+| `q` / `Esc`    | Quit                                                                    |
+| `Enter`        | Run all discovered tests against fresh workers (ignores affected-only). |
+
 ## How affected tests are determined
 
 Tryke builds a static import graph at startup (see [test discovery](../concepts/discovery.md)). When a file changes, it traces the graph forward to find every test file that transitively imports the changed module, then reruns the tests in those files.

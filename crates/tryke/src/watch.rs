@@ -23,10 +23,19 @@ use crate::execution::{report_cycle, worker_pool_size};
 /// long enough to avoid burning CPU on a tight poll.
 const QUIT_POLL_INTERVAL: Duration = Duration::from_millis(150);
 
+/// Atomic flags driven by the keyboard listener thread; the watch
+/// loop polls these alongside the file-change channel.
+#[derive(Default)]
+struct WatchKeys {
+    quit: AtomicBool,
+    run_all: AtomicBool,
+}
+
 /// Spawn a thread that reads single keypresses from stdin and flips
-/// `quit` to `true` when the user presses `q` (or `Q`, or Escape).
-/// No-op when stdin isn't a TTY (CI, piped input).
-fn spawn_quit_listener(quit: Arc<AtomicBool>) {
+/// `keys` accordingly: `q`/`Q`/Escape sets `quit`; Enter sets
+/// `run_all` (consumed once by the watch loop to trigger an explicit
+/// full-suite run). No-op when stdin isn't a TTY (CI, piped input).
+fn spawn_key_listener(keys: Arc<WatchKeys>) {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
         return;
@@ -36,8 +45,11 @@ fn spawn_quit_listener(quit: Arc<AtomicBool>) {
         loop {
             match term.read_key() {
                 Ok(Key::Char('q' | 'Q') | Key::Escape) => {
-                    quit.store(true, Ordering::SeqCst);
+                    keys.quit.store(true, Ordering::SeqCst);
                     break;
+                }
+                Ok(Key::Enter) => {
+                    keys.run_all.store(true, Ordering::SeqCst);
                 }
                 Err(_) => break,
                 Ok(_) => continue,
@@ -134,7 +146,7 @@ async fn run_initial_cycle(
     } else {
         let start_time = chrono::Local::now().format("%H:%M:%S").to_string();
         reporter.on_watch_idle(&WatchIdleInfo {
-            hint: "Waiting for file changes... press q to quit",
+            hint: "Waiting for file changes...",
             start_time: Some(&start_time),
             discovery_duration: Some(disc_dur),
         });
@@ -181,12 +193,30 @@ pub async fn run_watch(
     let _debouncer = tryke_server::watcher::spawn_watcher(root, excludes, tx)?;
     let mut change_filter = tryke_server::watcher::ChangeFilter::new();
 
-    let quit = Arc::new(AtomicBool::new(false));
-    spawn_quit_listener(Arc::clone(&quit));
+    let keys = Arc::new(WatchKeys::default());
+    spawn_key_listener(Arc::clone(&keys));
 
     loop {
-        if quit.load(Ordering::SeqCst) {
+        if keys.quit.load(Ordering::SeqCst) {
             break;
+        }
+        // Explicit "run all tests" beats any queued file events:
+        // drain the channel so we don't fire a duplicate cycle right
+        // after, then run the full discovered set against fresh
+        // workers.
+        if keys.run_all.swap(false, Ordering::SeqCst) {
+            while rx.try_recv().is_ok() {}
+            pool.restart_workers().await;
+            reporter.arm_clear();
+            let disc_start = Instant::now();
+            discoverer.rediscover();
+            let raw_tests = discoverer.tests();
+            let tests = test_filter.apply(raw_tests);
+            let hooks = discoverer.hooks();
+            let disc_dur = Some(disc_start.elapsed());
+            emit_discovery_warnings(reporter, &discoverer);
+            run_watch_cycle(reporter, tests, &hooks, &pool, maxfail, dist, disc_dur).await;
+            continue;
         }
         let first = match rx.recv_timeout(QUIT_POLL_INTERVAL) {
             Ok(paths) => paths,

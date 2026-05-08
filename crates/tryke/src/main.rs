@@ -112,7 +112,7 @@ fn main() -> Result<()> {
             let mut rep = build_reporter(reporter, verbosity, cli.no_progress);
             if *watch {
                 rep.set_subcommand_label("tryke test --watch");
-                rep.set_watch_hint(Some("Waiting for file changes... press q to quit".into()));
+                rep.set_watch_hint(Some("Waiting for file changes...".into()));
                 let cwd = env::current_dir()?;
                 let root_path = root.as_deref().unwrap_or(&cwd);
                 let excludes = resolved_excludes(root_path, exclude, include);

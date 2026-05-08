@@ -271,7 +271,7 @@ tryke test [OPTIONS] [PATHS]...
 
 - `--now`
 
-  In watch mode, run tests immediately after starting the watcher.
+  In watch mode, run tests immediately on watch startup.
 
   By default watch mode starts idle and waits for the first file change before running anything. Pass `--now` to kick off a full run on startup, the same way each subsequent change does.
 

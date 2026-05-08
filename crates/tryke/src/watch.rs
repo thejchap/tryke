@@ -107,6 +107,38 @@ async fn run_watch_cycle(
     }
 }
 
+/// Perform startup discovery and, when `run_now` is set, the initial
+/// test cycle. Discovery runs unconditionally so the import graph is
+/// ready to answer "which tests are affected?" on the first file
+/// change. When `run_now` is false we leave the user's terminal
+/// untouched (no `clear_if_tty`) and print a single idle hint so it's
+/// obvious the watcher is alive.
+async fn run_initial_cycle(
+    reporter: &mut dyn Reporter,
+    discoverer: &mut Discoverer,
+    test_filter: &TestFilter,
+    pool: &WorkerPool,
+    maxfail: Option<usize>,
+    dist: DistMode,
+    run_now: bool,
+) {
+    let disc_start = Instant::now();
+    let initial_tests = discoverer.rediscover();
+    let disc_dur = disc_start.elapsed();
+    emit_discovery_warnings(reporter, discoverer);
+    if run_now {
+        clear_if_tty();
+        let tests = test_filter.apply(initial_tests);
+        let hooks = discoverer.hooks();
+        run_watch_cycle(reporter, tests, &hooks, pool, maxfail, dist, Some(disc_dur)).await;
+    } else {
+        use std::io::IsTerminal;
+        if std::io::stderr().is_terminal() {
+            eprintln!("tryke watch: idle — waiting for file changes... press q to quit");
+        }
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "Watch options map directly to CLI flags; grouping into a struct would add indirection without clear benefit."
@@ -132,29 +164,16 @@ pub async fn run_watch(
     let pool = WorkerPool::new(pool_size, python, root, log_level);
     pool.warm().await;
 
-    clear_if_tty();
-    // Discovery still runs at startup so the import graph is ready to
-    // answer "which tests are affected?" on the first file change.
-    // Whether we exercise that initial test set is gated by `--now`:
-    // the default is to wait idle for the first save.
-    let disc_start = Instant::now();
-    let initial_tests = discoverer.rediscover();
-    let disc_dur = disc_start.elapsed();
-    emit_discovery_warnings(reporter, &discoverer);
-    if run_now {
-        let tests = test_filter.apply(initial_tests);
-        let hooks = discoverer.hooks();
-        run_watch_cycle(
-            reporter,
-            tests,
-            &hooks,
-            &pool,
-            maxfail,
-            dist,
-            Some(disc_dur),
-        )
-        .await;
-    }
+    run_initial_cycle(
+        reporter,
+        &mut discoverer,
+        test_filter,
+        &pool,
+        maxfail,
+        dist,
+        run_now,
+    )
+    .await;
 
     let (tx, rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
     let _debouncer = tryke_server::watcher::spawn_watcher(root, excludes, tx)?;
@@ -276,5 +295,78 @@ mod tests {
         // underlying `report_cycle` Err that `tryke test` relies on for exit code.
         run_watch_cycle(&mut reporter, tests, &[], &pool, None, DistMode::Test, None).await;
         pool.shutdown();
+    }
+
+    /// Reporter that just tallies how many runs / tests it saw, so the
+    /// `run_now` gating can be asserted without parsing reporter output.
+    #[derive(Default)]
+    struct CountingReporter {
+        run_starts: usize,
+        test_completes: usize,
+        run_completes: usize,
+    }
+
+    impl Reporter for CountingReporter {
+        fn on_run_start(&mut self, _tests: &[tryke_types::TestItem]) {
+            self.run_starts += 1;
+        }
+        fn on_test_complete(&mut self, _result: &tryke_types::TestResult) {
+            self.test_completes += 1;
+        }
+        fn on_run_complete(&mut self, _summary: &tryke_types::RunSummary) {
+            self.run_completes += 1;
+        }
+    }
+
+    async fn run_initial_cycle_for_test(run_now: bool) -> CountingReporter {
+        let python_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../python")
+            .canonicalize()
+            .expect("python/ dir must exist");
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        std::fs::write(
+            dir.path().join("test_ok.py"),
+            "from tryke import test, expect\n\n@test\ndef test_ok():\n    expect(1).to_equal(1)\n",
+        )
+        .expect("write test file");
+        let mut discoverer = Discoverer::new_with_excludes(dir.path(), &[]);
+        let test_filter = TestFilter::from_args(&[], None, None).expect("filter");
+        let pool = WorkerPool::with_python_path(
+            1,
+            &test_python_bin(),
+            dir.path(),
+            &[dir.path().to_path_buf(), python_dir],
+            LevelFilter::Off,
+        );
+        let mut reporter = CountingReporter::default();
+        run_initial_cycle(
+            &mut reporter,
+            &mut discoverer,
+            &test_filter,
+            &pool,
+            None,
+            DistMode::Test,
+            run_now,
+        )
+        .await;
+        pool.shutdown();
+        reporter
+    }
+
+    #[tokio::test]
+    async fn run_initial_cycle_skips_tests_when_run_now_is_false() {
+        let reporter = run_initial_cycle_for_test(false).await;
+        assert_eq!(reporter.run_starts, 0, "no run should fire on idle startup");
+        assert_eq!(reporter.test_completes, 0);
+        assert_eq!(reporter.run_completes, 0);
+    }
+
+    #[tokio::test]
+    async fn run_initial_cycle_runs_tests_when_run_now_is_true() {
+        let reporter = run_initial_cycle_for_test(true).await;
+        assert_eq!(reporter.run_starts, 1, "exactly one initial run expected");
+        assert_eq!(reporter.test_completes, 1);
+        assert_eq!(reporter.run_completes, 1);
     }
 }

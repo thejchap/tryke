@@ -228,7 +228,7 @@ pub enum Commands {
         #[arg(short = 'a', long = "all", requires = "watch")]
         all: bool,
 
-        /// In watch mode, run tests immediately after starting the watcher.
+        /// In watch mode, run tests immediately on watch startup.
         ///
         /// By default watch mode starts idle and waits for the first file
         /// change before running anything. Pass `--now` to kick off a full

@@ -275,6 +275,8 @@ tryke test [OPTIONS] [PATHS]...
 
   By default watch mode starts idle and waits for the first file change before running anything. Pass `--now` to kick off a full run on startup, the same way each subsequent change does.
 
+  Requires `--watch`.
+
 - `--port` `<PORT>`
 
   Run against an already-running `tryke server` instead of spawning fresh workers.

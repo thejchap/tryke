@@ -115,23 +115,25 @@ async fn run_initial_cycle(
     dist: DistMode,
     run_now: bool,
 ) {
+    // Arm before any reporter output so the deferred clear lands on
+    // the first warning or run-start, whichever fires first. If we
+    // armed after `emit_discovery_warnings`, a later `on_run_start`
+    // would wipe those warnings off the screen.
+    if run_now {
+        reporter.arm_clear();
+    }
     let disc_start = Instant::now();
     let initial_tests = discoverer.rediscover();
     let disc_dur = disc_start.elapsed();
     emit_discovery_warnings(reporter, discoverer);
     if run_now {
-        // Defer the clear to the reporter so the screen is wiped at
-        // the moment results begin streaming, not before discovery
-        // and worker warmup. Reporters that aren't TTY-facing treat
-        // this as a no-op.
-        reporter.arm_clear();
         let tests = test_filter.apply(initial_tests);
         let hooks = discoverer.hooks();
         run_watch_cycle(reporter, tests, &hooks, pool, maxfail, dist, Some(disc_dur)).await;
     } else {
         use std::io::IsTerminal;
         if std::io::stderr().is_terminal() {
-            eprintln!("tryke watch: idle — waiting for file changes... press q to quit");
+            eprintln!("tryke test --watch: idle — waiting for file changes... press q to quit");
         }
     }
 }
@@ -238,8 +240,11 @@ pub async fn run_watch(
         // about to land (warning, error, or run start), eliminating
         // the blank-screen gap that's painful on large suites.
         reporter.arm_clear();
-        discoverer.rediscover_changed(&paths);
+        // Time the full discovery work — `rediscover_changed` is the
+        // expensive part on large suites, so it has to be inside the
+        // measured window for `disc_dur` to mean anything.
         let disc_start = Instant::now();
+        discoverer.rediscover_changed(&paths);
         // When `--all` is set, rerun the full test set on every change instead
         // of restricting to tests transitively affected by the changed files.
         // Useful when the import graph misses dependencies (dynamic imports,

@@ -233,6 +233,8 @@ pub enum Commands {
         /// By default watch mode starts idle and waits for the first file
         /// change before running anything. Pass `--now` to kick off a full
         /// run on startup, the same way each subsequent change does.
+        ///
+        /// Requires `--watch`.
         #[arg(long = "now", requires = "watch")]
         now: bool,
 

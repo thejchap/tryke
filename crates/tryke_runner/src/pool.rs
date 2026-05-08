@@ -159,7 +159,14 @@ impl WorkerPool {
         self.fanout_ctrl(WorkerCtrl::Ping).await;
     }
 
-    pub fn shutdown(self) {
+    /// Tell every worker to stop.
+    ///
+    /// Takes `&self` so callers behind an `Arc` (the long-running server)
+    /// can shut the pool down on Ctrl-C without unwrapping the Arc.
+    /// Sending one Shutdown per worker is sufficient — `worker_task`
+    /// breaks on the first Shutdown it receives, and the work-stealing
+    /// channel guarantees each message goes to exactly one worker.
+    pub fn shutdown(&self) {
         for _ in 0..self.ctrl_txs.len() {
             let _ = self.work_tx.send_blocking(WorkerMsg::Shutdown);
         }

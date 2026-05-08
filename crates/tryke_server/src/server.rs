@@ -3,7 +3,7 @@ use std::{path::PathBuf, sync::Arc};
 use bytes::Bytes;
 use log::{LevelFilter, debug};
 use tokio::{
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     sync::{Mutex, broadcast},
 };
 use tryke_discovery::Discoverer;
@@ -14,6 +14,32 @@ use crate::{
     protocol::{DiscoverCompleteParams, Notification},
     watcher::spawn_watcher,
 };
+
+fn spawn_connection(
+    stream: TcpStream,
+    disc: &Arc<Mutex<Discoverer>>,
+    bcast_tx: &broadcast::Sender<Bytes>,
+    pool: &Arc<WorkerPool>,
+    run_lock: &Arc<Mutex<()>>,
+) {
+    let bcast_rx = bcast_tx.subscribe();
+    let bcast_tx_conn = bcast_tx.clone();
+    let disc_conn = Arc::clone(disc);
+    let pool_conn = Arc::clone(pool);
+    let run_lock_conn = Arc::clone(run_lock);
+    tokio::spawn(async move {
+        ConnectionHandler::new(
+            stream,
+            disc_conn,
+            bcast_rx,
+            bcast_tx_conn,
+            pool_conn,
+            run_lock_conn,
+        )
+        .run()
+        .await;
+    });
+}
 
 pub struct Server {
     port: u16,
@@ -139,25 +165,24 @@ impl Server {
         });
 
         loop {
-            let (stream, addr) = listener.accept().await?;
-            debug!("accepted connection from {addr}");
-            let bcast_rx = bcast_tx.subscribe();
-            let bcast_tx_conn = bcast_tx.clone();
-            let disc_conn = Arc::clone(&disc);
-            let pool_conn = Arc::clone(&pool);
-            let run_lock_conn = Arc::clone(&run_lock);
-            tokio::spawn(async move {
-                ConnectionHandler::new(
-                    stream,
-                    disc_conn,
-                    bcast_rx,
-                    bcast_tx_conn,
-                    pool_conn,
-                    run_lock_conn,
-                )
-                .run()
-                .await;
-            });
+            // Bail out of the accept loop on Ctrl-C so the pool's
+            // workers receive an explicit Shutdown rather than being
+            // abandoned to FD-close cleanup. Pairs with the python
+            // worker's parent-death watchdog as a belt-and-braces
+            // safety net against orphaned `python -m tryke.worker`
+            // processes after the user interrupts the server.
+            tokio::select! {
+                accept = listener.accept() => {
+                    let (stream, addr) = accept?;
+                    debug!("accepted connection from {addr}");
+                    spawn_connection(stream, &disc, &bcast_tx, &pool, &run_lock);
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    debug!("server: ctrl-c received, shutting down worker pool");
+                    pool.shutdown();
+                    return Ok(());
+                }
+            }
         }
     }
 }

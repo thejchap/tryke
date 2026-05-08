@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import json
+import os
+import subprocess
 import sys
 import tempfile
+import textwrap
+import time
 import traceback
 import types
 import unittest
@@ -18,6 +23,8 @@ from tryke.worker import (
     _extract_soft_failures,
     _is_user_frame,
     _make_assertion_wire,
+    _parent_is_alive,
+    _watch_parent_and_exit,
 )
 
 
@@ -630,3 +637,90 @@ with describe("assertion helpers"):
             lookup_line=False,
         )
         expect(_is_user_frame(frame), "tryke internal frame is excluded").to_be_falsy()
+
+
+def _wait_for_pid_exit(pid: int, deadline_s: float) -> bool:
+    """Poll until *pid* is no longer alive or *deadline_s* elapses.
+
+    Returns True if the process exited, False on timeout. Uses
+    ``os.kill(pid, 0)`` rather than ``os.waitpid`` because the worker is
+    not a child of this test process — it has been reparented to init —
+    and ``waitpid`` only works for direct children.
+    """
+    deadline = time.monotonic() + deadline_s
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+with describe("parent-death watchdog"):
+
+    @test(name="parent_is_alive is true under normal conditions")
+    def test_parent_alive_under_normal_conditions() -> None:
+        # Sanity check: when the parent is still around (`getppid` != 1),
+        # the helper must return True so the watchdog loop keeps polling
+        # rather than instantly killing the worker.
+        expect(_parent_is_alive(), "alive when ppid != init").to_be_truthy()
+
+    @test(name="orphaned worker exits via watchdog")
+    def test_orphaned_worker_exits() -> None:
+        # End-to-end check for the user-visible bug: when the parent
+        # process that spawned `python -m tryke.worker` dies, the
+        # worker must terminate rather than linger as an orphaned
+        # process. We simulate the kill path by spawning a wrapper
+        # that itself spawns the worker and then exits via `os._exit`,
+        # leaving the worker reparented to init.
+        if os.name != "posix":
+            return  # watchdog only runs on posix; pipe-close handles windows
+        repo_root = Path(__file__).resolve().parent.parent
+        python_dir = str(repo_root / "python")
+        wrapper = textwrap.dedent(
+            f"""
+            import os, subprocess, sys
+            env = dict(os.environ)
+            extra = {python_dir!r}
+            existing = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = extra + os.pathsep + existing
+            p = subprocess.Popen(
+                [sys.executable, "-m", "tryke.worker"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                env=env,
+            )
+            sys.stdout.write(str(p.pid) + "\\n")
+            sys.stdout.flush()
+            os._exit(0)
+            """
+        ).strip()
+        result = subprocess.run(  # noqa: S603
+            [sys.executable, "-c", wrapper],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        worker_pid = int(result.stdout.strip())
+        try:
+            exited = _wait_for_pid_exit(worker_pid, deadline_s=5.0)
+        finally:
+            # Belt-and-braces cleanup so a regression in this test
+            # doesn't leak workers into the developer's machine.
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(worker_pid, 9)
+        expect(
+            exited,
+            f"worker pid={worker_pid} should exit within 5s of parent death",
+        ).to_be_truthy()
+
+    @test(name="watchdog loop is reachable")
+    def test_watchdog_loop_callable() -> None:
+        # Cheap smoke check that the symbol resolves and is callable
+        # without raising. We don't actually run the loop here (it is
+        # infinite by design); the integration test above exercises the
+        # full path.
+        expect(callable(_watch_parent_and_exit), "watchdog is callable").to_be_truthy()

@@ -23,6 +23,23 @@ use crate::execution::{report_cycle, worker_pool_size};
 /// long enough to avoid burning CPU on a tight poll.
 const QUIT_POLL_INTERVAL: Duration = Duration::from_millis(150);
 
+/// Wake up the watch loop on SIGINT (Ctrl-C) so it breaks naturally
+/// and runs `pool.shutdown()` instead of being aborted mid-loop.
+///
+/// `tokio::signal::ctrl_c` registers via `signal-hook-registry`, which
+/// supports multiple handlers per signal — this coexists with the
+/// progress reporter's `ctrlc::set_handler` (also registered through
+/// the same registry on Unix). The progress handler still gets to run
+/// its terminal cleanup; this task simply ensures the watch loop's
+/// own shutdown path runs first.
+fn spawn_signal_listener(quit: Arc<AtomicBool>) {
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            quit.store(true, Ordering::SeqCst);
+        }
+    });
+}
+
 /// Spawn a thread that reads single keypresses from stdin and flips
 /// `quit` to `true` when the user presses `q` (or `Q`, or Escape).
 /// No-op when stdin isn't a TTY (CI, piped input).
@@ -145,6 +162,7 @@ pub async fn run_watch(
 
     let quit = Arc::new(AtomicBool::new(false));
     spawn_quit_listener(Arc::clone(&quit));
+    spawn_signal_listener(Arc::clone(&quit));
 
     loop {
         if quit.load(Ordering::SeqCst) {

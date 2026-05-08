@@ -59,6 +59,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import traceback
 import unittest
@@ -850,6 +851,56 @@ class Worker:
         return _passed(ms, out, err)
 
 
+_PARENT_WATCHDOG_INTERVAL = 0.5
+
+# Captured at module import. Comparing against the *initial* parent — not
+# against PID 1 — avoids a false-positive orphan detection when the worker
+# is launched inside a sandbox/container where the original parent itself
+# is PID 1 (e.g. `nextest` test binaries running under nspawn). In that
+# environment `getppid` returns 1 from the very first call, and a naive
+# "ppid == 1 means orphaned" check would terminate the worker immediately.
+_INITIAL_PPID = os.getppid()
+
+
+def _parent_is_alive() -> bool:
+    """Return False once this worker has been orphaned.
+
+    On Unix the kernel reparents a child whose parent dies onto a new
+    parent (PID 1 or a subreaper), changing `getppid`. We compare
+    against the parent observed at startup rather than hard-coding
+    PID 1 so the check works correctly inside containers where the
+    spawning process *is* PID 1.
+
+    On non-posix platforms reparenting isn't guaranteed; report alive
+    and rely on stdin EOF (which Windows produces when the parent's
+    pipe handle closes) to terminate the worker instead.
+    """
+    if os.name != "posix":
+        return True
+    return os.getppid() == _INITIAL_PPID
+
+
+def _watch_parent_and_exit(interval: float = _PARENT_WATCHDOG_INTERVAL) -> None:
+    """Daemon-thread loop: terminate this worker when the parent dies.
+
+    The Rust runner spawns long-lived workers and ordinarily takes them
+    down by closing their stdin pipe (which causes the main loop's
+    blocking `for raw in self._input` to exit on EOF). That path fails
+    when the worker is mid-RPC or otherwise not currently reading stdin
+    at the moment the parent dies — a situation that produces orphaned
+    workers chewing CPU after the user kills `tryke test --watch` or
+    `tryke server`. Polling `getppid` catches every parent-death path
+    (SIGINT, SIGKILL, panic, OOM) without depending on signal delivery
+    or pipe-close timing.
+    """
+    while _parent_is_alive():
+        time.sleep(interval)
+    # `os._exit` skips atexit / finalizers, which is what we want: the
+    # parent is gone, so flushing buffers to a closed stdout pipe is
+    # both pointless and a likely source of `BrokenPipeError` noise.
+    os._exit(0)
+
+
 def _configure_logging_from_env() -> None:
     """Opt-in worker logging via ``TRYKE_LOG``.
 
@@ -885,6 +936,11 @@ def _configure_logging_from_env() -> None:
 def main() -> None:
     _configure_logging_from_env()
     _log.debug("worker main: starting (pid=%d)", os.getpid())
+    threading.Thread(
+        target=_watch_parent_and_exit,
+        name="tryke-parent-watchdog",
+        daemon=True,
+    ).start()
     Worker(sys.stdin, sys.stdout).run()
 
 

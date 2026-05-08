@@ -164,20 +164,32 @@ impl Server {
             }
         });
 
+        // Build the Ctrl-C future once and reuse it across loop
+        // iterations. A fresh `tokio::signal::ctrl_c()` per iteration
+        // would register and immediately drop a signal listener every
+        // accept, which is wasteful and depends on registry-internal
+        // cleanup ordering for correctness.
+        let ctrl_c = tokio::signal::ctrl_c();
+        tokio::pin!(ctrl_c);
         loop {
             // Bail out of the accept loop on Ctrl-C so the pool's
             // workers receive an explicit Shutdown rather than being
-            // abandoned to FD-close cleanup. Pairs with the python
-            // worker's parent-death watchdog as a belt-and-braces
-            // safety net against orphaned `python -m tryke.worker`
-            // processes after the user interrupts the server.
+            // abandoned to FD-close cleanup. The Shutdown send is
+            // best-effort — it enqueues the message, but we return
+            // before driving the worker tasks to completion, so the
+            // tokio runtime tears down before each `worker_task` can
+            // actually call `child.kill().await`. The python worker's
+            // parent-death watchdog is the load-bearing piece that
+            // guarantees no orphans; this path just makes the rust
+            // side exit on the cooperative shutdown path instead of
+            // via signal-default termination.
             tokio::select! {
                 accept = listener.accept() => {
                     let (stream, addr) = accept?;
                     debug!("accepted connection from {addr}");
                     spawn_connection(stream, &disc, &bcast_tx, &pool, &run_lock);
                 }
-                _ = tokio::signal::ctrl_c() => {
+                _ = &mut ctrl_c => {
                     debug!("server: ctrl-c received, shutting down worker pool");
                     pool.shutdown();
                     return Ok(());

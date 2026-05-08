@@ -661,61 +661,103 @@ with describe("parent-death watchdog"):
 
     @test(name="parent_is_alive is true under normal conditions")
     def test_parent_alive_under_normal_conditions() -> None:
-        # Sanity check: when the parent is still around (`getppid` != 1),
-        # the helper must return True so the watchdog loop keeps polling
-        # rather than instantly killing the worker.
-        expect(_parent_is_alive(), "alive when ppid != init").to_be_truthy()
+        # Sanity check: when the parent observed at startup is still
+        # around (`getppid` matches `_INITIAL_PPID`), the helper must
+        # return True so the watchdog loop keeps polling rather than
+        # instantly killing the worker. The check is against the
+        # captured initial ppid — not against PID 1 — so containerized
+        # environments where the spawning process is itself init still
+        # behave correctly.
+        expect(
+            _parent_is_alive(), "alive when ppid unchanged since startup"
+        ).to_be_truthy()
 
-    @test(name="orphaned worker exits via watchdog")
+    @test(name="orphaned worker exits via watchdog while busy")
     def test_orphaned_worker_exits() -> None:
-        # End-to-end check for the user-visible bug: when the parent
-        # process that spawned `python -m tryke.worker` dies, the
-        # worker must terminate rather than linger as an orphaned
-        # process. We simulate the kill path by spawning a wrapper
-        # that itself spawns the worker and then exits via `os._exit`,
-        # leaving the worker reparented to init.
+        # End-to-end check for the user-visible bug. To distinguish the
+        # watchdog path from incidental "stdin EOF terminates the
+        # worker" cleanup, the wrapper sends a long-running `run_test`
+        # request before orphaning the worker: the worker is then
+        # blocked inside the test body (sleeping) rather than reading
+        # stdin, so EOF on the closed stdin pipe wouldn't be observed
+        # for ~30s. The 5s deadline below is therefore only met when
+        # the parent-death watchdog actually fires.
         if os.name != "posix":
             return  # watchdog only runs on posix; pipe-close handles windows
         repo_root = Path(__file__).resolve().parent.parent
         python_dir = str(repo_root / "python")
-        wrapper = textwrap.dedent(
-            f"""
-            import os, subprocess, sys
-            env = dict(os.environ)
-            extra = {python_dir!r}
-            existing = env.get("PYTHONPATH", "")
-            env["PYTHONPATH"] = extra + os.pathsep + existing
-            p = subprocess.Popen(
-                [sys.executable, "-m", "tryke.worker"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                env=env,
+        with tempfile.TemporaryDirectory() as tmp:
+            slow_test = Path(tmp) / "slow_test_module.py"
+            slow_test.write_text(
+                "from tryke import test\n\n"
+                "@test\n"
+                "def test_sleeps() -> None:\n"
+                "    import time\n"
+                "    time.sleep(30)\n",
             )
-            sys.stdout.write(str(p.pid) + "\\n")
-            sys.stdout.flush()
-            os._exit(0)
-            """
-        ).strip()
-        result = subprocess.run(  # noqa: S603
-            [sys.executable, "-c", wrapper],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        )
-        worker_pid = int(result.stdout.strip())
-        try:
-            exited = _wait_for_pid_exit(worker_pid, deadline_s=5.0)
-        finally:
-            # Belt-and-braces cleanup so a regression in this test
-            # doesn't leak workers into the developer's machine.
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(worker_pid, 9)
-        expect(
-            exited,
-            f"worker pid={worker_pid} should exit within 5s of parent death",
-        ).to_be_truthy()
+            wrapper = textwrap.dedent(
+                f"""
+                import json, os, subprocess, sys, time
+                env = dict(os.environ)
+                extras = [{str(tmp)!r}, {python_dir!r}]
+                existing = env.get("PYTHONPATH", "")
+                env["PYTHONPATH"] = os.pathsep.join([*extras, existing])
+                p = subprocess.Popen(
+                    [sys.executable, "-m", "tryke.worker"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    env=env,
+                )
+                sys.stdout.write(str(p.pid) + "\\n")
+                sys.stdout.flush()
+                req = json.dumps({{
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "run_test",
+                    "params": {{
+                        "module": "slow_test_module",
+                        "function": "test_sleeps",
+                    }},
+                }}) + "\\n"
+                p.stdin.write(req.encode())
+                p.stdin.flush()
+                # Give the worker time to import the module and start
+                # the test body. Once the test thread is sleeping, the
+                # worker is no longer reading stdin and stdin-EOF
+                # cleanup cannot fire — only the watchdog can rescue.
+                time.sleep(0.5)
+                os._exit(0)
+                """
+            ).strip()
+            result = subprocess.run(  # noqa: S603
+                [sys.executable, "-c", wrapper],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            expect(
+                result.returncode,
+                f"wrapper exited cleanly (stderr={result.stderr!r})",
+            ).to_equal(0)
+            stdout = result.stdout.strip()
+            expect(
+                stdout,
+                f"wrapper printed worker pid (stderr={result.stderr!r})",
+            ).not_.to_equal("")
+            worker_pid = int(stdout)
+            try:
+                exited = _wait_for_pid_exit(worker_pid, deadline_s=5.0)
+            finally:
+                # Belt-and-braces cleanup so a regression in this test
+                # doesn't leak workers into the developer's machine.
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(worker_pid, 9)
+            expect(
+                exited,
+                f"worker pid={worker_pid} should exit within 5s of parent death",
+            ).to_be_truthy()
 
     @test(name="watchdog loop is reachable")
     def test_watchdog_loop_callable() -> None:

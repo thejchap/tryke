@@ -8,7 +8,9 @@ Watch mode monitors your project for file changes and reruns only the affected t
 tryke test --watch
 ```
 
-Tryke watches all `.py` files in the project, respecting `.gitignore`. When a file changes, it:
+Tryke starts the watcher idle and waits for the first file change before
+running anything. Pass `--now` to kick off a full run immediately on
+startup instead. Either way, once a file changes, Tryke:
 
 1. Identifies which modules were modified
 2. Walks the import graph to find all tests that depend on the changed modules
@@ -73,6 +75,19 @@ tryke test --watch -j 4
 ```
 
 See [concurrency](../concepts/concurrency.md) for details on the worker pool.
+
+### Run tests immediately on startup
+
+By default watch mode does not run any tests until the first file change.
+Pass `--now` to run the full test set as soon as the watcher comes up:
+
+```bash
+tryke test --watch --now
+```
+
+This is useful when you want the watcher to behave like a continuous
+test runner that always gives you a baseline result without waiting
+for a save.
 
 ### Run all tests on every change
 

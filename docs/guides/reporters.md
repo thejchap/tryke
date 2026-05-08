@@ -20,7 +20,7 @@ Sample output (with `-v` to surface per-assertion lines):
 <!-- REPORTER:text:START -->
 
 ```ansi
-[1mtryke test[0m [2mv0.0.25[0m
+[1mtryke test[0m [2mv0.0.27[0m
 
 sample.py:
   users
@@ -62,7 +62,7 @@ Sample output:
 <!-- REPORTER:dot:START -->
 
 ```ansi
-[1mtryke test[0m [2mv0.0.25[0m
+[1mtryke test[0m [2mv0.0.27[0m
 
 [32m.[39m[32m.[39m
 
@@ -150,7 +150,7 @@ Sample output:
 <!-- REPORTER:next:START -->
 
 ```ansi
-[1mtryke test[0m [2mv0.0.25[0m
+[1mtryke test[0m [2mv0.0.27[0m
 
      [1m[32mPASS [39m[0m [[2m  0.000s[0m] [1m[36msample[39m[0m [2m>[0m [36musers[39m [2m>[0m [36mget[39m [2m::[0m returns a stored user
      [1m[32mPASS [39m[0m [[2m  0.000s[0m] [1m[36msample[39m[0m [2m>[0m [36musers[39m [2m>[0m [36mset[39m [2m::[0m stores a new user
@@ -180,7 +180,7 @@ Sample output:
 <!-- REPORTER:sugar:START -->
 
 ```ansi
-[1mtryke test[0m [2mv0.0.25[0m
+[1mtryke test[0m [2mv0.0.27[0m
 
  [1msample.py[0m [32m✓[39m[32m✓[39m                                                [1m2[0m [1m100%[0m [37m████████████[39m
 

@@ -269,6 +269,12 @@ tryke test [OPTIONS] [PATHS]...
 
   By default tryke emits OSC 9;4 progress sequences, which terminals like Ghostty, WezTerm, iTerm2, Windows Terminal, and ConEmu render as a native progress indicator (taskbar badge, tab badge, etc.). Pass this flag in CI or in terminals that mis-render the sequence.
 
+- `--now`
+
+  In watch mode, run tests immediately after starting the watcher.
+
+  By default watch mode starts idle and waits for the first file change before running anything. Pass `--now` to kick off a full run on startup, the same way each subsequent change does.
+
 - `--port` `<PORT>`
 
   Run against an already-running `tryke server` instead of spawning fresh workers.

@@ -122,6 +122,7 @@ pub async fn run_watch(
     workers: Option<usize>,
     dist: DistMode,
     all_tests: bool,
+    run_now: bool,
 ) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let root = root.unwrap_or(&cwd);
@@ -132,12 +133,28 @@ pub async fn run_watch(
     pool.warm().await;
 
     clear_if_tty();
+    // Discovery still runs at startup so the import graph is ready to
+    // answer "which tests are affected?" on the first file change.
+    // Whether we exercise that initial test set is gated by `--now`:
+    // the default is to wait idle for the first save.
     let disc_start = Instant::now();
-    let tests = test_filter.apply(discoverer.rediscover());
-    let hooks = discoverer.hooks();
-    let disc_dur = Some(disc_start.elapsed());
+    let initial_tests = discoverer.rediscover();
+    let disc_dur = disc_start.elapsed();
     emit_discovery_warnings(reporter, &discoverer);
-    run_watch_cycle(reporter, tests, &hooks, &pool, maxfail, dist, disc_dur).await;
+    if run_now {
+        let tests = test_filter.apply(initial_tests);
+        let hooks = discoverer.hooks();
+        run_watch_cycle(
+            reporter,
+            tests,
+            &hooks,
+            &pool,
+            maxfail,
+            dist,
+            Some(disc_dur),
+        )
+        .await;
+    }
 
     let (tx, rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
     let _debouncer = tryke_server::watcher::spawn_watcher(root, excludes, tx)?;

@@ -120,6 +120,11 @@ impl<W: io::Write> Reporter for DotReporter<W> {
         self.clear_armed = true;
     }
 
+    fn on_scheduler_warning(&mut self, message: &str) {
+        self.flush_pending_header();
+        let _ = writeln!(self.writer, "{} {message}", "warning:".yellow().bold());
+    }
+
     fn on_watch_idle(&mut self, info: &crate::reporter::WatchIdleInfo<'_>) {
         self.flush_pending_clear();
         self.header_pending = false;

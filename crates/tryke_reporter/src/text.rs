@@ -525,6 +525,14 @@ impl<W: io::Write> Reporter for TextReporter<W> {
         self.clear_armed = true;
     }
 
+    fn on_scheduler_warning(&mut self, message: &str) {
+        // Drain the deferred clear + header so the warning lands on
+        // the same fresh screen as the upcoming run output, instead
+        // of being wiped by the first `on_test_complete`.
+        self.flush_pending_header();
+        let _ = writeln!(self.writer, "{} {message}", "warning:".yellow().bold());
+    }
+
     fn on_watch_idle(&mut self, info: &crate::reporter::WatchIdleInfo<'_>) {
         // Honor any pending clear (and only then). Discovery warnings
         // emitted just before this call already flushed the clear and

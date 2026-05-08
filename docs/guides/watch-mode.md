@@ -25,10 +25,10 @@ This gives you fast feedback without rerunning the entire suite. Restarting the 
 
 Watch mode listens for keypresses while it waits between runs:
 
-| Key            | Action                                                                  |
-| -------------- | ----------------------------------------------------------------------- |
-| `q` / `Esc`    | Quit                                                                    |
-| `Enter`        | Run all discovered tests against fresh workers (ignores affected-only). |
+| Key           | Action                                                                  |
+| ------------- | ----------------------------------------------------------------------- |
+| `q` / `esc`   | Quit                                                                    |
+| `enter`       | Run all discovered tests against fresh workers (ignores affected-only). |
 
 ## How affected tests are determined
 

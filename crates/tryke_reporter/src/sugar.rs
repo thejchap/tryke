@@ -369,6 +369,12 @@ impl<W: Write> Reporter for SugarReporter<W> {
         self.clear_armed = true;
     }
 
+    fn on_scheduler_warning(&mut self, message: &str) {
+        self.flush_pending_header();
+        let line = format!("{} {message}", "warning:".yellow().bold());
+        self.live.println(&mut self.writer, &line);
+    }
+
     fn on_watch_idle(&mut self, info: &crate::reporter::WatchIdleInfo<'_>) {
         self.flush_pending_clear();
         self.header_pending = false;

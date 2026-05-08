@@ -42,6 +42,17 @@ pub trait Reporter {
     /// reporters paint a header + IDLE badge with the supplied hint;
     /// non-TTY reporters can ignore this.
     fn on_watch_idle(&mut self, _info: &WatchIdleInfo<'_>) {}
+    /// Surface a non-fatal scheduler warning emitted between
+    /// `on_run_start` and the first `on_test_complete` (e.g. dist
+    /// upgrades forced by per-scope fixtures). Routing through the
+    /// reporter — instead of `eprintln!` — lets watch-mode reporters
+    /// flush any deferred clear/header *before* writing the warning,
+    /// so it isn't wiped from the screen when the first test event
+    /// triggers the clear. Default impl preserves the historical
+    /// behavior for non-TTY reporters: write to stderr.
+    fn on_scheduler_warning(&mut self, message: &str) {
+        eprintln!("warning: {message}");
+    }
 }
 
 #[cfg(test)]

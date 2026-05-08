@@ -10,7 +10,7 @@ use crate::reporter::WatchIdleInfo;
 /// mode. Stacked vertically with keys right-aligned in the same
 /// column as the `Tests` / `Discovery` labels so the footer reads as
 /// a continuation of the summary block.
-const WATCH_KEYBINDINGS: &[(&str, &str)] = &[("q", "Quit"), ("enter", "Run all tests")];
+const WATCH_KEYBINDINGS: &[(&str, &str)] = &[("q / esc", "Quit"), ("enter", "Run all tests")];
 
 /// Width of the right-aligned label column shared by `Tests`,
 /// `Start at`, `Duration`, and the watch keybinding keys.

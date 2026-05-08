@@ -144,6 +144,10 @@ impl<R: Reporter> Reporter for ProgressReporter<R> {
     fn on_watch_idle(&mut self, info: &crate::reporter::WatchIdleInfo<'_>) {
         self.inner.on_watch_idle(info);
     }
+
+    fn on_scheduler_warning(&mut self, message: &str) {
+        self.inner.on_scheduler_warning(message);
+    }
 }
 
 #[cfg(test)]

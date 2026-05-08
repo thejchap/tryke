@@ -8,9 +8,11 @@ Watch mode monitors your project for file changes and reruns only the affected t
 tryke test --watch
 ```
 
-Tryke starts the watcher idle and waits for the first file change before
-running anything. Pass `--now` to kick off a full run immediately on
-startup instead. Either way, once a file changes, Tryke:
+On startup Tryke pre-warms the worker pool and runs discovery to
+build the import graph (so it can answer "which tests are affected?"
+on the first save). It then enters an idle state — no tests are
+**executed** until you save a file. Pass `--now` to also run the full
+test set on startup. Either way, once a file changes, Tryke:
 
 1. Identifies which modules were modified
 2. Walks the import graph to find all tests that depend on the changed modules

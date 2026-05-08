@@ -116,8 +116,7 @@ impl<W: io::Write> Reporter for DotReporter<W> {
     }
 
     fn on_watch_idle(&mut self, info: &crate::reporter::WatchIdleInfo<'_>) {
-        crate::clear::clear_terminal_if_tty();
-        self.clear_armed = false;
+        self.flush_pending_clear();
         self.header_pending = false;
         self.write_header();
         crate::summary::write_idle_summary(&mut self.writer, info);

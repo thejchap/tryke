@@ -117,12 +117,12 @@ async fn run_initial_cycle(
     run_now: bool,
 ) {
     // Arm before any reporter output so the deferred clear lands on
-    // the first warning or run-start, whichever fires first. If we
-    // armed after `emit_discovery_warnings`, a later `on_run_start`
-    // would wipe those warnings off the screen.
-    if run_now {
-        reporter.arm_clear();
-    }
+    // the first warning, run-start, or idle frame — whichever fires
+    // first. The reporter's `flush_pending_clear` (called from each
+    // of those paths) consumes the flag, so warnings emitted just
+    // before `on_watch_idle` aren't wiped by a second clear inside
+    // the idle render.
+    reporter.arm_clear();
     let disc_start = Instant::now();
     let initial_tests = discoverer.rediscover();
     let disc_dur = disc_start.elapsed();

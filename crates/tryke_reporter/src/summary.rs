@@ -7,18 +7,21 @@ use tryke_types::RunSummary;
 use crate::reporter::WatchIdleInfo;
 
 /// Keyboard shortcuts shown beneath the summary/idle badge in watch
-/// mode. Order matters — they're rendered left-to-right joined with a
-/// dimmed bullet separator, so the most-used keys come first.
+/// mode. Stacked vertically with keys right-aligned in the same
+/// column as the `Tests` / `Discovery` labels so the footer reads as
+/// a continuation of the summary block.
 const WATCH_KEYBINDINGS: &[(&str, &str)] = &[("q", "Quit"), ("enter", "Run all tests")];
 
+/// Width of the right-aligned label column shared by `Tests`,
+/// `Start at`, `Duration`, and the watch keybinding keys.
+const LABEL_COLUMN_WIDTH: usize = 11;
+
 fn write_watch_keybindings<W: io::Write>(writer: &mut W) {
-    let separator = format!("  {}  ", "·".dimmed());
-    let bindings = WATCH_KEYBINDINGS
-        .iter()
-        .map(|(key, label)| format!("{}{} {}", (*key).bold(), ":".dimmed(), (*label).dimmed()))
-        .collect::<Vec<_>>()
-        .join(&separator);
-    let _ = writeln!(writer, " {bindings}");
+    let _ = writeln!(writer);
+    for (key, label) in WATCH_KEYBINDINGS {
+        let pad = " ".repeat(LABEL_COLUMN_WIDTH.saturating_sub(key.len()));
+        let _ = writeln!(writer, "{pad}{}  {}", (*key).bold(), (*label).dimmed());
+    }
 }
 
 fn format_duration(d: Duration) -> String {

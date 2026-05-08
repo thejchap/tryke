@@ -48,6 +48,11 @@ pub struct TextReporter<W: io::Write = io::Stdout> {
     subcommand_label: &'static str,
     watch_hint: Option<String>,
     clear_armed: bool,
+    /// Set at construction time. `true` only when the reporter writes
+    /// to real stdout *and* stdout is a TTY — so a `with_writer`
+    /// reporter (tests, JSON capture, etc.) never sends a clear
+    /// sequence to a terminal it doesn't own.
+    clear_enabled: bool,
     /// When true, `on_run_start` deferred the header write because
     /// `clear_armed` was set. The header is then emitted (along with
     /// the actual screen clear) at the moment the first content event
@@ -68,6 +73,7 @@ impl TextReporter {
             subcommand_label: "tryke test",
             watch_hint: None,
             clear_armed: false,
+            clear_enabled: crate::clear::stdout_is_terminal(),
             header_pending: false,
         }
     }
@@ -82,6 +88,7 @@ impl TextReporter {
             subcommand_label: "tryke test",
             watch_hint: None,
             clear_armed: false,
+            clear_enabled: crate::clear::stdout_is_terminal(),
             header_pending: false,
         }
     }
@@ -103,6 +110,7 @@ impl<W: io::Write> TextReporter<W> {
             subcommand_label: "tryke test",
             watch_hint: None,
             clear_armed: false,
+            clear_enabled: false,
             header_pending: false,
         }
     }
@@ -116,6 +124,7 @@ impl<W: io::Write> TextReporter<W> {
             subcommand_label: "tryke test",
             watch_hint: None,
             clear_armed: false,
+            clear_enabled: false,
             header_pending: false,
         }
     }
@@ -131,7 +140,9 @@ impl<W: io::Write> TextReporter<W> {
     /// warning, or a discovery error.
     fn flush_pending_clear(&mut self) {
         if self.clear_armed {
-            crate::clear::clear_terminal_if_tty();
+            if self.clear_enabled {
+                crate::clear::clear_terminal();
+            }
             self.clear_armed = false;
         }
     }
@@ -570,6 +581,17 @@ mod tests {
 
     fn output(reporter: &TextReporter<Vec<u8>>) -> String {
         String::from_utf8_lossy(&reporter.writer).into_owned()
+    }
+
+    #[test]
+    fn with_writer_disables_terminal_clear() {
+        // Tests and other non-stdout consumers must never trigger
+        // `clearscreen::clear()` — that would punch through to the
+        // user's terminal regardless of where the reporter is
+        // actually writing. Only stdout-backed constructors flip
+        // `clear_enabled` on (and only when stdout is a TTY).
+        let r = TextReporter::with_writer(Vec::<u8>::new());
+        assert!(!r.clear_enabled);
     }
 
     #[test]

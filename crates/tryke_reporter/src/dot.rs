@@ -9,6 +9,7 @@ pub struct DotReporter<W: io::Write = io::Stdout> {
     writer: W,
     watch_hint: Option<String>,
     clear_armed: bool,
+    clear_enabled: bool,
     /// See `TextReporter::header_pending` for rationale — defers the
     /// header until the first content event so an armed cycle keeps
     /// the previous run on screen through worker warmup.
@@ -22,6 +23,7 @@ impl DotReporter {
             writer: io::stdout(),
             watch_hint: None,
             clear_armed: false,
+            clear_enabled: crate::clear::stdout_is_terminal(),
             header_pending: false,
         }
     }
@@ -39,6 +41,7 @@ impl<W: io::Write> DotReporter<W> {
             writer,
             watch_hint: None,
             clear_armed: false,
+            clear_enabled: false,
             header_pending: false,
         }
     }
@@ -49,7 +52,9 @@ impl<W: io::Write> DotReporter<W> {
 
     fn flush_pending_clear(&mut self) {
         if self.clear_armed {
-            crate::clear::clear_terminal_if_tty();
+            if self.clear_enabled {
+                crate::clear::clear_terminal();
+            }
             self.clear_armed = false;
         }
     }

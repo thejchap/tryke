@@ -48,6 +48,13 @@ pub struct TextReporter<W: io::Write = io::Stdout> {
     subcommand_label: &'static str,
     watch_hint: Option<String>,
     clear_armed: bool,
+    /// When true, `on_run_start` deferred the header write because
+    /// `clear_armed` was set. The header is then emitted (along with
+    /// the actual screen clear) at the moment the first content event
+    /// fires — typically `on_test_complete`. This collapses the gap
+    /// between "save" and "first new result is on screen" by keeping
+    /// the previous run visible until results are actually ready.
+    header_pending: bool,
 }
 
 impl TextReporter {
@@ -61,6 +68,7 @@ impl TextReporter {
             subcommand_label: "tryke test",
             watch_hint: None,
             clear_armed: false,
+            header_pending: false,
         }
     }
 
@@ -74,6 +82,7 @@ impl TextReporter {
             subcommand_label: "tryke test",
             watch_hint: None,
             clear_armed: false,
+            header_pending: false,
         }
     }
 }
@@ -94,6 +103,7 @@ impl<W: io::Write> TextReporter<W> {
             subcommand_label: "tryke test",
             watch_hint: None,
             clear_armed: false,
+            header_pending: false,
         }
     }
 
@@ -106,6 +116,7 @@ impl<W: io::Write> TextReporter<W> {
             subcommand_label: "tryke test",
             watch_hint: None,
             clear_armed: false,
+            header_pending: false,
         }
     }
 
@@ -122,6 +133,29 @@ impl<W: io::Write> TextReporter<W> {
         if self.clear_armed {
             crate::clear::clear_terminal_if_tty();
             self.clear_armed = false;
+        }
+    }
+
+    fn write_header(&mut self) {
+        let _ = writeln!(
+            self.writer,
+            "{} {}",
+            self.subcommand_label.bold(),
+            format!("v{}", env!("CARGO_PKG_VERSION")).dimmed()
+        );
+        let _ = writeln!(self.writer);
+    }
+
+    /// If `on_run_start` deferred the header (because the clear was
+    /// armed), emit it now — along with the screen clear — so the
+    /// caller's content lands on a fresh terminal under the header.
+    /// Called at the top of every method that produces post-run-start
+    /// output (`on_test_complete`, `on_run_complete`).
+    fn flush_pending_header(&mut self) {
+        if self.header_pending {
+            self.flush_pending_clear();
+            self.write_header();
+            self.header_pending = false;
         }
     }
 }
@@ -166,20 +200,20 @@ fn format_duration(d: Duration) -> String {
 
 impl<W: io::Write> Reporter for TextReporter<W> {
     fn on_run_start(&mut self, _tests: &[TestItem]) {
-        self.flush_pending_clear();
         self.current_file = None;
         self.current_groups.clear();
-        let _ = writeln!(
-            self.writer,
-            "{} {}",
-            self.subcommand_label.bold(),
-            format!("v{}", env!("CARGO_PKG_VERSION")).dimmed()
-        );
-        let _ = writeln!(self.writer);
+        if self.clear_armed {
+            // Hold the header until the first content event lands —
+            // see `header_pending` doc on the struct.
+            self.header_pending = true;
+        } else {
+            self.write_header();
+        }
     }
 
     #[expect(clippy::too_many_lines)]
     fn on_test_complete(&mut self, result: &TestResult) {
+        self.flush_pending_header();
         let file = result.test.file_path.as_ref();
         if file != self.current_file.as_ref() {
             if !matches!(self.verbosity, Verbosity::Quiet) {
@@ -449,6 +483,7 @@ impl<W: io::Write> Reporter for TextReporter<W> {
     }
 
     fn on_run_complete(&mut self, summary: &RunSummary) {
+        self.flush_pending_header();
         crate::summary::write_summary_with_hint(
             &mut self.writer,
             summary,
@@ -477,6 +512,14 @@ impl<W: io::Write> Reporter for TextReporter<W> {
 
     fn arm_clear(&mut self) {
         self.clear_armed = true;
+    }
+
+    fn on_watch_idle(&mut self, info: &crate::reporter::WatchIdleInfo<'_>) {
+        crate::clear::clear_terminal_if_tty();
+        self.clear_armed = false;
+        self.header_pending = false;
+        self.write_header();
+        crate::summary::write_idle_summary(&mut self.writer, info);
     }
 
     fn on_discovery_warning(&mut self, warning: &DiscoveryWarning) {
@@ -527,15 +570,69 @@ mod tests {
     }
 
     #[test]
-    fn arm_clear_is_consumed_by_first_output() {
-        // The flag should disarm itself after the first visible output
-        // method fires, so a single `arm_clear` doesn't clobber later
-        // events in the same cycle.
+    fn arm_clear_defers_header_until_first_content_event() {
+        // When the clear is armed, `on_run_start` must hold the
+        // header back so the previous run's output stays on screen
+        // through worker warmup. The clear + header land together at
+        // the first `on_test_complete`.
         let mut r = reporter();
         r.arm_clear();
-        assert!(r.clear_armed);
         r.on_run_start(&[]);
-        assert!(!r.clear_armed, "first output should consume the flag");
+        assert!(
+            r.clear_armed && r.header_pending,
+            "on_run_start should defer both clear and header"
+        );
+        let pre_test = output(&r);
+        assert!(
+            !pre_test.contains("tryke test"),
+            "header must not be written until the first test event"
+        );
+
+        r.on_test_complete(&TestResult {
+            test: TestItem {
+                name: "t".into(),
+                module_path: "m".into(),
+                ..Default::default()
+            },
+            outcome: TestOutcome::Passed,
+            duration: std::time::Duration::from_millis(1),
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+        assert!(!r.clear_armed && !r.header_pending);
+        assert!(
+            output(&r).contains("tryke test"),
+            "header should appear with the first test result"
+        );
+    }
+
+    #[test]
+    fn unarmed_on_run_start_writes_header_immediately() {
+        let mut r = reporter();
+        r.on_run_start(&[]);
+        assert!(output(&r).contains("tryke test"));
+    }
+
+    #[test]
+    fn discovery_warning_clears_and_unarms_header_path() {
+        // When a discovery warning fires (i.e. there's something to
+        // show before the test run), the clear must happen at the
+        // warning so the warning is visible. on_run_start then writes
+        // the header normally.
+        let mut r = reporter();
+        r.arm_clear();
+        r.on_discovery_warning(&tryke_types::DiscoveryWarning {
+            file_path: PathBuf::from("a.py"),
+            kind: tryke_types::DiscoveryWarningKind::DynamicImports,
+            message: "dynamic imports".into(),
+        });
+        assert!(
+            !r.clear_armed,
+            "warning should consume the armed clear so it isn't wiped later"
+        );
+        r.on_run_start(&[]);
+        assert!(!r.header_pending, "header should write inline, not defer");
+        assert!(output(&r).contains("tryke test"));
     }
 
     #[test]

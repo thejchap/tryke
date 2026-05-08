@@ -43,6 +43,10 @@ fn red_bar_template() -> String {
     )
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Each flag captures an independent piece of run state; collapsing them into an enum would tangle the state machine."
+)]
 pub struct SugarReporter<W: Write = io::Stdout> {
     writer: W,
     live: LiveArea,
@@ -59,6 +63,7 @@ pub struct SugarReporter<W: Write = io::Stdout> {
     subcommand_label: &'static str,
     watch_hint: Option<String>,
     clear_armed: bool,
+    header_pending: bool,
 }
 
 impl SugarReporter {
@@ -80,6 +85,7 @@ impl SugarReporter {
             subcommand_label: "tryke test",
             watch_hint: None,
             clear_armed: false,
+            header_pending: false,
         }
     }
 }
@@ -108,11 +114,37 @@ impl<W: Write> SugarReporter<W> {
             subcommand_label: "tryke test",
             watch_hint: None,
             clear_armed: false,
+            header_pending: false,
         }
     }
 
     pub fn into_writer(self) -> W {
         self.writer
+    }
+
+    fn flush_pending_clear(&mut self) {
+        if self.clear_armed {
+            crate::clear::clear_terminal_if_tty();
+            self.clear_armed = false;
+        }
+    }
+
+    fn write_header(&mut self) {
+        let header = format!(
+            "{} {}",
+            self.subcommand_label.bold(),
+            format!("v{}", env!("CARGO_PKG_VERSION")).dimmed()
+        );
+        self.live.println(&mut self.writer, &header);
+        self.live.println(&mut self.writer, "");
+    }
+
+    fn flush_pending_header(&mut self) {
+        if self.header_pending {
+            self.flush_pending_clear();
+            self.write_header();
+            self.header_pending = false;
+        }
     }
 
     fn ensure_bar_started(&mut self) {
@@ -256,10 +288,6 @@ fn strip_ansi_count_chars(s: &str) -> usize {
 
 impl<W: Write> Reporter for SugarReporter<W> {
     fn on_run_start(&mut self, tests: &[TestItem]) {
-        if self.clear_armed {
-            crate::clear::clear_terminal_if_tty();
-            self.clear_armed = false;
-        }
         self.total_tests = tests.len() as u64;
         self.completed_tests = 0;
         self.total_files = tests.iter().map(file_label).collect::<HashSet<_>>().len() as u64;
@@ -271,16 +299,15 @@ impl<W: Write> Reporter for SugarReporter<W> {
         self.started = false;
         self.failure_seen = false;
 
-        let header = format!(
-            "{} {}",
-            self.subcommand_label.bold(),
-            format!("v{}", env!("CARGO_PKG_VERSION")).dimmed()
-        );
-        self.live.println(&mut self.writer, &header);
-        self.live.println(&mut self.writer, "");
+        if self.clear_armed {
+            self.header_pending = true;
+        } else {
+            self.write_header();
+        }
     }
 
     fn on_test_complete(&mut self, result: &TestResult) {
+        self.flush_pending_header();
         self.ensure_bar_started();
 
         // File transition: commit the previous file's accumulated marks
@@ -308,6 +335,7 @@ impl<W: Write> Reporter for SugarReporter<W> {
     }
 
     fn on_run_complete(&mut self, run_summary: &RunSummary) {
+        self.flush_pending_header();
         self.commit_current_file();
         self.live.finish_and_clear();
 
@@ -334,6 +362,14 @@ impl<W: Write> Reporter for SugarReporter<W> {
 
     fn arm_clear(&mut self) {
         self.clear_armed = true;
+    }
+
+    fn on_watch_idle(&mut self, info: &crate::reporter::WatchIdleInfo<'_>) {
+        crate::clear::clear_terminal_if_tty();
+        self.clear_armed = false;
+        self.header_pending = false;
+        self.write_header();
+        summary::write_idle_summary(&mut self.writer, info);
     }
 }
 

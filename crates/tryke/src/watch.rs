@@ -12,7 +12,7 @@ use anyhow::Result;
 use console::{Key, Term};
 use log::{LevelFilter, debug};
 use tryke_discovery::Discoverer;
-use tryke_reporter::Reporter;
+use tryke_reporter::{Reporter, reporter::WatchIdleInfo};
 use tryke_runner::{DistMode, WorkerPool};
 use tryke_types::{DiscoveryWarning, DiscoveryWarningKind, HookItem, filter::TestFilter};
 
@@ -103,9 +103,10 @@ async fn run_watch_cycle(
 /// Perform startup discovery and, when `run_now` is set, the initial
 /// test cycle. Discovery runs unconditionally so the import graph is
 /// ready to answer "which tests are affected?" on the first file
-/// change. When `run_now` is false we leave the user's terminal
-/// untouched (no `clear_if_tty`) and print a single idle hint so it's
-/// obvious the watcher is alive.
+/// change. When `run_now` is false we hand the reporter an idle frame
+/// (header + Tests/Start/Discovery block + IDLE badge) so the
+/// terminal communicates clearly that the watcher is alive and
+/// waiting.
 async fn run_initial_cycle(
     reporter: &mut dyn Reporter,
     discoverer: &mut Discoverer,
@@ -131,10 +132,12 @@ async fn run_initial_cycle(
         let hooks = discoverer.hooks();
         run_watch_cycle(reporter, tests, &hooks, pool, maxfail, dist, Some(disc_dur)).await;
     } else {
-        use std::io::IsTerminal;
-        if std::io::stderr().is_terminal() {
-            eprintln!("tryke test --watch: idle — waiting for file changes... press q to quit");
-        }
+        let start_time = chrono::Local::now().format("%H:%M:%S").to_string();
+        reporter.on_watch_idle(&WatchIdleInfo {
+            hint: "Waiting for file changes... press q to quit",
+            start_time: Some(&start_time),
+            discovery_duration: Some(disc_dur),
+        });
     }
 }
 

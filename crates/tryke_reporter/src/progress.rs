@@ -140,6 +140,10 @@ impl<R: Reporter> Reporter for ProgressReporter<R> {
     fn arm_clear(&mut self) {
         self.inner.arm_clear();
     }
+
+    fn on_watch_idle(&mut self, info: &crate::reporter::WatchIdleInfo<'_>) {
+        self.inner.on_watch_idle(info);
+    }
 }
 
 #[cfg(test)]

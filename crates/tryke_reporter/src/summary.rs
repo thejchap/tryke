@@ -4,6 +4,8 @@ use std::time::Duration;
 use owo_colors::OwoColorize;
 use tryke_types::RunSummary;
 
+use crate::reporter::WatchIdleInfo;
+
 fn format_duration(d: Duration) -> String {
     let ms = d.as_secs_f64() * 1000.0;
     if ms < 1000.0 {
@@ -164,6 +166,36 @@ pub fn write_summary_with_hint<W: io::Write>(
     } else {
         let _ = writeln!(writer, " {badge}");
     }
+}
+
+/// Render the idle frame shown when watch mode is awaiting the first
+/// file change. Mirrors the live-run summary layout (Tests / Start at
+/// / Duration block plus a trailing badge) but stamps an `IDLE` badge
+/// in blue and reports the discovery duration only — no test
+/// execution has happened yet.
+pub fn write_idle_summary<W: io::Write>(writer: &mut W, info: &WatchIdleInfo<'_>) {
+    let badge = format!("{}", " IDLE ".on_blue().black().bold());
+
+    let _ = writeln!(writer);
+
+    let _ = writeln!(
+        writer,
+        "      {}  {} {}",
+        "Tests".dimmed(),
+        "no tests run yet".dimmed(),
+        "(0)".dimmed()
+    );
+
+    if let Some(t) = info.start_time {
+        let _ = writeln!(writer, "   {}  {}", "Start at".dimmed(), t);
+    }
+
+    if let Some(d) = info.discovery_duration {
+        let _ = writeln!(writer, "  {}  {}", "Discovery".dimmed(), format_duration(d));
+    }
+
+    let _ = writeln!(writer);
+    let _ = writeln!(writer, " {badge} {}", info.hint.dimmed());
 }
 
 #[cfg(test)]

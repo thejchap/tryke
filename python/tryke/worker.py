@@ -936,11 +936,17 @@ def _configure_logging_from_env() -> None:
 def main() -> None:
     _configure_logging_from_env()
     _log.debug("worker main: starting (pid=%d)", os.getpid())
-    threading.Thread(
-        target=_watch_parent_and_exit,
-        name="tryke-parent-watchdog",
-        daemon=True,
-    ).start()
+    # Only start the watchdog where it can do useful work. On non-posix
+    # platforms `_parent_is_alive` is hard-coded to True (no portable
+    # reparenting signal exists), so spawning the thread there would
+    # leave a permanent no-op sleeper running for the worker's lifetime.
+    # Pipe-close on parent exit handles cleanup on Windows.
+    if os.name == "posix":
+        threading.Thread(
+            target=_watch_parent_and_exit,
+            name="tryke-parent-watchdog",
+            daemon=True,
+        ).start()
     Worker(sys.stdin, sys.stdout).run()
 
 

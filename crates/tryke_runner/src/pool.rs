@@ -257,21 +257,6 @@ async fn run_single_test(
             });
         }
     }
-
-    // Recycle a worker that has run enough tests to be at risk of FD/state
-    // accumulation. The Err arm above already nulled state.process, so this
-    // only fires on the success path. The next test on this worker_task
-    // calls ensure_worker, which spawns a fresh process and replays cached
-    // hooks — same path as crash recovery.
-    if state
-        .process
-        .as_ref()
-        .is_some_and(WorkerProcess::should_recycle)
-        && let Some(mut proc) = state.process.take()
-    {
-        debug!("worker_task: recycling worker after {MAX_TESTS_PER_WORKER} tests");
-        proc.shutdown().await;
-    }
 }
 
 /// Send `register_hooks` to the worker for each unique module in the work
@@ -398,6 +383,23 @@ async fn handle_unit(
         {
             debug!("worker_task: finalize_hooks failed: {e}");
         }
+    }
+
+    // Recycle a worker that has run enough tests to be at risk of FD/state
+    // accumulation. Deferred to the end of the unit (after finalize_hooks)
+    // so per="scope" fixture teardown is not skipped: recycling mid-unit
+    // would drop the live process before its scope fixtures got their
+    // teardown call. The next unit handed to this worker_task hits
+    // ensure_worker, which spawns a fresh process and replays cached
+    // hooks — same path as crash recovery.
+    if state
+        .process
+        .as_ref()
+        .is_some_and(WorkerProcess::should_recycle)
+        && let Some(mut proc) = state.process.take()
+    {
+        debug!("worker_task: recycling worker after {MAX_TESTS_PER_WORKER} tests");
+        proc.shutdown().await;
     }
 }
 
@@ -688,10 +690,12 @@ def test_noop() -> None:
 
     /// A worker process must be recycled after `MAX_TESTS_PER_WORKER` tests
     /// so accumulated module-level state (and the FDs it owns) does not
-    /// grow unboundedly across long runs. We prove a recycle happened by
-    /// recording the worker pid in the test module body — which only runs
-    /// on a fresh interpreter — and asserting we see exactly the expected
-    /// number of distinct pids for the test count.
+    /// grow unboundedly across long runs. The recycle is deferred until
+    /// the end of a unit (so per="scope" teardown is not skipped — see
+    /// `recycle_does_not_skip_scope_fixture_teardown`), so we exercise it
+    /// here by submitting many single-test units. The module body records
+    /// the worker pid on every fresh import; we expect one distinct pid
+    /// per recycle boundary.
     #[tokio::test]
     async fn worker_recycles_after_max_tests() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -721,12 +725,103 @@ def test_noop() -> None:
         let n_tests = usize::try_from(MAX_TESTS_PER_WORKER + 4).expect("test count fits in usize");
         let max_per_worker =
             usize::try_from(MAX_TESTS_PER_WORKER).expect("MAX_TESTS_PER_WORKER fits in usize");
+        // One unit per test so the recycle check at the end of each unit
+        // gets a chance to fire as soon as the threshold is crossed.
+        let units: Vec<WorkUnit> = (0..n_tests)
+            .map(|_| WorkUnit {
+                tests: vec![make_test_item("test_recycle", "test_noop", &test_file)],
+                hooks: vec![],
+            })
+            .collect();
+
+        let pool = WorkerPool::with_python_path(
+            1,
+            &test_python_bin(),
+            dir.path(),
+            &[dir.path().to_path_buf(), python_package_dir()],
+            LevelFilter::Off,
+        );
+        pool.warm().await;
+
+        let results: Vec<TestResult> = pool.run(units).collect().await;
+        assert_eq!(results.len(), n_tests, "expected {n_tests} results");
+        for r in &results {
+            assert!(
+                matches!(r.outcome, TestOutcome::Passed),
+                "test failed unexpectedly: {r:?}",
+            );
+        }
+
+        let pid_lines = std::fs::read_to_string(&pid_log).unwrap_or_default();
+        let distinct_pids: std::collections::HashSet<&str> =
+            pid_lines.lines().filter(|l| !l.is_empty()).collect();
+        let expected_workers = n_tests.div_ceil(max_per_worker);
+        assert_eq!(
+            distinct_pids.len(),
+            expected_workers,
+            "expected {expected_workers} distinct worker pid(s) (one per recycle); \
+             got {} from log: {pid_lines:?}",
+            distinct_pids.len(),
+        );
+
+        pool.shutdown();
+    }
+
+    /// Recycling must never strand a `per="scope"` fixture without its
+    /// teardown. The risk is mid-unit recycling: if we drop the live
+    /// process before `finalize_hooks` runs, the unit's scope fixtures
+    /// die without their `yield`-after teardown, *and* a fresh worker
+    /// re-runs setup when hooks replay — so a buggy version would show
+    /// setup ran twice while teardown ran once (or zero times). We
+    /// submit enough tests in a single unit to cross the recycle
+    /// threshold and assert setup/teardown counts stay matched at one
+    /// each.
+    #[tokio::test]
+    async fn recycle_does_not_skip_scope_fixture_teardown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+
+        let setup_log = dir.path().join("SETUP_LOG");
+        let teardown_log = dir.path().join("TEARDOWN_LOG");
+        let setup_escaped = setup_log.to_string_lossy().replace('\\', "\\\\");
+        let teardown_escaped = teardown_log.to_string_lossy().replace('\\', "\\\\");
+        let test_file = dir.path().join("test_scope_recycle.py");
+        let source = format!(
+            r#"import os
+from tryke import test, fixture, expect, Depends
+
+@fixture(per="scope")
+def scope_resource() -> int:
+    with open("{setup_escaped}", "a") as f:
+        f.write(str(os.getpid()) + "\n")
+        f.flush()
+    yield 42
+    with open("{teardown_escaped}", "a") as f:
+        f.write(str(os.getpid()) + "\n")
+        f.flush()
+
+@test
+def test_uses_scope(r: int = Depends(scope_resource)) -> None:
+    expect(r).to_equal(42)
+"#
+        );
+        std::fs::write(&test_file, source).expect("write test file");
+
+        let hook = HookItem {
+            name: "scope_resource".into(),
+            module_path: "test_scope_recycle".into(),
+            per: FixturePer::Scope,
+            groups: vec![],
+            depends_on: vec![],
+            line_number: None,
+        };
+        let n_tests = usize::try_from(MAX_TESTS_PER_WORKER + 4).expect("test count fits in usize");
         let tests: Vec<TestItem> = (0..n_tests)
-            .map(|_| make_test_item("test_recycle", "test_noop", &test_file))
+            .map(|_| make_test_item("test_scope_recycle", "test_uses_scope", &test_file))
             .collect();
         let unit = WorkUnit {
             tests,
-            hooks: vec![],
+            hooks: vec![hook],
         };
 
         let pool = WorkerPool::with_python_path(
@@ -747,16 +842,20 @@ def test_noop() -> None:
             );
         }
 
-        let pid_lines = std::fs::read_to_string(&pid_log).unwrap_or_default();
-        let distinct_pids: std::collections::HashSet<&str> =
-            pid_lines.lines().filter(|l| !l.is_empty()).collect();
-        let expected_workers = n_tests.div_ceil(max_per_worker);
+        let setup_lines = std::fs::read_to_string(&setup_log).unwrap_or_default();
+        let teardown_lines = std::fs::read_to_string(&teardown_log).unwrap_or_default();
+        let setup_count = setup_lines.lines().filter(|l| !l.is_empty()).count();
+        let teardown_count = teardown_lines.lines().filter(|l| !l.is_empty()).count();
         assert_eq!(
-            distinct_pids.len(),
-            expected_workers,
-            "expected {expected_workers} distinct worker pid(s) (one per recycle); \
-             got {} from log: {pid_lines:?}",
-            distinct_pids.len(),
+            setup_count, 1,
+            "scope fixture setup must run exactly once for the unit; \
+             got {setup_count} from log: {setup_lines:?}",
+        );
+        assert_eq!(
+            teardown_count, 1,
+            "scope fixture teardown must run exactly once for the unit \
+             (recycling must not strand teardown); got {teardown_count} \
+             from log: {teardown_lines:?}",
         );
 
         pool.shutdown();

@@ -11,7 +11,7 @@ use tryke_types::{HookItem, TestOutcome, TestResult};
 
 use crate::protocol::RegisterHooksParams;
 use crate::schedule::WorkUnit;
-use crate::worker::WorkerProcess;
+use crate::worker::{MAX_TESTS_PER_WORKER, WorkerProcess};
 
 /// Per-worker-task state: the (optional) live Python process plus a cache of
 /// the most recent `register_hooks` call per module. The cache exists so
@@ -256,6 +256,21 @@ async fn run_single_test(
                 stderr: stderr_output,
             });
         }
+    }
+
+    // Recycle a worker that has run enough tests to be at risk of FD/state
+    // accumulation. The Err arm above already nulled state.process, so this
+    // only fires on the success path. The next test on this worker_task
+    // calls ensure_worker, which spawns a fresh process and replays cached
+    // hooks — same path as crash recovery.
+    if state
+        .process
+        .as_ref()
+        .is_some_and(WorkerProcess::should_recycle)
+        && let Some(mut proc) = state.process.take()
+    {
+        debug!("worker_task: recycling worker after {MAX_TESTS_PER_WORKER} tests");
+        proc.shutdown().await;
     }
 }
 
@@ -667,6 +682,82 @@ def test_noop() -> None:
         let restarted =
             tokio::time::timeout(std::time::Duration::from_secs(10), pool.restart_workers()).await;
         assert!(restarted.is_ok(), "restart_workers must ack within timeout");
+
+        pool.shutdown();
+    }
+
+    /// A worker process must be recycled after `MAX_TESTS_PER_WORKER` tests
+    /// so accumulated module-level state (and the FDs it owns) does not
+    /// grow unboundedly across long runs. We prove a recycle happened by
+    /// recording the worker pid in the test module body — which only runs
+    /// on a fresh interpreter — and asserting we see exactly the expected
+    /// number of distinct pids for the test count.
+    #[tokio::test]
+    async fn worker_recycles_after_max_tests() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+
+        let pid_log = dir.path().join("PID_LOG");
+        let pid_log_escaped = pid_log.to_string_lossy().replace('\\', "\\\\");
+        let test_file = dir.path().join("test_recycle.py");
+        let source = format!(
+            r#"import os
+
+# Module body runs once per fresh interpreter — record this worker's pid so
+# the test can count distinct workers (one per recycle).
+with open("{pid_log_escaped}", "a") as f:
+    f.write(str(os.getpid()) + "\n")
+    f.flush()
+
+from tryke import test, expect
+
+@test
+def test_noop() -> None:
+    expect(1).to_equal(1)
+"#
+        );
+        std::fs::write(&test_file, source).expect("write test file");
+
+        let n_tests = usize::try_from(MAX_TESTS_PER_WORKER + 4).expect("test count fits in usize");
+        let max_per_worker =
+            usize::try_from(MAX_TESTS_PER_WORKER).expect("MAX_TESTS_PER_WORKER fits in usize");
+        let tests: Vec<TestItem> = (0..n_tests)
+            .map(|_| make_test_item("test_recycle", "test_noop", &test_file))
+            .collect();
+        let unit = WorkUnit {
+            tests,
+            hooks: vec![],
+        };
+
+        let pool = WorkerPool::with_python_path(
+            1,
+            &test_python_bin(),
+            dir.path(),
+            &[dir.path().to_path_buf(), python_package_dir()],
+            LevelFilter::Off,
+        );
+        pool.warm().await;
+
+        let results: Vec<TestResult> = pool.run(vec![unit]).collect().await;
+        assert_eq!(results.len(), n_tests, "expected {n_tests} results");
+        for r in &results {
+            assert!(
+                matches!(r.outcome, TestOutcome::Passed),
+                "test failed unexpectedly: {r:?}",
+            );
+        }
+
+        let pid_lines = std::fs::read_to_string(&pid_log).unwrap_or_default();
+        let distinct_pids: std::collections::HashSet<&str> =
+            pid_lines.lines().filter(|l| !l.is_empty()).collect();
+        let expected_workers = n_tests.div_ceil(max_per_worker);
+        assert_eq!(
+            distinct_pids.len(),
+            expected_workers,
+            "expected {expected_workers} distinct worker pid(s) (one per recycle); \
+             got {} from log: {pid_lines:?}",
+            distinct_pids.len(),
+        );
 
         pool.shutdown();
     }

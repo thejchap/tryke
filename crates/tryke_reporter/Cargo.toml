@@ -10,6 +10,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+clearscreen = "4.0.6"
 console = { workspace = true }
 ctrlc = { workspace = true }
 indicatif = { workspace = true }

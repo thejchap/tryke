@@ -32,6 +32,10 @@ const BAR_TEMPLATE_WHITE: &str = "     {prefix:.cyan.bold} [{elapsed_precise:.di
 const BAR_TEMPLATE_RED: &str = "     {prefix:.cyan.bold} [{elapsed_precise:.dim}] \
     [{wide_bar:.red/dim}] {pos:>4}/{len:<4} {msg}";
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Each flag captures an independent piece of run state; collapsing them into an enum would tangle the state machine."
+)]
 pub struct NextReporter<W: Write = io::Stdout> {
     writer: W,
     live: LiveArea,
@@ -45,6 +49,9 @@ pub struct NextReporter<W: Write = io::Stdout> {
     start: Instant,
     subcommand_label: &'static str,
     watch_hint: Option<String>,
+    clear_armed: bool,
+    clear_enabled: bool,
+    header_pending: bool,
 }
 
 impl NextReporter {
@@ -63,6 +70,9 @@ impl NextReporter {
             start: Instant::now(),
             subcommand_label: "tryke test",
             watch_hint: None,
+            clear_armed: false,
+            clear_enabled: crate::clear::stdout_is_terminal(),
+            header_pending: false,
         }
     }
 }
@@ -90,11 +100,41 @@ impl<W: Write> NextReporter<W> {
             start: Instant::now(),
             subcommand_label: "tryke test",
             watch_hint: None,
+            clear_armed: false,
+            clear_enabled: false,
+            header_pending: false,
         }
     }
 
     pub fn into_writer(self) -> W {
         self.writer
+    }
+
+    fn flush_pending_clear(&mut self) {
+        if self.clear_armed {
+            if self.clear_enabled {
+                crate::clear::clear_terminal();
+            }
+            self.clear_armed = false;
+        }
+    }
+
+    fn write_header(&mut self) {
+        let header = format!(
+            "{} {}",
+            self.subcommand_label.bold(),
+            format!("v{}", env!("CARGO_PKG_VERSION")).dimmed()
+        );
+        self.live.println(&mut self.writer, &header);
+        self.live.println(&mut self.writer, "");
+    }
+
+    fn flush_pending_header(&mut self) {
+        if self.header_pending {
+            self.flush_pending_clear();
+            self.write_header();
+            self.header_pending = false;
+        }
     }
 
     fn ensure_bar_started(&mut self) {
@@ -190,18 +230,15 @@ impl<W: Write> Reporter for NextReporter<W> {
         self.started = false;
         self.failure_seen = false;
 
-        // Header lines go through the live area too; with no bar yet,
-        // they're just plain writes (above where the bar will appear).
-        let header = format!(
-            "{} {}",
-            self.subcommand_label.bold(),
-            format!("v{}", env!("CARGO_PKG_VERSION")).dimmed()
-        );
-        self.live.println(&mut self.writer, &header);
-        self.live.println(&mut self.writer, "");
+        if self.clear_armed {
+            self.header_pending = true;
+        } else {
+            self.write_header();
+        }
     }
 
     fn on_test_complete(&mut self, result: &TestResult) {
+        self.flush_pending_header();
         // Bar is created lazily on the first completion so any setup-
         // time stderr noise (scheduler warnings, etc.) prints to a clean
         // terminal rather than fighting with a freshly-drawn bar.
@@ -297,6 +334,7 @@ impl<W: Write> Reporter for NextReporter<W> {
     }
 
     fn on_run_complete(&mut self, run_summary: &RunSummary) {
+        self.flush_pending_header();
         self.live.finish_and_clear();
         summary::write_summary_with_hint(&mut self.writer, run_summary, self.watch_hint.as_deref());
     }
@@ -307,6 +345,23 @@ impl<W: Write> Reporter for NextReporter<W> {
 
     fn set_watch_hint(&mut self, hint: Option<String>) {
         self.watch_hint = hint;
+    }
+
+    fn arm_clear(&mut self) {
+        self.clear_armed = true;
+    }
+
+    fn on_scheduler_warning(&mut self, message: &str) {
+        self.flush_pending_header();
+        let line = format!("{} {message}", "warning:".yellow().bold());
+        self.live.println(&mut self.writer, &line);
+    }
+
+    fn on_watch_idle(&mut self, info: &crate::reporter::WatchIdleInfo<'_>) {
+        self.flush_pending_clear();
+        self.header_pending = false;
+        self.write_header();
+        summary::write_idle_summary(&mut self.writer, info);
     }
 }
 

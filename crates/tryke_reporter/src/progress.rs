@@ -136,6 +136,18 @@ impl<R: Reporter> Reporter for ProgressReporter<R> {
     fn set_watch_hint(&mut self, hint: Option<String>) {
         self.inner.set_watch_hint(hint);
     }
+
+    fn arm_clear(&mut self) {
+        self.inner.arm_clear();
+    }
+
+    fn on_watch_idle(&mut self, info: &crate::reporter::WatchIdleInfo<'_>) {
+        self.inner.on_watch_idle(info);
+    }
+
+    fn on_scheduler_warning(&mut self, message: &str) {
+        self.inner.on_scheduler_warning(message);
+    }
 }
 
 #[cfg(test)]

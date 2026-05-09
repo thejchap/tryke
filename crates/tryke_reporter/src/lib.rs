@@ -1,3 +1,4 @@
+pub mod clear;
 pub mod diagnostic;
 pub mod dot;
 pub mod json;

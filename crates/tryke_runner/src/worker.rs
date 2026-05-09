@@ -19,6 +19,16 @@ use crate::protocol::{
 /// without unbounded memory growth on workers that spew warnings.
 const STDERR_RETAIN_BYTES: usize = 1 << 20; // 1 MiB
 
+/// Recycle a worker process after this many tests. Long-lived python
+/// interpreters accumulate module-level state across imports — logging
+/// handlers, sqlite/ssl objects, atexit callbacks — much of which holds
+/// open file descriptors that `del sys.modules[name]` cannot reclaim
+/// because the FDs are owned by objects living outside the module dict.
+/// Recycling bounds growth: the only mechanism in `CPython` that reliably
+/// frees module-level FDs is process exit. The cap is intentionally
+/// hardcoded for now; revisit if it proves wrong on real workloads.
+pub(crate) const MAX_TESTS_PER_WORKER: u64 = 128;
+
 pub struct WorkerProcess {
     child: Child,
     stdin: BufWriter<ChildStdin>,
@@ -28,6 +38,7 @@ pub struct WorkerProcess {
     /// the worker can't block on a stderr write mid-RPC.
     stderr_buf: Arc<Mutex<VecDeque<u8>>>,
     next_id: u64,
+    tests_completed: u64,
 }
 
 impl WorkerProcess {
@@ -88,7 +99,15 @@ impl WorkerProcess {
             stdout,
             stderr_buf,
             next_id: 1,
+            tests_completed: 0,
         })
+    }
+
+    /// Whether this worker has run enough tests to warrant recycling.
+    /// See `MAX_TESTS_PER_WORKER` for the rationale.
+    #[must_use]
+    pub fn should_recycle(&self) -> bool {
+        self.tests_completed >= MAX_TESTS_PER_WORKER
     }
 
     async fn call<R: for<'de> serde::Deserialize<'de>>(
@@ -177,6 +196,7 @@ impl WorkerProcess {
             case_label: test.case_label.clone(),
         })?;
         let wire: RunTestResultWire = self.call("run_test", Some(params)).await?;
+        self.tests_completed = self.tests_completed.saturating_add(1);
         Ok(convert_result(test.clone(), wire))
     }
 
@@ -207,6 +227,7 @@ impl WorkerProcess {
             object_path: object_path.to_owned(),
         })?;
         let wire: RunTestResultWire = self.call("run_doctest", Some(params)).await?;
+        self.tests_completed = self.tests_completed.saturating_add(1);
         Ok(convert_result(test.clone(), wire))
     }
 

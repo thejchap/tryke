@@ -11,7 +11,21 @@ use tryke_types::{HookItem, TestOutcome, TestResult};
 
 use crate::protocol::RegisterHooksParams;
 use crate::schedule::WorkUnit;
-use crate::worker::{MAX_TESTS_PER_WORKER, WorkerProcess};
+use crate::worker::{WorkerLimits, WorkerProcess};
+
+/// Bundle of inputs every spawn (and respawn) needs. These five values
+/// never vary across the lifetime of a `worker_task`, so threading them
+/// individually through every helper just inflates the signature and
+/// trips `clippy::too_many_arguments`. Grouping them keeps the call
+/// sites short and lets us add new spawn-time knobs later without
+/// touching every helper signature.
+struct WorkerSpawnCtx<'a> {
+    python_bin: &'a str,
+    path_refs: &'a [&'a Path],
+    root: &'a Path,
+    log_level: LevelFilter,
+    limits: WorkerLimits,
+}
 
 /// Per-worker-task state: the (optional) live Python process plus a cache of
 /// the most recent `register_hooks` call per module. The cache exists so
@@ -84,6 +98,29 @@ impl WorkerPool {
         python_path: &[PathBuf],
         log_level: LevelFilter,
     ) -> Self {
+        Self::with_python_path_and_limits(
+            size,
+            python_bin,
+            root,
+            python_path,
+            log_level,
+            WorkerLimits::default(),
+        )
+    }
+
+    /// Like [`Self::with_python_path`] but with explicit recycle
+    /// thresholds. Tests use this to set tiny ceilings (or
+    /// [`WorkerLimits::unlimited`]) so they can observe — or suppress —
+    /// recycle behaviour without spinning up a real workload.
+    #[must_use]
+    pub fn with_python_path_and_limits(
+        size: usize,
+        python_bin: &str,
+        root: &Path,
+        python_path: &[PathBuf],
+        log_level: LevelFilter,
+        limits: WorkerLimits,
+    ) -> Self {
         let size = size.max(1);
         let python_path = python_path.to_vec();
         let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
@@ -99,6 +136,7 @@ impl WorkerPool {
                 python_path.clone(),
                 root.clone(),
                 log_level,
+                limits,
                 work_rx,
                 ctrl_rx,
             ));
@@ -175,16 +213,19 @@ pub use tryke_types::path_to_module;
 /// metadata and silently skip `before_each` / `after_each`.
 async fn ensure_worker<'a>(
     state: &'a mut WorkerState,
-    python_bin: &str,
-    path_refs: &[&Path],
-    root: &Path,
-    log_level: LevelFilter,
+    ctx: &WorkerSpawnCtx<'_>,
 ) -> Option<&'a mut WorkerProcess> {
     if state.process.is_some() {
         return state.process.as_mut();
     }
     trace!("worker_task: spawning process");
-    let mut w = match WorkerProcess::spawn(python_bin, path_refs, root, log_level) {
+    let mut w = match WorkerProcess::spawn(
+        ctx.python_bin,
+        ctx.path_refs,
+        ctx.root,
+        ctx.log_level,
+        ctx.limits,
+    ) {
         Ok(w) => w,
         Err(e) => {
             debug!("worker_task: spawn failed: {e}");
@@ -212,14 +253,11 @@ async fn ensure_worker<'a>(
 /// `TestOutcome::Error` with the worker's stderr attached for diagnosis.
 async fn run_single_test(
     state: &mut WorkerState,
-    python_bin: &str,
-    path_refs: &[&Path],
-    root: &Path,
-    log_level: LevelFilter,
+    ctx: &WorkerSpawnCtx<'_>,
     test: tryke_types::TestItem,
     result_tx: &mpsc::UnboundedSender<TestResult>,
 ) {
-    let Some(w) = ensure_worker(state, python_bin, path_refs, root, log_level).await else {
+    let Some(w) = ensure_worker(state, ctx).await else {
         let _ = result_tx.send(TestResult {
             test,
             outcome: TestOutcome::Error {
@@ -263,10 +301,7 @@ async fn run_single_test(
 /// unit, caching the call so any respawn later in the unit can replay it.
 async fn register_hooks_for_unit(
     state: &mut WorkerState,
-    python_bin: &str,
-    path_refs: &[&Path],
-    root: &Path,
-    log_level: LevelFilter,
+    ctx: &WorkerSpawnCtx<'_>,
     hooks: &[HookItem],
     tests: &[tryke_types::TestItem],
 ) {
@@ -304,7 +339,7 @@ async fn register_hooks_for_unit(
             .hook_cache
             .insert(test.module_path.clone(), params.clone());
 
-        let Some(w) = ensure_worker(state, python_bin, path_refs, root, log_level).await else {
+        let Some(w) = ensure_worker(state, ctx).await else {
             continue;
         };
         if let Err(e) = w.register_hooks(params).await {
@@ -316,18 +351,11 @@ async fn register_hooks_for_unit(
     }
 }
 
-async fn handle_ctrl(
-    state: &mut WorkerState,
-    python_bin: &str,
-    path_refs: &[&Path],
-    root: &Path,
-    log_level: LevelFilter,
-    ctrl: WorkerCtrl,
-) {
+async fn handle_ctrl(state: &mut WorkerState, ctx: &WorkerSpawnCtx<'_>, ctrl: WorkerCtrl) {
     match ctrl {
         WorkerCtrl::Ping(ack_tx) => {
             trace!("worker_task: ping (pre-warm)");
-            let _ = ensure_worker(state, python_bin, path_refs, root, log_level).await;
+            let _ = ensure_worker(state, ctx).await;
             let _ = ack_tx.send(());
         }
         WorkerCtrl::Restart(ack_tx) => {
@@ -338,7 +366,7 @@ async fn handle_ctrl(
             // Eagerly respawn so the next Unit doesn't pay Python startup
             // latency. ensure_worker replays cached register_hooks against
             // the fresh process, mirroring the crash-recovery path.
-            let _ = ensure_worker(state, python_bin, path_refs, root, log_level).await;
+            let _ = ensure_worker(state, ctx).await;
             let _ = ack_tx.send(());
         }
     }
@@ -346,24 +374,12 @@ async fn handle_ctrl(
 
 async fn handle_unit(
     state: &mut WorkerState,
-    python_bin: &str,
-    path_refs: &[&Path],
-    root: &Path,
-    log_level: LevelFilter,
+    ctx: &WorkerSpawnCtx<'_>,
     unit: WorkUnit,
     result_tx: mpsc::UnboundedSender<TestResult>,
 ) {
     if !unit.hooks.is_empty() {
-        register_hooks_for_unit(
-            state,
-            python_bin,
-            path_refs,
-            root,
-            log_level,
-            &unit.hooks,
-            &unit.tests,
-        )
-        .await;
+        register_hooks_for_unit(state, ctx, &unit.hooks, &unit.tests).await;
     }
     let finalize_modules: std::collections::HashSet<String> = if unit.hooks.is_empty() {
         std::collections::HashSet::new()
@@ -372,10 +388,7 @@ async fn handle_unit(
     };
     for test in unit.tests {
         trace!("worker_task: running test {}", test.name);
-        run_single_test(
-            state, python_bin, path_refs, root, log_level, test, &result_tx,
-        )
-        .await;
+        run_single_test(state, ctx, test, &result_tx).await;
     }
     for module in finalize_modules {
         if let Some(w) = state.process.as_mut()
@@ -385,20 +398,20 @@ async fn handle_unit(
         }
     }
 
-    // Recycle a worker that has run enough tests to be at risk of FD/state
-    // accumulation. Deferred to the end of the unit (after finalize_hooks)
-    // so per="scope" fixture teardown is not skipped: recycling mid-unit
+    // Recycle a worker that has tripped any of its soft resource caps.
+    // Deferred to the end of the unit (after finalize_hooks) so
+    // per="scope" fixture teardown is not skipped: recycling mid-unit
     // would drop the live process before its scope fixtures got their
     // teardown call. The next unit handed to this worker_task hits
     // ensure_worker, which spawns a fresh process and replays cached
     // hooks — same path as crash recovery.
-    if state
+    if let Some(reason) = state
         .process
         .as_ref()
-        .is_some_and(WorkerProcess::should_recycle)
+        .and_then(WorkerProcess::should_recycle)
         && let Some(mut proc) = state.process.take()
     {
-        debug!("worker_task: recycling worker after {MAX_TESTS_PER_WORKER} tests");
+        debug!("worker_task: recycling worker ({reason})");
         proc.shutdown().await;
     }
 }
@@ -408,10 +421,18 @@ async fn worker_task(
     python_path: Vec<std::path::PathBuf>,
     root: PathBuf,
     log_level: LevelFilter,
+    limits: WorkerLimits,
     work_rx: async_channel::Receiver<WorkerMsg>,
     mut ctrl_rx: mpsc::UnboundedReceiver<WorkerCtrl>,
 ) {
     let path_refs: Vec<&Path> = python_path.iter().map(PathBuf::as_path).collect();
+    let ctx = WorkerSpawnCtx {
+        python_bin: &python_bin,
+        path_refs: &path_refs,
+        root: &root,
+        log_level,
+        limits,
+    };
     let mut state = WorkerState::new();
 
     loop {
@@ -424,21 +445,12 @@ async fn worker_task(
             biased;
             ctrl = ctrl_rx.recv() => {
                 let Some(ctrl) = ctrl else { break };
-                handle_ctrl(&mut state, &python_bin, &path_refs, &root, log_level, ctrl).await;
+                handle_ctrl(&mut state, &ctx, ctrl).await;
             }
             msg = work_rx.recv() => {
                 match msg {
                     Ok(WorkerMsg::Unit(unit, result_tx)) => {
-                        handle_unit(
-                            &mut state,
-                            &python_bin,
-                            &path_refs,
-                            &root,
-                            log_level,
-                            unit,
-                            result_tx,
-                        )
-                        .await;
+                        handle_unit(&mut state, &ctx, unit, result_tx).await;
                     }
                     Ok(WorkerMsg::Shutdown) | Err(_) => break,
                 }
@@ -688,16 +700,23 @@ def test_noop() -> None:
         pool.shutdown();
     }
 
-    /// A worker process must be recycled after `MAX_TESTS_PER_WORKER` tests
-    /// so accumulated module-level state (and the FDs it owns) does not
-    /// grow unboundedly across long runs. The recycle is deferred until
-    /// the end of a unit (so per="scope" teardown is not skipped — see
-    /// `recycle_does_not_skip_scope_fixture_teardown`), so we exercise it
-    /// here by submitting many single-test units. The module body records
-    /// the worker pid on every fresh import; we expect one distinct pid
-    /// per recycle boundary.
+    /// A worker process must be recycled when its self-reported
+    /// resource snapshot crosses a configured ceiling so accumulated
+    /// module-level state (and the FDs it owns) does not grow
+    /// unboundedly across long runs. We use the wall-clock `max_age`
+    /// signal here because it is the easiest to drive deterministically
+    /// from a test (memory and FD growth would require platform-
+    /// specific allocations, and the priority logic is unit-tested
+    /// separately in `worker.rs`).
+    ///
+    /// The recycle is deferred until the end of a unit (so per="scope"
+    /// teardown is not skipped — see
+    /// `recycle_does_not_skip_scope_fixture_teardown`), so we exercise
+    /// it here by sleeping past the cap between units. The module body
+    /// records the worker pid on every fresh import; we expect one
+    /// distinct pid per recycle boundary.
     #[tokio::test]
-    async fn worker_recycles_after_max_tests() {
+    async fn worker_recycles_when_age_exceeds_limit() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
 
@@ -722,45 +741,57 @@ def test_noop() -> None:
         );
         std::fs::write(&test_file, source).expect("write test file");
 
-        let n_tests = usize::try_from(MAX_TESTS_PER_WORKER + 4).expect("test count fits in usize");
-        let max_per_worker =
-            usize::try_from(MAX_TESTS_PER_WORKER).expect("MAX_TESTS_PER_WORKER fits in usize");
-        // One unit per test so the recycle check at the end of each unit
-        // gets a chance to fire as soon as the threshold is crossed.
-        let units: Vec<WorkUnit> = (0..n_tests)
-            .map(|_| WorkUnit {
-                tests: vec![make_test_item("test_recycle", "test_noop", &test_file)],
-                hooks: vec![],
-            })
-            .collect();
-
-        let pool = WorkerPool::with_python_path(
+        // Tight age cap — a sleep between units crosses it deterministically
+        // without making the test slow.
+        let limits = WorkerLimits {
+            max_rss_bytes: None,
+            max_open_fds: None,
+            max_age: Some(std::time::Duration::from_millis(100)),
+        };
+        let pool = WorkerPool::with_python_path_and_limits(
             1,
             &test_python_bin(),
             dir.path(),
             &[dir.path().to_path_buf(), python_package_dir()],
             LevelFilter::Off,
+            limits,
         );
         pool.warm().await;
 
-        let results: Vec<TestResult> = pool.run(units).collect().await;
-        assert_eq!(results.len(), n_tests, "expected {n_tests} results");
-        for r in &results {
-            assert!(
-                matches!(r.outcome, TestOutcome::Passed),
-                "test failed unexpectedly: {r:?}",
-            );
-        }
+        let make_unit = || WorkUnit {
+            tests: vec![make_test_item("test_recycle", "test_noop", &test_file)],
+            hooks: vec![],
+        };
+
+        // First unit: worker is fresh, no recycle.
+        let r1: Vec<TestResult> = pool.run(vec![make_unit()]).collect().await;
+        assert_eq!(r1.len(), 1);
+        assert!(matches!(r1[0].outcome, TestOutcome::Passed));
+
+        // Sleep past the age cap so the next unit's end-of-unit check
+        // fires. 250ms gives comfortable margin over the 100ms cap on
+        // jittery CI without pushing test latency higher than necessary.
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+        // Second unit: still on the same worker (recycle is checked at
+        // end-of-unit), but at *its* end the age check trips.
+        let r2: Vec<TestResult> = pool.run(vec![make_unit()]).collect().await;
+        assert_eq!(r2.len(), 1);
+        assert!(matches!(r2[0].outcome, TestOutcome::Passed));
+
+        // Third unit: forced to spawn a new worker (the previous one
+        // was recycled) so a second pid is logged.
+        let r3: Vec<TestResult> = pool.run(vec![make_unit()]).collect().await;
+        assert_eq!(r3.len(), 1);
+        assert!(matches!(r3[0].outcome, TestOutcome::Passed));
 
         let pid_lines = std::fs::read_to_string(&pid_log).unwrap_or_default();
         let distinct_pids: std::collections::HashSet<&str> =
             pid_lines.lines().filter(|l| !l.is_empty()).collect();
-        let expected_workers = n_tests.div_ceil(max_per_worker);
         assert_eq!(
             distinct_pids.len(),
-            expected_workers,
-            "expected {expected_workers} distinct worker pid(s) (one per recycle); \
-             got {} from log: {pid_lines:?}",
+            2,
+            "expected 2 distinct worker pid(s) (one recycle); got {} from log: {pid_lines:?}",
             distinct_pids.len(),
         );
 
@@ -768,14 +799,17 @@ def test_noop() -> None:
     }
 
     /// Recycling must never strand a `per="scope"` fixture without its
-    /// teardown. The risk is mid-unit recycling: if we drop the live
-    /// process before `finalize_hooks` runs, the unit's scope fixtures
-    /// die without their `yield`-after teardown, *and* a fresh worker
-    /// re-runs setup when hooks replay — so a buggy version would show
-    /// setup ran twice while teardown ran once (or zero times). We
-    /// submit enough tests in a single unit to cross the recycle
-    /// threshold and assert setup/teardown counts stay matched at one
-    /// each.
+    /// teardown. The unit body's tests must still see their fixture
+    /// values, and the scope fixture's `yield`-after teardown must run
+    /// exactly once before the worker is recycled. A buggy version
+    /// that recycled mid-unit (before `finalize_hooks`) would either
+    /// strand teardown entirely or — if the fresh worker re-ran setup
+    /// — record setup twice with teardown still at one or zero.
+    ///
+    /// The recycle is forced via a tiny `max_age` so a short sleep
+    /// inside the unit's first test crosses the cap; the end-of-unit
+    /// check then trips as soon as the unit completes (after
+    /// finalize). We assert setup and teardown both ran exactly once.
     #[tokio::test]
     async fn recycle_does_not_skip_scope_fixture_teardown() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -788,6 +822,7 @@ def test_noop() -> None:
         let test_file = dir.path().join("test_scope_recycle.py");
         let source = format!(
             r#"import os
+import time
 from tryke import test, fixture, expect, Depends
 
 @fixture(per="scope")
@@ -799,6 +834,14 @@ def scope_resource() -> int:
     with open("{teardown_escaped}", "a") as f:
         f.write(str(os.getpid()) + "\n")
         f.flush()
+
+@test
+def test_sleep_then_age_out(r: int = Depends(scope_resource)) -> None:
+    # Sleep past the runner's tiny max_age so the end-of-unit recycle
+    # check trips. Teardown must still have a chance to run before the
+    # worker is killed.
+    time.sleep(0.25)
+    expect(r).to_equal(42)
 
 @test
 def test_uses_scope(r: int = Depends(scope_resource)) -> None:
@@ -815,26 +858,35 @@ def test_uses_scope(r: int = Depends(scope_resource)) -> None:
             depends_on: vec![],
             line_number: None,
         };
-        let n_tests = usize::try_from(MAX_TESTS_PER_WORKER + 4).expect("test count fits in usize");
-        let tests: Vec<TestItem> = (0..n_tests)
-            .map(|_| make_test_item("test_scope_recycle", "test_uses_scope", &test_file))
-            .collect();
+        // Two tests in one unit: first sleeps past max_age, second
+        // proves teardown wasn't stranded mid-unit (it would have been
+        // had recycle fired before finalize_hooks).
+        let tests: Vec<TestItem> = vec![
+            make_test_item("test_scope_recycle", "test_sleep_then_age_out", &test_file),
+            make_test_item("test_scope_recycle", "test_uses_scope", &test_file),
+        ];
         let unit = WorkUnit {
             tests,
             hooks: vec![hook],
         };
 
-        let pool = WorkerPool::with_python_path(
+        let limits = WorkerLimits {
+            max_rss_bytes: None,
+            max_open_fds: None,
+            max_age: Some(std::time::Duration::from_millis(100)),
+        };
+        let pool = WorkerPool::with_python_path_and_limits(
             1,
             &test_python_bin(),
             dir.path(),
             &[dir.path().to_path_buf(), python_package_dir()],
             LevelFilter::Off,
+            limits,
         );
         pool.warm().await;
 
         let results: Vec<TestResult> = pool.run(vec![unit]).collect().await;
-        assert_eq!(results.len(), n_tests, "expected {n_tests} results");
+        assert_eq!(results.len(), 2, "expected 2 results, got {results:?}");
         for r in &results {
             assert!(
                 matches!(r.outcome, TestOutcome::Passed),

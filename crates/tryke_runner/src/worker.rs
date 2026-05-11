@@ -1,7 +1,8 @@
 use std::collections::VecDeque;
+use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use log::{debug, trace};
@@ -11,7 +12,7 @@ use tryke_types::{Assertion, ExpectedAssertion, TestItem, TestOutcome, TestResul
 
 use crate::protocol::{
     AssertionWire, FinalizeHooksParams, RegisterHooksParams, RpcRequest, RpcResponse,
-    RunDoctestParams, RunTestParams, RunTestResultWire,
+    RunDoctestParams, RunTestParams, RunTestResponseWire, RunTestResultWire, WorkerHealthWire,
 };
 
 /// Cap on retained worker-stderr bytes. Beyond this we keep the most recent
@@ -19,15 +20,117 @@ use crate::protocol::{
 /// without unbounded memory growth on workers that spew warnings.
 const STDERR_RETAIN_BYTES: usize = 1 << 20; // 1 MiB
 
-/// Recycle a worker process after this many tests. Long-lived python
-/// interpreters accumulate module-level state across imports — logging
-/// handlers, sqlite/ssl objects, atexit callbacks — much of which holds
-/// open file descriptors that `del sys.modules[name]` cannot reclaim
-/// because the FDs are owned by objects living outside the module dict.
-/// Recycling bounds growth: the only mechanism in `CPython` that reliably
-/// frees module-level FDs is process exit. The cap is intentionally
-/// hardcoded for now; revisit if it proves wrong on real workloads.
-pub(crate) const MAX_TESTS_PER_WORKER: u64 = 128;
+/// Latest worker-reported resource snapshot. Each field is `Option`
+/// because some signals are platform-conditional (see
+/// [`WorkerHealthWire`]); a missing reading just means the matching
+/// limit cannot fire for this worker.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WorkerHealth {
+    pub rss_bytes: Option<u64>,
+    pub open_fds: Option<u64>,
+}
+
+impl From<WorkerHealthWire> for WorkerHealth {
+    fn from(w: WorkerHealthWire) -> Self {
+        Self {
+            rss_bytes: w.rss_bytes,
+            open_fds: w.open_fds,
+        }
+    }
+}
+
+/// Why a worker is being recycled. Carried in debug logs so post-mortem
+/// triage can tell apart memory leaks, FD pressure, and slow drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecycleReason {
+    /// Resident set size crossed the configured ceiling.
+    MemoryBytes(u64),
+    /// Open file descriptor count crossed the configured ceiling.
+    OpenFds(u64),
+    /// Worker has been alive longer than the configured ceiling.
+    Age(Duration),
+}
+
+impl fmt::Display for RecycleReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MemoryBytes(b) => write!(f, "memory={b} bytes"),
+            Self::OpenFds(n) => write!(f, "open_fds={n}"),
+            Self::Age(d) => write!(f, "age={:.1}s", d.as_secs_f64()),
+        }
+    }
+}
+
+/// Soft ceilings on a worker's resource footprint. Each is `Option` so
+/// callers can opt out of a signal entirely (e.g. tests that exercise
+/// only one dimension). `None` on a field means "never recycle on this
+/// signal." The defaults are tuned for real test suites — see
+/// [`WorkerLimits::default`].
+#[derive(Debug, Clone, Copy)]
+pub struct WorkerLimits {
+    pub max_rss_bytes: Option<u64>,
+    pub max_open_fds: Option<u64>,
+    pub max_age: Option<Duration>,
+}
+
+impl WorkerLimits {
+    /// Disable every soft limit. Convenient for tests that only want to
+    /// exercise one signal at a time.
+    #[must_use]
+    pub fn unlimited() -> Self {
+        Self {
+            max_rss_bytes: None,
+            max_open_fds: None,
+            max_age: None,
+        }
+    }
+}
+
+impl Default for WorkerLimits {
+    fn default() -> Self {
+        Self {
+            // 1 GiB RSS — comfortable headroom for suites that pull in
+            // heavy native deps (numpy, ssl, sqlite) on first import,
+            // while still bounding slow leaks across long runs.
+            max_rss_bytes: Some(1 << 30),
+            // Below the macOS 256-FD per-process soft limit, leaving
+            // headroom for the python interpreter's own baseline (~30
+            // FDs on a fresh process) plus the runner's stdio pipes.
+            max_open_fds: Some(200),
+            // 10 minutes of wall time. Long suites still finish per
+            // worker without churning; pathologically slow leaks that
+            // never trip the memory/FD cap still get bounded.
+            max_age: Some(Duration::from_secs(600)),
+        }
+    }
+}
+
+/// Pure recycle-decision helper, factored out of [`WorkerProcess`] so
+/// it is unit-testable without spawning a subprocess. Signals are
+/// checked in priority order: memory > FDs > age, so the strongest
+/// available reason is what gets reported.
+pub(crate) fn evaluate_recycle(
+    health: WorkerHealth,
+    age: Duration,
+    limits: WorkerLimits,
+) -> Option<RecycleReason> {
+    if let (Some(cap), Some(rss)) = (limits.max_rss_bytes, health.rss_bytes)
+        && rss >= cap
+    {
+        return Some(RecycleReason::MemoryBytes(rss));
+    }
+    if let (Some(cap), Some(fds)) = (limits.max_open_fds, health.open_fds)
+        && fds >= cap
+    {
+        return Some(RecycleReason::OpenFds(fds));
+    }
+    if let Some(cap) = limits.max_age
+        && age >= cap
+    {
+        return Some(RecycleReason::Age(age));
+    }
+    None
+}
 
 pub struct WorkerProcess {
     child: Child,
@@ -38,7 +141,19 @@ pub struct WorkerProcess {
     /// the worker can't block on a stderr write mid-RPC.
     stderr_buf: Arc<Mutex<VecDeque<u8>>>,
     next_id: u64,
-    tests_completed: u64,
+    /// Wall-clock spawn time; drives `RecycleReason::Age`. Set once at
+    /// spawn and read on every `should_recycle` check — never mutated.
+    spawned_at: Instant,
+    /// Latest worker-reported resource snapshot. Updated after every
+    /// completed `run_test` / `run_doctest` reply. The default
+    /// (`Option::None` on every field) is what a fresh worker reads as
+    /// before its first reply lands, which matches "no signal, do not
+    /// recycle on it."
+    latest_health: WorkerHealth,
+    /// Soft ceilings consulted by [`Self::should_recycle`]. Owned by
+    /// the worker (rather than passed in on each check) so the recycle
+    /// decision is colocated with the data it depends on.
+    limits: WorkerLimits,
 }
 
 impl WorkerProcess {
@@ -55,6 +170,7 @@ impl WorkerProcess {
         python_path: &[&Path],
         root: &Path,
         log_level: log::LevelFilter,
+        limits: WorkerLimits,
     ) -> Result<Self> {
         debug!("spawning worker: {python_bin} -m tryke.worker (log={log_level})");
         let pythonpath = build_pythonpath(python_path);
@@ -99,15 +215,25 @@ impl WorkerProcess {
             stdout,
             stderr_buf,
             next_id: 1,
-            tests_completed: 0,
+            spawned_at: Instant::now(),
+            latest_health: WorkerHealth::default(),
+            limits,
         })
     }
 
-    /// Whether this worker has run enough tests to warrant recycling.
-    /// See `MAX_TESTS_PER_WORKER` for the rationale.
+    /// Whether this worker has tripped any of its [`WorkerLimits`].
+    /// Returns the first reason found (memory > FDs > age priority),
+    /// or `None` if the worker is still within budget. Long-lived
+    /// python interpreters accumulate module-level state across
+    /// imports — logging handlers, sqlite/ssl objects, atexit
+    /// callbacks — much of which holds resources (FDs, memory) that
+    /// `del sys.modules[name]` cannot reclaim, because they are owned
+    /// by objects living outside the module dict. Recycling on the
+    /// reported snapshot bounds that growth; only process exit
+    /// reliably frees module-level state in `CPython`.
     #[must_use]
-    pub fn should_recycle(&self) -> bool {
-        self.tests_completed >= MAX_TESTS_PER_WORKER
+    pub fn should_recycle(&self) -> Option<RecycleReason> {
+        evaluate_recycle(self.latest_health, self.spawned_at.elapsed(), self.limits)
     }
 
     async fn call<R: for<'de> serde::Deserialize<'de>>(
@@ -195,9 +321,9 @@ impl WorkerProcess {
             groups: test.groups.clone(),
             case_label: test.case_label.clone(),
         })?;
-        let wire: RunTestResultWire = self.call("run_test", Some(params)).await?;
-        self.tests_completed = self.tests_completed.saturating_add(1);
-        Ok(convert_result(test.clone(), wire))
+        let response: RunTestResponseWire = self.call("run_test", Some(params)).await?;
+        self.latest_health = response.health.into();
+        Ok(convert_result(test.clone(), response.result))
     }
 
     /// Send hook metadata for a module to the Python worker.
@@ -226,9 +352,9 @@ impl WorkerProcess {
             module: test.module_path.clone(),
             object_path: object_path.to_owned(),
         })?;
-        let wire: RunTestResultWire = self.call("run_doctest", Some(params)).await?;
-        self.tests_completed = self.tests_completed.saturating_add(1);
-        Ok(convert_result(test.clone(), wire))
+        let response: RunTestResponseWire = self.call("run_doctest", Some(params)).await?;
+        self.latest_health = response.health.into();
+        Ok(convert_result(test.clone(), response.result))
     }
 
     #[expect(clippy::missing_errors_doc)]
@@ -552,6 +678,112 @@ mod tests {
             expected_assertions: vec![],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn evaluate_recycle_returns_none_when_no_signals_tripped() {
+        // A fresh worker (default health, zero age) under default
+        // limits has nothing to report — the runner must not recycle.
+        assert_eq!(
+            evaluate_recycle(
+                WorkerHealth::default(),
+                Duration::ZERO,
+                WorkerLimits::default(),
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn evaluate_recycle_prioritises_memory_then_fds_then_age() {
+        // All three signals tripped at once: memory wins. This
+        // priority matters because memory pressure is the most
+        // user-visible failure mode (process death, swap thrash); the
+        // post-mortem log line should attribute that, not whichever
+        // signal happened to be checked last.
+        let limits = WorkerLimits {
+            max_rss_bytes: Some(1000),
+            max_open_fds: Some(10),
+            max_age: Some(Duration::from_secs(1)),
+        };
+        let health = WorkerHealth {
+            rss_bytes: Some(2000),
+            open_fds: Some(20),
+        };
+        assert_eq!(
+            evaluate_recycle(health, Duration::from_secs(2), limits),
+            Some(RecycleReason::MemoryBytes(2000)),
+        );
+
+        // Drop the memory signal: FDs win over age.
+        let health_no_mem = WorkerHealth {
+            rss_bytes: None,
+            open_fds: Some(20),
+        };
+        assert_eq!(
+            evaluate_recycle(health_no_mem, Duration::from_secs(2), limits),
+            Some(RecycleReason::OpenFds(20)),
+        );
+
+        // Drop FDs too: age is the last fallback.
+        let health_age_only = WorkerHealth {
+            rss_bytes: None,
+            open_fds: None,
+        };
+        assert_eq!(
+            evaluate_recycle(health_age_only, Duration::from_secs(2), limits),
+            Some(RecycleReason::Age(Duration::from_secs(2))),
+        );
+    }
+
+    #[test]
+    fn evaluate_recycle_skips_signals_with_no_limit() {
+        // `WorkerLimits::unlimited` opts out of every cap — even an
+        // OOM-scale RSS reading must not trigger a recycle. This is
+        // the contract tests rely on when exercising one signal in
+        // isolation.
+        let unlimited = WorkerLimits::unlimited();
+        let health = WorkerHealth {
+            rss_bytes: Some(u64::MAX),
+            open_fds: Some(u64::MAX),
+        };
+        assert_eq!(
+            evaluate_recycle(health, Duration::from_secs(86_400), unlimited),
+            None,
+        );
+    }
+
+    #[test]
+    fn evaluate_recycle_skips_signals_with_no_reading() {
+        // Worker on a platform without `/proc/self/fd` reports
+        // `open_fds: None` — the runner must not synthesize a value
+        // and must not recycle on that signal even with a tight cap.
+        let limits = WorkerLimits {
+            max_rss_bytes: Some(1000),
+            max_open_fds: Some(10),
+            max_age: None,
+        };
+        let health = WorkerHealth {
+            rss_bytes: None,
+            open_fds: None,
+        };
+        assert_eq!(evaluate_recycle(health, Duration::ZERO, limits), None);
+    }
+
+    #[test]
+    fn recycle_reason_display_is_human_readable() {
+        // The Display impl lands in debug logs ("recycling worker
+        // (memory=...)") so it needs to be terse and parseable at a
+        // glance — not just Debug-derived noise.
+        assert_eq!(
+            RecycleReason::MemoryBytes(1024).to_string(),
+            "memory=1024 bytes",
+        );
+        assert_eq!(RecycleReason::OpenFds(42).to_string(), "open_fds=42");
+        assert_eq!(
+            RecycleReason::Age(Duration::from_millis(2_500)).to_string(),
+            "age=2.5s",
+        );
     }
 
     #[test]

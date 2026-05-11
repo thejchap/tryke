@@ -22,6 +22,12 @@ use crate::worker::WorkerProcess;
 struct WorkerState {
     process: Option<WorkerProcess>,
     hook_cache: HashMap<String, RegisterHooksParams>,
+    /// Most recent spawn or hook-replay failure, captured so
+    /// `run_single_test` can surface the real reason (and any worker
+    /// stderr) instead of the opaque "worker unavailable" placeholder.
+    /// Cleared once we have a live worker again so we don't replay a
+    /// stale error against an unrelated test.
+    last_failure: Option<String>,
 }
 
 impl WorkerState {
@@ -29,8 +35,26 @@ impl WorkerState {
         Self {
             process: None,
             hook_cache: HashMap::new(),
+            last_failure: None,
         }
     }
+}
+
+/// Build the user-facing message for a worker error, appending captured
+/// stderr (if any) so the python-side traceback is visible to the user
+/// without needing to enable debug logging. The actual python crash —
+/// e.g. `ModuleNotFoundError: No module named 'tryke'` when the worker
+/// venv is missing the package — only ever appears on the worker's
+/// stderr pipe, so suppressing it here is what makes spawn failures look
+/// like an opaque "worker unavailable".
+fn format_worker_failure(prefix: &str, err: &dyn std::fmt::Display, stderr: &str) -> String {
+    let mut msg = format!("{prefix}: {err}");
+    let trimmed = stderr.trim();
+    if !trimmed.is_empty() {
+        msg.push_str("\nworker stderr:\n");
+        msg.push_str(trimmed);
+    }
+    msg
 }
 
 enum WorkerMsg {
@@ -187,20 +211,37 @@ async fn ensure_worker<'a>(
     let mut w = match WorkerProcess::spawn(python_bin, path_refs, root, log_level) {
         Ok(w) => w,
         Err(e) => {
-            debug!("worker_task: spawn failed: {e}");
+            let msg = format_worker_failure(
+                &format!("failed to spawn python worker ({python_bin} -m tryke.worker)"),
+                &e,
+                "",
+            );
+            debug!("worker_task: {msg}");
+            state.last_failure = Some(msg);
             return None;
         }
     };
     for (module, params) in &state.hook_cache {
         if let Err(e) = w.register_hooks(params.clone()).await {
-            // If hook replay fails the worker is in an inconsistent state
-            // (some modules registered, some not). Drop it so the next
-            // attempt starts from scratch rather than silently running
-            // tests without fixtures.
-            debug!("worker_task: replay register_hooks for {module} failed: {e}");
+            // Drain stderr before dropping the dead worker — otherwise
+            // the python traceback that explains *why* replay failed
+            // (e.g. ModuleNotFoundError on the worker side) goes with
+            // it and the user sees only "Broken pipe".
+            let stderr_output = w.drain_stderr().await;
+            let msg = format_worker_failure(
+                &format!("hook replay failed for module {module}"),
+                &e,
+                &stderr_output,
+            );
+            debug!("worker_task: {msg}");
+            state.last_failure = Some(msg);
+            // Worker is in an inconsistent state (some modules registered,
+            // some not). Drop it so the next attempt starts from scratch
+            // rather than silently running tests without fixtures.
             return None;
         }
     }
+    state.last_failure = None;
     state.process = Some(w);
     state.process.as_mut()
 }
@@ -220,11 +261,13 @@ async fn run_single_test(
     result_tx: &mpsc::UnboundedSender<TestResult>,
 ) {
     let Some(w) = ensure_worker(state, python_bin, path_refs, root, log_level).await else {
+        let message = state
+            .last_failure
+            .clone()
+            .unwrap_or_else(|| "worker unavailable (spawn or hook replay failed)".into());
         let _ = result_tx.send(TestResult {
             test,
-            outcome: TestOutcome::Error {
-                message: "worker unavailable (spawn or hook replay failed)".into(),
-            },
+            outcome: TestOutcome::Error { message },
             duration: Duration::ZERO,
             stdout: String::new(),
             stderr: String::new(),
@@ -308,7 +351,17 @@ async fn register_hooks_for_unit(
             continue;
         };
         if let Err(e) = w.register_hooks(params).await {
-            debug!("worker_task: register_hooks failed: {e}");
+            // Drain stderr before dropping so the python traceback that
+            // killed the worker reaches the user-facing test result via
+            // `last_failure`, instead of being lost with the process.
+            let stderr_output = w.drain_stderr().await;
+            let msg = format_worker_failure(
+                &format!("register_hooks failed for module {}", test.module_path),
+                &e,
+                &stderr_output,
+            );
+            debug!("worker_task: {msg}");
+            state.last_failure = Some(msg);
             // Worker is potentially wedged; drop it so the next test
             // forces a respawn-with-replay.
             state.process = None;
@@ -640,6 +693,74 @@ def test_noop() -> None:
             2,
             "module body must run once per fresh interpreter \
              (1 initial + 1 after restart_workers); got {count:?}"
+        );
+
+        pool.shutdown();
+    }
+
+    /// When the worker python dies during startup (e.g. project venv
+    /// without `tryke` installed prints `ModuleNotFoundError` and
+    /// exits), the user-facing error must include the python stderr —
+    /// not just the opaque "worker unavailable" placeholder that used
+    /// to be all the user saw. Regression test for the diagnosability
+    /// fix.
+    ///
+    /// Unix-only: simulates the failing python with a shell script.
+    /// The workspace venv's python has `tryke` installed in editable
+    /// mode and its `.pth` file is searched regardless of PYTHONPATH,
+    /// so we can't reproduce the missing-module case with a real
+    /// interpreter. A stub `python_bin` is sufficient — what we're
+    /// testing is the rust-side error propagation, not python's
+    /// resolution rules.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn worker_missing_tryke_surfaces_python_error_in_outcome() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+
+        let fake_python = dir.path().join("fake_python.sh");
+        std::fs::write(
+            &fake_python,
+            "#!/bin/sh\n\
+             echo \"$0: Error while finding module specification for \
+             'tryke.worker' (ModuleNotFoundError: No module named 'tryke')\" >&2\n\
+             exit 1\n",
+        )
+        .expect("write fake python");
+        std::fs::set_permissions(&fake_python, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake python");
+
+        let test_file = dir.path().join("test_no_tryke.py");
+        std::fs::write(&test_file, "def test_noop(): pass\n").expect("write test file");
+
+        let unit = WorkUnit {
+            tests: vec![make_test_item("test_no_tryke", "test_noop", &test_file)],
+            hooks: vec![],
+        };
+
+        let pool = WorkerPool::with_python_path(
+            1,
+            fake_python.to_str().expect("fake python path"),
+            dir.path(),
+            &[dir.path().to_path_buf()],
+            LevelFilter::Off,
+        );
+
+        let results: Vec<TestResult> = pool.run(vec![unit]).collect().await;
+        assert_eq!(results.len(), 1);
+        let message = match &results[0].outcome {
+            TestOutcome::Error { message } => message.clone(),
+            other => panic!("expected Error outcome, got {other:?}"),
+        };
+        assert!(
+            message.contains("No module named 'tryke'"),
+            "missing python traceback in error message: {message}"
+        );
+        assert!(
+            message.contains("worker stderr:"),
+            "missing 'worker stderr:' header in error message: {message}"
         );
 
         pool.shutdown();

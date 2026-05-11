@@ -295,12 +295,23 @@ def _todo(
 
 
 def _measure_rss_bytes() -> int | None:
-    """Resident set size in bytes, or ``None`` where unavailable.
+    """Peak resident set size in bytes, or ``None`` where unavailable.
 
-    Uses :mod:`resource` (POSIX-only). Linux reports ``ru_maxrss`` in
-    KiB, macOS in bytes — normalise to bytes for the wire. Windows has
-    no :mod:`resource`; return ``None`` so the runner skips the memory
-    cap there rather than guessing wrong.
+    Uses :func:`resource.getrusage`'s ``ru_maxrss`` (POSIX-only),
+    which is the **maximum** RSS the process has reached so far —
+    monotonically non-decreasing for the worker's lifetime. We use the
+    peak (not current) because:
+
+    1. A worker that ever ballooned past the cap has likely fragmented
+       its allocator and accumulated module-level state we can't free;
+       recycling the process is the cheap way to reclaim that even if
+       RSS has since dropped.
+    2. ``ru_maxrss`` requires no /proc parsing and is available on both
+       Linux and macOS via a single syscall.
+
+    Linux reports ``ru_maxrss`` in KiB, macOS in bytes — normalise to
+    bytes for the wire. Windows has no :mod:`resource`; return ``None``
+    so the runner skips the memory cap there rather than guessing wrong.
     """
     try:
         import resource  # noqa: PLC0415  - lazy: optional POSIX-only import
@@ -321,12 +332,19 @@ def _measure_open_fds() -> int | None:
     Linux exposes ``/proc/self/fd``; macOS ships ``/dev/fd``. Windows
     has neither and returns ``None`` — the runner then skips the FD
     cap on this worker.
+
+    The dir scan itself opens one FD on the dir handle; we subtract it
+    so the reading reflects FDs held by the *worker*, not the
+    measurement. Without this, a worker idling at N FDs would report
+    N+1 and could trip a tight cap before the underlying number
+    actually changed.
     """
     for path in ("/proc/self/fd", "/dev/fd"):
         try:
-            return sum(1 for _ in Path(path).iterdir())
+            count = sum(1 for _ in Path(path).iterdir())
         except OSError:
             continue
+        return max(0, count - 1)
     return None
 
 

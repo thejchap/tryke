@@ -713,8 +713,16 @@ def test_noop() -> None:
     /// teardown is not skipped — see
     /// `recycle_does_not_skip_scope_fixture_teardown`), so we exercise
     /// it here by sleeping past the cap between units. The module body
-    /// records the worker pid on every fresh import; we expect one
-    /// distinct pid per recycle boundary.
+    /// records the worker pid on every fresh import; observing ≥ 2
+    /// distinct pids proves the age recycle fired at least once.
+    ///
+    /// We deliberately do NOT pin the count to exactly 2: on slow CI
+    /// runners (cold Python startup, busy schedulers) the first unit's
+    /// end-of-unit check can already cross a tight cap, producing a
+    /// recycle before the sleep. That's not a correctness regression —
+    /// the property under test ("age cap eventually fires") still
+    /// holds. The complementary "no recycle when under cap" property
+    /// is covered by `evaluate_recycle_returns_none_when_no_signals_tripped`.
     #[tokio::test]
     async fn worker_recycles_when_age_exceeds_limit() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -741,8 +749,10 @@ def test_noop() -> None:
         );
         std::fs::write(&test_file, source).expect("write test file");
 
-        // Tight age cap — a sleep between units crosses it deterministically
-        // without making the test slow.
+        // Tight age cap — a sleep between units crosses it
+        // deterministically without making the test slow. Slow CI
+        // runners may also cross it within a single unit; see the
+        // assertion at the bottom for why that's acceptable.
         let limits = WorkerLimits {
             max_rss_bytes: None,
             max_open_fds: None,
@@ -763,7 +773,6 @@ def test_noop() -> None:
             hooks: vec![],
         };
 
-        // First unit: worker is fresh, no recycle.
         let r1: Vec<TestResult> = pool.run(vec![make_unit()]).collect().await;
         assert_eq!(r1.len(), 1);
         assert!(matches!(r1[0].outcome, TestOutcome::Passed));
@@ -773,14 +782,13 @@ def test_noop() -> None:
         // jittery CI without pushing test latency higher than necessary.
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 
-        // Second unit: still on the same worker (recycle is checked at
-        // end-of-unit), but at *its* end the age check trips.
         let r2: Vec<TestResult> = pool.run(vec![make_unit()]).collect().await;
         assert_eq!(r2.len(), 1);
         assert!(matches!(r2[0].outcome, TestOutcome::Passed));
 
-        // Third unit: forced to spawn a new worker (the previous one
-        // was recycled) so a second pid is logged.
+        // Third unit forces a fresh spawn (the prior worker was
+        // recycled at the end of unit 2 at latest), guaranteeing the
+        // pid log gains a new entry.
         let r3: Vec<TestResult> = pool.run(vec![make_unit()]).collect().await;
         assert_eq!(r3.len(), 1);
         assert!(matches!(r3[0].outcome, TestOutcome::Passed));
@@ -788,10 +796,10 @@ def test_noop() -> None:
         let pid_lines = std::fs::read_to_string(&pid_log).unwrap_or_default();
         let distinct_pids: std::collections::HashSet<&str> =
             pid_lines.lines().filter(|l| !l.is_empty()).collect();
-        assert_eq!(
-            distinct_pids.len(),
-            2,
-            "expected 2 distinct worker pid(s) (one recycle); got {} from log: {pid_lines:?}",
+        assert!(
+            distinct_pids.len() >= 2,
+            "expected ≥ 2 distinct worker pid(s) (recycle fired at least once); \
+             got {} from log: {pid_lines:?}",
             distinct_pids.len(),
         );
 

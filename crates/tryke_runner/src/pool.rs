@@ -286,11 +286,7 @@ async fn run_single_test(
             // spawn a fresh one and replay cached hooks so the remaining
             // tests in this unit keep their fixtures.
             state.process = None;
-            let mut msg = format!("worker error: {err}");
-            if !stderr_output.is_empty() {
-                msg.push_str("\nworker stderr:\n");
-                msg.push_str(&stderr_output);
-            }
+            let msg = format_worker_failure("worker error", &err, &stderr_output);
             let _ = result_tx.send(TestResult {
                 test,
                 outcome: TestOutcome::Error { message: msg },
@@ -705,6 +701,14 @@ def test_noop() -> None:
     /// to be all the user saw. Regression test for the diagnosability
     /// fix.
     ///
+    /// The work unit carries one `HookItem` so `register_hooks_for_unit`
+    /// drives the failure through `register_hooks` (the new
+    /// `last_failure`-on-`ensure_worker` path), rather than only through
+    /// `run_single_test`'s pre-existing `run_test` error path. With no
+    /// hooks the spawn-then-fast-exit worker would reach `run_test`
+    /// before its stderr was needed, which doesn't exercise the actual
+    /// fix.
+    ///
     /// Unix-only: simulates the failing python with a shell script.
     /// The workspace venv's python has `tryke` installed in editable
     /// mode and its `.pth` file is searched regardless of PYTHONPATH,
@@ -737,7 +741,14 @@ def test_noop() -> None:
 
         let unit = WorkUnit {
             tests: vec![make_test_item("test_no_tryke", "test_noop", &test_file)],
-            hooks: vec![],
+            hooks: vec![HookItem {
+                name: "some_fixture".into(),
+                module_path: "test_no_tryke".into(),
+                per: FixturePer::Test,
+                groups: vec![],
+                depends_on: vec![],
+                line_number: None,
+            }],
         };
 
         let pool = WorkerPool::with_python_path(
@@ -761,6 +772,13 @@ def test_noop() -> None:
         assert!(
             message.contains("worker stderr:"),
             "missing 'worker stderr:' header in error message: {message}"
+        );
+        // Sanity-check we went through the new `last_failure` path
+        // (register_hooks / hook-replay), not the pre-existing
+        // run_test error path.
+        assert!(
+            message.contains("register_hooks failed") || message.contains("hook replay failed"),
+            "expected hook-replay/register_hooks failure prefix: {message}"
         );
 
         pool.shutdown();

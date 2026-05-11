@@ -27,6 +27,11 @@ pub struct WorkerProcess {
     /// child's stderr pipe into this buffer so the pipe never fills and
     /// the worker can't block on a stderr write mid-RPC.
     stderr_buf: Arc<Mutex<VecDeque<u8>>>,
+    /// Handle to the drainer task. `drain_stderr` awaits it so we don't
+    /// snapshot the in-memory buffer before the drainer has consumed the
+    /// kernel pipe — without this the stderr of a fast-exiting worker
+    /// races out from under the caller.
+    stderr_drainer: Option<tokio::task::JoinHandle<()>>,
     next_id: u64,
 }
 
@@ -72,21 +77,25 @@ impl WorkerProcess {
         // as "tryke hangs at finalize_hooks". Spawn a drainer that
         // keeps the pipe empty for the worker's lifetime.
         let stderr_buf = Arc::new(Mutex::new(VecDeque::<u8>::new()));
-        if let Err(err) = spawn_stderr_drainer(stderr, Arc::clone(&stderr_buf)) {
-            if let Err(kill_err) = child.start_kill() {
-                debug!(
-                    "failed to kill worker after stderr drainer setup error (pid {:?}): {kill_err}",
-                    child.id()
-                );
+        let stderr_drainer = match spawn_stderr_drainer(stderr, Arc::clone(&stderr_buf)) {
+            Ok(handle) => Some(handle),
+            Err(err) => {
+                if let Err(kill_err) = child.start_kill() {
+                    debug!(
+                        "failed to kill worker after stderr drainer setup error (pid {:?}): {kill_err}",
+                        child.id()
+                    );
+                }
+                return Err(err);
             }
-            return Err(err);
-        }
+        };
 
         Ok(Self {
             child,
             stdin,
             stdout,
             stderr_buf,
+            stderr_drainer,
             next_id: 1,
         })
     }
@@ -222,17 +231,28 @@ impl WorkerProcess {
 
     /// Snapshot the buffered worker stderr and clear the buffer.
     ///
-    /// Kept `async` to preserve the pre-fix public signature; the body
-    /// is purely synchronous.
+    /// Kills the child first so its stderr pipe closes, then awaits the
+    /// drainer so any bytes still sitting in the kernel pipe buffer are
+    /// pulled into the in-memory buffer before we read it. Without this,
+    /// a worker that writes-then-exits (e.g. python printing a traceback
+    /// before exit) can race the caller: we'd snapshot the empty buffer
+    /// before the drainer task is scheduled. All callers drop the worker
+    /// after this returns, so the implicit `start_kill` is a no-op on an
+    /// already-dead child and otherwise just hastens an inevitable kill.
     ///
     /// # Panics
     /// Panics only if the stderr-drainer task panicked while holding the
     /// internal mutex (poisoning it). That task does no fallible work.
-    #[expect(
-        clippy::unused_async,
-        reason = "Preserves pre-fix public async signature"
-    )]
     pub async fn drain_stderr(&mut self) -> String {
+        let _ = self.child.start_kill();
+        if let Some(handle) = self.stderr_drainer.take() {
+            // The drainer exits on EOF, which arrives as soon as the
+            // child's stderr fd closes. Bound the wait so a wedged
+            // grandchild that inherited the pipe (unlikely on our
+            // workers, but theoretically possible) can't hang the
+            // runner; on timeout we just take whatever was buffered.
+            let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        }
         let bytes: Vec<u8> = {
             let mut g = self
                 .stderr_buf
@@ -267,10 +287,10 @@ impl Drop for WorkerProcess {
 fn spawn_stderr_drainer(
     stderr: tokio::process::ChildStderr,
     buf: Arc<Mutex<VecDeque<u8>>>,
-) -> Result<()> {
+) -> Result<tokio::task::JoinHandle<()>> {
     let handle = tokio::runtime::Handle::try_current()
         .map_err(|e| anyhow!("WorkerProcess::spawn requires an active tokio runtime: {e}"))?;
-    handle.spawn(async move {
+    Ok(handle.spawn(async move {
         let mut reader = stderr;
         let mut chunk = [0u8; 8192];
         loop {
@@ -283,8 +303,7 @@ fn spawn_stderr_drainer(
                 }
             }
         }
-    });
-    Ok(())
+    }))
 }
 
 /// Append `data` to `buf`, capping it at `STDERR_RETAIN_BYTES` by

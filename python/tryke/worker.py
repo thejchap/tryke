@@ -120,6 +120,7 @@ class _PassedResult(TypedDict):
     duration_ms: int
     stdout: str
     stderr: str
+    health: NotRequired[_HealthSnapshot]
 
 
 class _FailedResult(TypedDict):
@@ -131,6 +132,7 @@ class _FailedResult(TypedDict):
     executed_lines: list[int]
     stdout: str
     stderr: str
+    health: NotRequired[_HealthSnapshot]
 
 
 class _SkippedResult(TypedDict):
@@ -139,6 +141,7 @@ class _SkippedResult(TypedDict):
     reason: str | None
     stdout: str
     stderr: str
+    health: NotRequired[_HealthSnapshot]
 
 
 class _XFailedResult(TypedDict):
@@ -147,6 +150,7 @@ class _XFailedResult(TypedDict):
     reason: str | None
     stdout: str
     stderr: str
+    health: NotRequired[_HealthSnapshot]
 
 
 class _XPassedResult(TypedDict):
@@ -154,6 +158,7 @@ class _XPassedResult(TypedDict):
     duration_ms: int
     stdout: str
     stderr: str
+    health: NotRequired[_HealthSnapshot]
 
 
 class _TodoResult(TypedDict):
@@ -162,6 +167,7 @@ class _TodoResult(TypedDict):
     description: str | None
     stdout: str
     stderr: str
+    health: NotRequired[_HealthSnapshot]
 
 
 type _TestResult = (
@@ -172,6 +178,21 @@ type _TestResult = (
     | _XPassedResult
     | _TodoResult
 )
+
+
+class _HealthSnapshot(TypedDict):
+    """Worker self-reported resource snapshot.
+
+    Mirrors ``WorkerHealthWire`` in
+    ``crates/tryke_runner/src/protocol.rs``. Both fields are ``None``
+    when the underlying syscall is unavailable on this platform — the
+    runner treats a missing signal as "do not recycle on this
+    dimension," not as an error.
+    """
+
+    rss_bytes: int | None
+    open_fds: int | None
+
 
 type _DispatchResult = _TestResult | str | None
 
@@ -270,6 +291,50 @@ def _todo(
         "description": description,
         "stdout": stdout,
         "stderr": stderr,
+    }
+
+
+def _measure_rss_bytes() -> int | None:
+    """Resident set size in bytes, or ``None`` where unavailable.
+
+    Uses :mod:`resource` (POSIX-only). Linux reports ``ru_maxrss`` in
+    KiB, macOS in bytes — normalise to bytes for the wire. Windows has
+    no :mod:`resource`; return ``None`` so the runner skips the memory
+    cap there rather than guessing wrong.
+    """
+    try:
+        import resource  # noqa: PLC0415  - lazy: optional POSIX-only import
+    except ImportError:
+        return None
+    try:
+        ru_maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    except OSError:
+        return None
+    if sys.platform == "darwin":
+        return int(ru_maxrss)
+    return int(ru_maxrss) * 1024
+
+
+def _measure_open_fds() -> int | None:
+    """Open file descriptor count, or ``None`` where unavailable.
+
+    Linux exposes ``/proc/self/fd``; macOS ships ``/dev/fd``. Windows
+    has neither and returns ``None`` — the runner then skips the FD
+    cap on this worker.
+    """
+    for path in ("/proc/self/fd", "/dev/fd"):
+        try:
+            return sum(1 for _ in Path(path).iterdir())
+        except OSError:
+            continue
+    return None
+
+
+def _measure_health() -> _HealthSnapshot:
+    """Snapshot the worker's current resource footprint for the runner."""
+    return {
+        "rss_bytes": _measure_rss_bytes(),
+        "open_fds": _measure_open_fds(),
     }
 
 
@@ -390,6 +455,13 @@ class Worker:
 
             try:
                 result = self._dispatch(method, params)
+                # Attach the worker's resource snapshot to every test
+                # response so the runner can recycle on memory / FD
+                # pressure (see ``WorkerHealthWire`` on the rust side).
+                # Only test-shaped results (dict, not "pong"/None) carry
+                # health; ping/register_hooks/finalize_hooks don't.
+                if isinstance(result, dict):
+                    result["health"] = _measure_health()
                 self._write(
                     {
                         "jsonrpc": "2.0",

@@ -371,6 +371,17 @@ class DependencyResolver:
     def _teardown_async_generators(self, gens: list[_AsyncGenEntry]) -> None:
         while gens:
             entry = gens.pop()
+            # If the loop was closed (e.g. the worker finalized the shared loop
+            # mid-teardown across a recycle / shutdown race), there's no way to
+            # drive __anext__ / aclose. Skip the drain and just clean up state
+            # — the generator's after-yield code won't run, but raising
+            # "Event loop is closed" here just turns an unrelated test into a
+            # spurious failure.
+            if entry.loop.is_closed():
+                self._cache.pop(entry.fn, None)
+                if entry.is_scope:
+                    self._scope_fixtures.discard(entry.fn)
+                continue
             try:
                 try:
                     entry.loop.run_until_complete(entry.agen.__anext__())

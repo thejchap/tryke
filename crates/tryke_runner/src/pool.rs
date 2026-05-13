@@ -286,14 +286,10 @@ async fn run_single_test(
             // spawn a fresh one and replay cached hooks so the remaining
             // tests in this unit keep their fixtures.
             state.process = None;
-            let mut msg = format!("worker error: {err}");
-            if !stderr_output.is_empty() {
-                msg.push_str("\nworker stderr:\n");
-                msg.push_str(&stderr_output);
-            }
+            let message = format_worker_failure("worker error", &err, &stderr_output);
             let _ = result_tx.send(TestResult {
                 test,
-                outcome: TestOutcome::Error { message: msg },
+                outcome: TestOutcome::Error { message },
                 duration: Duration::ZERO,
                 stdout: String::new(),
                 stderr: stderr_output,
@@ -705,6 +701,16 @@ def test_noop() -> None:
     /// to be all the user saw. Regression test for the diagnosability
     /// fix.
     ///
+    /// The unit carries a `HookItem` on purpose: with `hooks: vec![]`,
+    /// `handle_unit` skips `register_hooks_for_unit` entirely and the
+    /// failure would surface via `run_single_test`'s `run_test` error
+    /// path — which already existed before this PR. To exercise the
+    /// new code (`register_hooks_for_unit` stashing `last_failure`
+    /// after `drain_stderr`, then `ensure_worker`'s replay loop
+    /// stashing again on respawn, then `run_single_test` reading
+    /// `last_failure` instead of the opaque placeholder) the test
+    /// needs a hook so `register_hooks_for_unit` actually runs.
+    ///
     /// Unix-only: simulates the failing python with a shell script.
     /// The workspace venv's python has `tryke` installed in editable
     /// mode and its `.pth` file is searched regardless of PYTHONPATH,
@@ -735,9 +741,25 @@ def test_noop() -> None:
         let test_file = dir.path().join("test_no_tryke.py");
         std::fs::write(&test_file, "def test_noop(): pass\n").expect("write test file");
 
+        // Hook on the same module forces `handle_unit` through
+        // `register_hooks_for_unit` → `ensure_worker` (spawn ok) →
+        // `register_hooks` (RPC error) → `drain_stderr` → stash
+        // `last_failure` → drop process. Then `run_single_test` →
+        // `ensure_worker` → respawn ok → replay `register_hooks`
+        // (RPC error) → stash `last_failure` → return None →
+        // `run_single_test` surfaces `last_failure` as the outcome
+        // message. Without this hook the new path isn't exercised.
+        let hook = HookItem {
+            name: "noop".into(),
+            module_path: "test_no_tryke".into(),
+            per: FixturePer::Test,
+            groups: vec![],
+            depends_on: vec![],
+            line_number: None,
+        };
         let unit = WorkUnit {
             tests: vec![make_test_item("test_no_tryke", "test_noop", &test_file)],
-            hooks: vec![],
+            hooks: vec![hook],
         };
 
         let pool = WorkerPool::with_python_path(
@@ -754,6 +776,14 @@ def test_noop() -> None:
             TestOutcome::Error { message } => message.clone(),
             other => panic!("expected Error outcome, got {other:?}"),
         };
+        // `run_single_test`'s `last_failure` path produces this prefix
+        // — proves we went through `ensure_worker`'s replay loop, not
+        // through `run_test`'s direct error path which would say
+        // "worker error: …".
+        assert!(
+            message.starts_with("hook replay failed for module test_no_tryke"),
+            "expected hook-replay prefix from ensure_worker.last_failure, got: {message}"
+        );
         assert!(
             message.contains("No module named 'tryke'"),
             "missing python traceback in error message: {message}"

@@ -93,3 +93,17 @@ dev = [
   # Drop this pin once pymdown-extensions stops passing None.
   "pygments<2.20",
 ]
+
+[tool.bumpversion]
+commit = true
+tag = true
+tag_name = "{new_version}"
+parse = "(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)"
+serialize = ["{major}.{minor}.{patch}"]
+message = "chore: bump: version {current_version} → {new_version}"
+pre_commit_hooks = ["uv sync", "git add uv.lock"]
+
+[[tool.bumpversion.files]]
+filename = "pyproject.toml"
+search = 'version = "{current_version}"'
+replace = 'version = "{new_version}"'

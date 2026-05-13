@@ -62,11 +62,21 @@ impl fmt::Display for RecycleReason {
 }
 
 /// Soft ceilings on a worker's resource footprint. Each is `Option` so
-/// callers can opt out of a signal entirely (e.g. tests that exercise
-/// only one dimension). `None` on a field means "never recycle on this
-/// signal." The defaults are tuned for real test suites — see
-/// [`WorkerLimits::default`].
-#[derive(Debug, Clone, Copy)]
+/// callers can opt out of a signal entirely. `None` on a field means
+/// "never recycle on this signal." The default is fully opt-in: every
+/// signal is `None`, so workers run for the full duration of
+/// `tryke test` unless the caller wires explicit caps in.
+///
+/// Earlier iterations of this code shipped 1 GiB RSS / 200 FDs / 600 s
+/// defaults to mitigate the macOS 256-FD ceiling, but those bounds
+/// surprised suites that legitimately ran long (or held many FDs) and
+/// made the runner's behaviour depend on workload shape rather than
+/// user intent. The upstream fix for the FD ceiling is to raise the
+/// process's own `RLIMIT_NOFILE` on startup (see the `fdlimit` module
+/// in the `tryke` binary), which removes the FD-exhaustion failure
+/// mode without churning interpreters. Users who still want recycling
+/// on a long-lived suite can opt in through this struct.
+#[derive(Debug, Clone, Copy, Default)]
 pub struct WorkerLimits {
     pub max_rss_bytes: Option<u64>,
     pub max_open_fds: Option<u64>,
@@ -74,34 +84,12 @@ pub struct WorkerLimits {
 }
 
 impl WorkerLimits {
-    /// Disable every soft limit. Convenient for tests that only want to
-    /// exercise one signal at a time.
+    /// Disable every soft limit. Same as [`Self::default`]; retained as
+    /// a self-documenting alias for tests and call sites that want to
+    /// be explicit about opting out of recycling.
     #[must_use]
     pub fn unlimited() -> Self {
-        Self {
-            max_rss_bytes: None,
-            max_open_fds: None,
-            max_age: None,
-        }
-    }
-}
-
-impl Default for WorkerLimits {
-    fn default() -> Self {
-        Self {
-            // 1 GiB RSS — comfortable headroom for suites that pull in
-            // heavy native deps (numpy, ssl, sqlite) on first import,
-            // while still bounding slow leaks across long runs.
-            max_rss_bytes: Some(1 << 30),
-            // Below the macOS 256-FD per-process soft limit, leaving
-            // headroom for the python interpreter's own baseline (~30
-            // FDs on a fresh process) plus the runner's stdio pipes.
-            max_open_fds: Some(200),
-            // 10 minutes of wall time. Long suites still finish per
-            // worker without churning; pathologically slow leaks that
-            // never trip the memory/FD cap still get bounded.
-            max_age: Some(Duration::from_secs(600)),
-        }
+        Self::default()
     }
 }
 

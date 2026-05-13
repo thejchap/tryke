@@ -131,6 +131,80 @@ TRYKE_LOG=debug tryke test
 TRYKE_LOG=info RUST_LOG=tryke=warn tryke test
 ```
 
+## Resource limits
+
+### File-descriptor ceiling (`RLIMIT_NOFILE`)
+
+Large suites can exhaust the per-process open-FD soft limit, surfacing as
+opaque `OSError: [Errno 24] Too many open files` failures inside worker
+subprocesses. macOS in particular ships a 256-FD soft default that bites
+suites of a few thousand tests well before they finish.
+
+On startup, tryke raises its own `RLIMIT_NOFILE` soft limit toward the
+inherited hard limit — the convention systemd has standardized on (and
+that Home Assistant OS 16 adopted in mid-2025[^ha-os-16]): ship a modest
+soft default (1024) and a generous hard default (524288), and let each
+application raise its own soft limit at startup based on its needs.
+Worker subprocesses inherit the bumped rlimit, so a single call lifts
+the ceiling for every Python interpreter tryke spawns.
+
+The bump is **non-fatal**. If the syscall fails (locked-down sandbox,
+cgroup-pinned limit, ...) tryke logs a warning and proceeds; the user
+can still raise the limit manually:
+
+```bash
+ulimit -n 524288
+tryke test
+```
+
+On macOS the kernel-side `kern.maxfilesperproc` ceiling (default 24576
+on recent releases) is below the reported hard limit; tryke detects the
+`setrlimit` rejection and falls back to a conservative target (10240),
+which still dwarfs the 256-FD soft default that causes the failure mode.
+
+Windows has no `RLIMIT_NOFILE` analogue — the bump is a no-op there.
+
+[^ha-os-16]: <https://developers.home-assistant.io/blog/2025/07/14/home-assistant-os-16-open-file-limit/>
+
+### Worker recycling
+
+Tryke can recycle a Python worker subprocess mid-run when its
+self-reported resource footprint crosses a configured ceiling. Long-lived
+interpreters accumulate module-level state across imports (logging
+handlers, sqlite/ssl objects, atexit callbacks) that `del sys.modules[name]`
+cannot reclaim; only process exit reliably frees it in CPython. Recycling
+is the explicit lever for bounding that growth on suites that need it.
+
+**Defaults: all caps disabled.** Out of the box no worker is ever
+recycled — the runner pairs the FD-limit bump above with the assumption
+that most suites do not need process churn, and recycling has costs of
+its own (Python interpreter startup latency, cached fixture loss). If
+you have a suite that leaks memory or FDs over hours of runtime, the
+hooks are still there:
+
+- **`max_rss_bytes`** — recycle when peak RSS (as reported by
+  `getrusage(RUSAGE_SELF).ru_maxrss`, normalised to bytes) crosses the
+  given threshold. `None` disables the signal. POSIX only — Windows
+  workers report `None` and never trip this cap.
+- **`max_open_fds`** — recycle when the worker's `/proc/self/fd` or
+  `/dev/fd` count (minus one for the directory handle held during the
+  scan) crosses the threshold. `None` disables. Linux + macOS only.
+- **`max_age`** — recycle when the worker has been alive longer than
+  the given `Duration`. `None` disables. Works on every platform.
+
+When multiple signals trip simultaneously the runner reports the
+**strongest** one, in priority order `memory > fds > age`, so debug
+logs attribute the recycle to the most user-visible failure mode.
+
+Recycling is deferred to the end of a unit (after `finalize_hooks`)
+so `per="scope"` fixture teardown is never skipped. The next unit
+handed to the worker task spawns a fresh interpreter and replays the
+cached `register_hooks` call — the same path used for crash recovery.
+
+These knobs are currently library-only (`tryke_runner::WorkerLimits`)
+and intended for embedded use cases. A CLI surface may follow once the
+defaults stabilise.
+
 ## Example
 
 A typical configuration for a project with benchmarks and generated code:

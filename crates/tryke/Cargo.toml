@@ -20,6 +20,9 @@ console = { workspace = true }
 env_logger = "0.11"
 log = "0.4"
 notify-debouncer-mini = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tryke_config = { workspace = true }

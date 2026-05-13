@@ -2,12 +2,13 @@ use std::{env, time::Instant};
 
 use anyhow::Result;
 use clap::Parser;
-use log::debug;
+use log::{debug, warn};
 use tryke::cli::{Cli, Commands, ReporterFormat};
 use tryke::discovery::{
     discover_tests, discover_tests_changed_first, discover_tests_for_paths, resolved_excludes,
 };
 use tryke::execution::run_tests;
+use tryke::fdlimit::{RaiseOutcome, raise as raise_fd_limit};
 use tryke::graph::{run_fixture_graph, run_graph};
 use tryke::watch::run_watch;
 use tryke_reporter::{
@@ -64,6 +65,23 @@ fn main() -> Result<()> {
     )
     .init();
     debug!("{cli:?}");
+
+    // Raise our own RLIMIT_NOFILE soft limit toward the inherited hard
+    // limit before any worker subprocesses are spawned. Children
+    // inherit our rlimit, so a single bump here lifts the FD ceiling
+    // for every Python worker — addressing the macOS 256-FD soft
+    // default that bites large suites. Failures are non-fatal:
+    // sandboxes and locked-down hosts may refuse the syscall and the
+    // user can still raise it manually via `ulimit -n`.
+    match raise_fd_limit() {
+        Ok(RaiseOutcome::Raised { from, to }) => {
+            debug!("RLIMIT_NOFILE soft limit: raised {from} -> {to}");
+        }
+        Ok(RaiseOutcome::Skipped { current }) => {
+            debug!("RLIMIT_NOFILE soft limit unchanged (current={current})");
+        }
+        Err(e) => warn!("could not raise RLIMIT_NOFILE soft limit: {e}"),
+    }
 
     // Cross-language verbosity for spawned python workers. `RUST_LOG` is
     // intentionally not consulted (its per-module filter syntax doesn't

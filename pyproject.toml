@@ -97,6 +97,7 @@ dev = [
 ]
 
 [tool.bumpversion]
+current_version = "0.0.28"
 commit = true
 tag = true
 tag_name = "{new_version}"

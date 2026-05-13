@@ -21,10 +21,10 @@ release type:
     echo "(Ctrl+C to abort at any time)"
     read -r -p "Press Enter to continue: "
 
-#    git add CHANGELOG.md
-#    git commit -m "docs: update changelog for $NEXT"
+    git add CHANGELOG.md
+    git commit -m "docs: update changelog for $NEXT"
 
     uv run bump-my-version bump "$type"
 
-#    git push
-#    git push origin "$NEXT"
+    git push
+    git push origin "$NEXT"

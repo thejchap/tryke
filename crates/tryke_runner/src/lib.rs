@@ -5,4 +5,4 @@ pub mod worker;
 
 pub use pool::{WorkerPool, path_to_module};
 pub use schedule::{DistMode, WorkUnit, partition, partition_with_hooks};
-pub use worker::WorkerProcess;
+pub use worker::{RecycleReason, WorkerHealth, WorkerLimits, WorkerProcess};

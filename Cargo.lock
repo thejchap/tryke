@@ -2160,6 +2160,7 @@ dependencies = [
  "console 0.15.11",
  "env_logger",
  "insta",
+ "libc",
  "log",
  "notify-debouncer-mini",
  "serde_json",

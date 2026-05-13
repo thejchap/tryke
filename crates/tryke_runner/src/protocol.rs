@@ -121,6 +121,36 @@ pub struct RunDoctestParams {
     pub object_path: String,
 }
 
+/// Worker self-reported resource snapshot, attached by the python side
+/// to every `run_test` / `run_doctest` response. Each field is `Option`
+/// because the underlying syscalls are not portable across every
+/// platform we target (e.g. `/proc/self/fd` is linux-only; the
+/// `resource` module is unavailable on windows). A missing signal is
+/// not an error — it just means the runner cannot recycle on that
+/// dimension for this worker.
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
+pub struct WorkerHealthWire {
+    /// Resident set size in bytes, normalised across platforms.
+    #[serde(default)]
+    pub rss_bytes: Option<u64>,
+    /// Open file descriptor count.
+    #[serde(default)]
+    pub open_fds: Option<u64>,
+}
+
+/// Wrapper around [`RunTestResultWire`] carrying the worker's health
+/// snapshot alongside the test outcome. The python side merges the
+/// outcome dict with a top-level `health` field; `#[serde(flatten)]`
+/// pulls the outcome variant out of the same JSON object so the wire
+/// format stays a single flat object.
+#[derive(Debug, Deserialize)]
+pub struct RunTestResponseWire {
+    #[serde(default)]
+    pub health: WorkerHealthWire,
+    #[serde(flatten)]
+    pub result: RunTestResultWire,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum RunTestResultWire {

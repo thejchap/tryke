@@ -31,9 +31,11 @@
 //!   runtime's `_setmaxstdio` ceiling (2048 by default) is the closest
 //!   analogue but it does not affect socket / pipe FDs.
 //!
-//! Errors are non-fatal: if we cannot raise the limit (e.g. running
-//! inside a sandbox that pinned it) we log at `debug` and proceed —
-//! the user can still override via `ulimit -n` before launching.
+//! Errors are non-fatal: this module returns the `io::Result` so the
+//! caller can choose how to surface a failure (in `main` we log it at
+//! `warn` and proceed). The user can still override the limit
+//! manually via `ulimit -n` before launching tryke if a sandbox or
+//! cgroup pinned it.
 //!
 //! [^1]: <https://developers.home-assistant.io/blog/2025/07/14/home-assistant-os-16-open-file-limit/>
 

@@ -265,6 +265,14 @@ impl WorkerProcess {
 
     pub async fn shutdown(&mut self) {
         let _ = self.child.kill().await;
+        // Killing the child closes stderr; the drainer will see EOF and
+        // exit on its own — but `abort()` is the explicit, immediate
+        // signal that we're done with it, and prevents a leftover task
+        // from briefly holding the stderr FD + `stderr_buf` Arc past
+        // the worker's lifetime.
+        if let Some(handle) = self.stderr_drainer.take() {
+            handle.abort();
+        }
     }
 }
 
@@ -274,6 +282,12 @@ impl Drop for WorkerProcess {
         // dropped (e.g. on the error-respawn path in pool.rs). start_kill() is
         // the synchronous variant — safe to call on already-dead processes.
         let _ = self.child.start_kill();
+        // Dropping a Tokio JoinHandle detaches the task, so abort it
+        // explicitly to avoid an orphan drainer outliving the worker on
+        // respawn paths (the drainer holds stderr_buf + the stderr FD).
+        if let Some(handle) = self.stderr_drainer.take() {
+            handle.abort();
+        }
     }
 }
 

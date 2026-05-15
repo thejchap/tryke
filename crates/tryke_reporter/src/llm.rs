@@ -35,11 +35,20 @@ impl<W: io::Write> LlmReporter<W> {
 }
 
 fn format_duration(d: std::time::Duration) -> String {
-    let ms = d.as_secs_f64() * 1000.0;
-    if ms < 1000.0 {
-        format!("{ms:.2}ms")
+    let secs = d.as_secs_f64();
+    if secs < 1.0 {
+        format!("{:.2}ms", secs * 1000.0)
+    } else if secs < 60.0 {
+        format!("{secs:.2}s")
     } else {
-        format!("{:.2}s", d.as_secs_f64())
+        // Integer math avoids the float-cast precision lint and the
+        // formatted output only needs two-decimal precision anyway.
+        let total_ms = d.as_millis();
+        let total_secs = total_ms / 1000;
+        let minutes = total_secs / 60;
+        let rem_secs = total_secs % 60;
+        let rem_cs = (total_ms % 1000) / 10;
+        format!("{minutes}:{rem_secs:02}.{rem_cs:02}")
     }
 }
 
@@ -371,6 +380,27 @@ mod tests {
         });
         let out = output(&r);
         assert_eq!(out.trim(), "47 passed [35.00ms]");
+    }
+
+    #[test]
+    fn summary_duration_minutes_seconds() {
+        let mut r = reporter();
+        r.on_run_complete(&RunSummary {
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            errors: 0,
+            xfailed: 0,
+            todo: 0,
+            duration: Duration::from_millis(65_500),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
+            changed_selection: None,
+        });
+        let out = output(&r);
+        assert_eq!(out.trim(), "1 passed [1:05.50]");
     }
 
     #[test]

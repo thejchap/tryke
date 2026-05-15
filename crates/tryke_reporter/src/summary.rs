@@ -25,11 +25,20 @@ fn write_watch_keybindings<W: io::Write>(writer: &mut W) {
 }
 
 fn format_duration(d: Duration) -> String {
-    let ms = d.as_secs_f64() * 1000.0;
-    if ms < 1000.0 {
-        format!("{ms:.2}ms")
+    let secs = d.as_secs_f64();
+    if secs < 1.0 {
+        format!("{:.2}ms", secs * 1000.0)
+    } else if secs < 60.0 {
+        format!("{secs:.2}s")
     } else {
-        format!("{:.2}s", d.as_secs_f64())
+        // Integer math avoids the float-cast precision lint and the
+        // formatted output only needs two-decimal precision anyway.
+        let total_ms = d.as_millis();
+        let total_secs = total_ms / 1000;
+        let minutes = total_secs / 60;
+        let rem_secs = total_secs % 60;
+        let rem_cs = (total_ms % 1000) / 10;
+        format!("{minutes}:{rem_secs:02}.{rem_cs:02}")
     }
 }
 
@@ -436,6 +445,66 @@ mod tests {
             changed_selection: None,
         });
         assert!(out.contains("1.50s"));
+    }
+
+    #[test]
+    fn duration_minutes_seconds() {
+        let out = render(&RunSummary {
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            errors: 0,
+            xfailed: 0,
+            todo: 0,
+            duration: Duration::from_millis(65_500),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
+            changed_selection: None,
+        });
+        assert!(out.contains("1:05.50"), "expected M:SS.SS, got: {out}");
+        assert!(!out.contains("65.50s"));
+    }
+
+    #[test]
+    fn duration_exactly_one_minute() {
+        let out = render(&RunSummary {
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            errors: 0,
+            xfailed: 0,
+            todo: 0,
+            duration: Duration::from_secs(60),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
+            changed_selection: None,
+        });
+        assert!(out.contains("1:00.00"));
+    }
+
+    #[test]
+    fn duration_breakdown_uses_minutes_seconds() {
+        let out = render(&RunSummary {
+            passed: 5,
+            failed: 0,
+            skipped: 0,
+            errors: 0,
+            xfailed: 0,
+            todo: 0,
+            duration: Duration::from_secs(125),
+            discovery_duration: Some(Duration::from_millis(30)),
+            test_duration: Some(Duration::from_secs(95)),
+            file_count: 0,
+            start_time: None,
+            changed_selection: None,
+        });
+        assert!(out.contains("2:05.00"));
+        assert!(out.contains("tests 1:35.00"));
+        assert!(out.contains("discover 30.00ms"));
     }
 
     #[test]

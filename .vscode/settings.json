@@ -16,13 +16,9 @@
   "rust-analyzer.checkOnSave": true,
   "rust-analyzer.restartServerOnConfigChange": true,
   "rust-analyzer.showDependenciesExplorer": true,
-  "rust-analyzer.showSyntaxTree": true,
+  "rust-analyzer.showSyntaxTree": false,
   "rust-analyzer.testExplorer": true,
   "rust-analyzer.debug.buildBeforeRestart": true,
-  "rust-analyzer.diagnostics.enable": true,
-  "rust-analyzer.diagnostics.experimental.enable": true,
-  "rust-analyzer.diagnostics.styleLints.enable": true,
-  "rust-analyzer.cachePriming.enable": true,
   "rust-analyzer.cargo.buildScripts.rebuildOnSave": true,
   "editor.formatOnSave": true,
   "ruff.enable": true,
@@ -31,5 +27,12 @@
   "ruff.showSyntaxErrors": true,
   "ruff.organizeImports": true,
   "explorer.excludeGitIgnore": true,
-  "ty.path": ["${workspaceFolder}/.venv/bin/ty"]
+  "ty.path": ["${workspaceFolder}/.venv/bin/ty"],
+  "rust-analyzer.cargo.allTargets": true,
+  "rust-analyzer.cargo.autoreload": true,
+  "rust-analyzer.cargo.buildScripts.enable": true,
+  "rust-analyzer.check.workspace": true,
+  "rust-analyzer.procMacro.enable": true,
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.check.allTargets": true
 }

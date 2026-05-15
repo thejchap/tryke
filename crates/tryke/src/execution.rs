@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 use log::LevelFilter;
@@ -11,32 +14,58 @@ pub fn worker_pool_size() -> usize {
     std::thread::available_parallelism().map_or(4, std::num::NonZero::get)
 }
 
-#[expect(clippy::too_many_arguments)]
+pub struct RunTestsRequest<'a> {
+    pub root: &'a Path,
+    pub python: &'a str,
+    pub log_level: LevelFilter,
+    pub tests: Vec<tryke_types::TestItem>,
+    pub hooks: &'a [HookItem],
+    pub maxfail: Option<usize>,
+    pub workers: Option<usize>,
+    pub dist: DistMode,
+    pub discovery_duration: Option<Duration>,
+    pub changed_selection: Option<ChangedSelectionSummary>,
+}
+
+pub struct ReportCycleRequest<'a> {
+    pub tests: Vec<tryke_types::TestItem>,
+    pub hooks: &'a [HookItem],
+    pub pool: &'a WorkerPool,
+    pub maxfail: Option<usize>,
+    pub dist: DistMode,
+    pub discovery_duration: Option<Duration>,
+    pub changed_selection: Option<ChangedSelectionSummary>,
+}
+
 pub async fn run_tests(
     reporter: &mut dyn Reporter,
-    root: &std::path::Path,
-    python: &str,
-    log_level: LevelFilter,
-    tests: Vec<tryke_types::TestItem>,
-    hooks: &[HookItem],
-    maxfail: Option<usize>,
-    workers: Option<usize>,
-    dist: DistMode,
-    discovery_duration: Option<Duration>,
-    changed_selection: Option<ChangedSelectionSummary>,
+    RunTestsRequest {
+        root,
+        python,
+        log_level,
+        tests,
+        hooks,
+        maxfail,
+        workers,
+        dist,
+        discovery_duration,
+        changed_selection,
+    }: RunTestsRequest<'_>,
 ) -> Result<RunSummary> {
     let pool_size = workers.unwrap_or_else(|| tests.len().min(worker_pool_size()));
     let pool = WorkerPool::new(pool_size, python, root, log_level);
     pool.warm().await;
     let summary = report_cycle(
         reporter,
-        tests,
-        hooks,
-        &pool,
-        maxfail,
-        dist,
-        discovery_duration,
-        changed_selection,
+        ReportCycleRequest {
+            tests,
+            hooks,
+            pool: &pool,
+            maxfail,
+            dist,
+            discovery_duration,
+            changed_selection,
+        },
     )
     .await?;
     pool.shutdown();
@@ -44,11 +73,8 @@ pub async fn run_tests(
 }
 
 fn flush_buffer(
-    file: &Option<std::path::PathBuf>,
-    buffers: &mut std::collections::HashMap<
-        Option<std::path::PathBuf>,
-        Vec<(usize, tryke_types::TestResult)>,
-    >,
+    file: &Option<PathBuf>,
+    buffers: &mut std::collections::HashMap<Option<PathBuf>, Vec<(usize, tryke_types::TestResult)>>,
     reporter: &mut dyn Reporter,
 ) {
     if let Some(mut buf) = buffers.remove(file) {
@@ -59,19 +85,19 @@ fn flush_buffer(
     }
 }
 
-#[expect(clippy::too_many_arguments)]
 pub async fn report_cycle(
     reporter: &mut dyn Reporter,
-    tests: Vec<tryke_types::TestItem>,
-    hooks: &[HookItem],
-    pool: &WorkerPool,
-    maxfail: Option<usize>,
-    dist: DistMode,
-    discovery_duration: Option<Duration>,
-    changed_selection: Option<ChangedSelectionSummary>,
+    ReportCycleRequest {
+        tests,
+        hooks,
+        pool,
+        maxfail,
+        dist,
+        discovery_duration,
+        changed_selection,
+    }: ReportCycleRequest<'_>,
 ) -> Result<RunSummary> {
     use std::collections::{HashMap, HashSet};
-    use std::path::PathBuf;
 
     let file_count = tests
         .iter()
@@ -232,13 +258,15 @@ mod tests {
     ) -> anyhow::Result<RunSummary> {
         report_cycle(
             reporter,
-            discoverer.rediscover(),
-            &[],
-            pool,
-            None,
-            DistMode::Test,
-            None,
-            None,
+            ReportCycleRequest {
+                tests: discoverer.rediscover(),
+                hooks: &[],
+                pool,
+                maxfail: None,
+                dist: DistMode::Test,
+                discovery_duration: None,
+                changed_selection: None,
+            },
         )
         .await
     }
@@ -254,16 +282,18 @@ mod tests {
         let tests = discover_tests(dir.path(), false, None, &excludes).tests;
         let _ = run_tests(
             reporter,
-            dir.path(),
-            &test_python_bin(),
-            LevelFilter::Off,
-            tests,
-            &[],
-            None,
-            None,
-            DistMode::Test,
-            None,
-            None,
+            RunTestsRequest {
+                root: dir.path(),
+                python: &test_python_bin(),
+                log_level: LevelFilter::Off,
+                tests,
+                hooks: &[],
+                maxfail: None,
+                workers: None,
+                dist: DistMode::Test,
+                discovery_duration: None,
+                changed_selection: None,
+            },
         )
         .await;
     }
@@ -357,16 +387,18 @@ mod tests {
         assert!(
             run_tests(
                 &mut reporter,
-                dir.path(),
-                &test_python_bin(),
-                LevelFilter::Off,
-                tests,
-                &[],
-                None,
-                None,
-                DistMode::Test,
-                None,
-                None
+                RunTestsRequest {
+                    root: dir.path(),
+                    python: &test_python_bin(),
+                    log_level: LevelFilter::Off,
+                    tests,
+                    hooks: &[],
+                    maxfail: None,
+                    workers: None,
+                    dist: DistMode::Test,
+                    discovery_duration: None,
+                    changed_selection: None,
+                },
             )
             .await
             .is_ok()
@@ -460,13 +492,15 @@ def test_failing():
         );
         let result = report_cycle(
             &mut reporter,
-            tests,
-            &[],
-            &pool,
-            None,
-            DistMode::Test,
-            None,
-            None,
+            ReportCycleRequest {
+                tests,
+                hooks: &[],
+                pool: &pool,
+                maxfail: None,
+                dist: DistMode::Test,
+                discovery_duration: None,
+                changed_selection: None,
+            },
         )
         .await;
         assert!(
@@ -499,13 +533,15 @@ def test_failing():
         );
         let summary = report_cycle(
             &mut reporter,
-            tests,
-            &[],
-            &pool,
-            None,
-            DistMode::Test,
-            None,
-            None,
+            ReportCycleRequest {
+                tests,
+                hooks: &[],
+                pool: &pool,
+                maxfail: None,
+                dist: DistMode::Test,
+                discovery_duration: None,
+                changed_selection: None,
+            },
         )
         .await
         .expect("report_cycle should not error on test failures");

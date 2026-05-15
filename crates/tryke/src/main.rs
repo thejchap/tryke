@@ -7,7 +7,7 @@ use tryke::cli::{Cli, Commands, ReporterFormat};
 use tryke::discovery::{
     discover_tests, discover_tests_changed_first, discover_tests_for_paths, resolved_excludes,
 };
-use tryke::execution::run_tests;
+use tryke::execution::{RunTestsRequest, run_tests};
 use tryke::fdlimit::{RaiseOutcome, raise as raise_fd_limit};
 use tryke::graph::{run_fixture_graph, run_graph};
 use tryke::watch::run_watch;
@@ -207,16 +207,18 @@ fn main() -> Result<()> {
                 let resolved_python = tryke_config::resolve_python(python.as_deref(), &config);
                 let summary = rt.block_on(run_tests(
                     &mut *rep,
-                    root_path,
-                    &resolved_python,
-                    worker_log,
-                    tests,
-                    &discovered.hooks,
-                    resolved_maxfail,
-                    *workers,
-                    (*dist).into(),
-                    Some(discovery_duration),
-                    changed_selection,
+                    RunTestsRequest {
+                        root: root_path,
+                        python: &resolved_python,
+                        log_level: worker_log,
+                        tests,
+                        hooks: &discovered.hooks,
+                        maxfail: resolved_maxfail,
+                        workers: *workers,
+                        dist: (*dist).into(),
+                        discovery_duration: Some(discovery_duration),
+                        changed_selection,
+                    },
                 ))?;
                 if summary.failed > 0 || summary.errors > 0 {
                     std::process::exit(1);

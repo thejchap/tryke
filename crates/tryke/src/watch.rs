@@ -16,7 +16,7 @@ use tryke_reporter::{Reporter, reporter::WatchIdleInfo};
 use tryke_runner::{DistMode, WorkerPool};
 use tryke_types::{DiscoveryWarning, DiscoveryWarningKind, HookItem, filter::TestFilter};
 
-use crate::execution::{report_cycle, worker_pool_size};
+use crate::execution::{ReportCycleRequest, report_cycle, worker_pool_size};
 
 /// How often the watch loop wakes up to check the quit flag while
 /// waiting for file events. Short enough that `q` feels responsive,
@@ -98,13 +98,15 @@ async fn run_watch_cycle(
 ) {
     if let Err(e) = report_cycle(
         reporter,
-        tests,
-        hooks,
-        pool,
-        maxfail,
-        dist,
-        discovery_duration,
-        None,
+        ReportCycleRequest {
+            tests,
+            hooks,
+            pool,
+            maxfail,
+            dist,
+            discovery_duration,
+            changed_selection: None,
+        },
     )
     .await
     {

@@ -339,6 +339,10 @@ impl<W: Write> Reporter for NextReporter<W> {
         summary::write_summary_with_hint(&mut self.writer, run_summary, self.watch_hint.as_deref());
     }
 
+    fn on_collect_complete(&mut self, tests: &[TestItem]) {
+        summary::write_collect_list(&mut self.writer, self.subcommand_label, tests);
+    }
+
     fn set_subcommand_label(&mut self, label: &'static str) {
         self.subcommand_label = label;
     }
@@ -402,6 +406,32 @@ mod tests {
         r.on_run_start(&[]);
         let out = output(r);
         assert!(out.contains("tryke test"));
+    }
+
+    #[test]
+    fn collect_only_lists_tests_with_header_and_count() {
+        let mut r = reporter();
+        let tests = vec![
+            TestItem {
+                name: "test_add".into(),
+                module_path: "tests.math".into(),
+                file_path: Some(PathBuf::from("tests/math.py")),
+                ..Default::default()
+            },
+            TestItem {
+                name: "test_sub".into(),
+                module_path: "tests.math".into(),
+                file_path: Some(PathBuf::from("tests/math.py")),
+                ..Default::default()
+            },
+        ];
+        r.on_collect_complete(&tests);
+        let out = output(r);
+        assert!(out.contains("tryke test"));
+        assert!(out.contains("tests/math.py:"));
+        assert!(out.contains("test_add"));
+        assert!(out.contains("test_sub"));
+        assert!(out.contains("2 tests collected."));
     }
 
     #[test]

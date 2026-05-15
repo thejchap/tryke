@@ -452,45 +452,7 @@ impl<W: io::Write> Reporter for TextReporter<W> {
     }
 
     fn on_collect_complete(&mut self, tests: &[TestItem]) {
-        let _ = writeln!(
-            self.writer,
-            "{} {}",
-            self.subcommand_label.bold(),
-            format!("v{}", env!("CARGO_PKG_VERSION")).dimmed()
-        );
-        let _ = writeln!(self.writer);
-        let mut current_file: Option<&std::path::Path> = None;
-        let mut current_groups: Vec<String> = Vec::new();
-        for test in tests {
-            let file = test.file_path.as_deref();
-            if file != current_file {
-                if current_file.is_some() {
-                    let _ = writeln!(self.writer);
-                }
-                if let Some(path) = file {
-                    let _ = writeln!(self.writer, "{}:", path.display());
-                }
-                current_file = file;
-                current_groups.clear();
-            }
-            if test.groups != current_groups {
-                let common = current_groups
-                    .iter()
-                    .zip(test.groups.iter())
-                    .take_while(|(a, b)| a == b)
-                    .count();
-                for (depth, group) in test.groups.iter().enumerate().skip(common) {
-                    let indent = "  ".repeat(depth + 1);
-                    let _ = writeln!(self.writer, "{indent}{group}");
-                }
-                current_groups.clone_from(&test.groups);
-            }
-            let group_indent = "  ".repeat(test.groups.len());
-            let display = test.display_label();
-            let _ = writeln!(self.writer, "  {group_indent}{}", display.dimmed());
-        }
-        let _ = writeln!(self.writer);
-        let _ = writeln!(self.writer, "{} tests collected.", tests.len());
+        crate::summary::write_collect_list(&mut self.writer, self.subcommand_label, tests);
     }
 
     fn on_run_complete(&mut self, summary: &RunSummary) {

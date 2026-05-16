@@ -615,10 +615,16 @@ mod tests {
         let run_lock = make_run_lock();
         let dirty = make_dirty();
 
-        let req = format!(
-            r#"{{"jsonrpc":"2.0","id":1,"method":"did_change","params":{{"paths":["{}"]}}}}"#,
-            test_file.display(),
-        );
+        // Build the request via serde so the path is JSON-escaped
+        // (Windows backslashes are escape characters in JSON strings —
+        // raw `r#"..."#` interpolation produces invalid input on CI).
+        let req = serde_json::to_string(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "did_change",
+            "params": { "paths": [test_file] },
+        }))
+        .unwrap();
         let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
             .await
             .unwrap();

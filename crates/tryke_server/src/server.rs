@@ -269,10 +269,16 @@ mod tests {
         let (read, mut write) = s.into_split();
         let mut r = BufReader::new(read);
 
-        let dc = format!(
-            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"did_change\",\"params\":{{\"paths\":[\"{}\"]}}}}\n",
-            file.display(),
-        );
+        // serde_json::to_string handles JSON escaping (Windows
+        // backslashes in the path would otherwise produce invalid JSON).
+        let mut dc = serde_json::to_string(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "did_change",
+            "params": { "paths": [file] },
+        }))
+        .unwrap();
+        dc.push('\n');
         write.write_all(dc.as_bytes()).await.unwrap();
         let _dc_resp = read_response(&mut r).await;
 

@@ -1,0 +1,81 @@
+//! Shared "apply a file-change batch" helper used by both the FS watcher
+//! task (`server.rs`) and the `did_change` RPC handler (`handler.rs`).
+//!
+//! Centralises the steps that must happen for every accepted change set:
+//!   1. ask `Discoverer::affected_modules` which Python modules the change
+//!      reaches
+//!   2. `rediscover_changed` to refresh the discovery cache for those files
+//!   3. compute `tests_for_changed` for the broadcast payload
+//!   4. mark the worker pool `dirty` (next `run` will drain → restart)
+//!   5. broadcast `discover_complete` so connected clients can refresh
+//!
+//! Keeping these steps in one place guarantees the FS path and the RPC
+//! path stay semantically identical — important because the RPC path is
+//! what closes the race for cooperating clients, and the FS path is what
+//! covers everyone else.
+
+use std::{
+    path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
+};
+
+use bytes::Bytes;
+use log::debug;
+use tokio::sync::{Mutex, broadcast};
+use tryke_discovery::Discoverer;
+
+use crate::protocol::{DiscoverCompleteParams, Notification};
+
+/// Apply an accepted file-change batch to the shared discovery cache and
+/// signal that the worker pool needs to be restarted before the next
+/// dispatch.
+///
+/// Idempotent: calling twice with the same paths (e.g. once from
+/// `did_change`, once from the FS watcher a few ms later) is harmless —
+/// `rediscover_changed` re-reads the same files, the atomic store is a
+/// no-op when `dirty` is already `true`, and the second
+/// `discover_complete` broadcast is a duplicate that client-side
+/// suppression can drop.
+pub(crate) async fn apply_change(
+    disc: &Mutex<Discoverer>,
+    bcast_tx: &broadcast::Sender<Bytes>,
+    dirty: &AtomicBool,
+    paths: &[PathBuf],
+) {
+    if paths.is_empty() {
+        return;
+    }
+
+    let (modules, tests) = {
+        let mut guard = disc.lock().await;
+        let modules = guard.affected_modules(paths);
+        guard.rediscover_changed(paths);
+        let tests = guard.tests_for_changed(paths);
+        (modules, tests)
+    };
+
+    if modules.is_empty() {
+        debug!("apply_change: no modules affected — skipping dirty mark");
+    } else {
+        debug!(
+            "apply_change: marking pool dirty for {} module(s): {}",
+            modules.len(),
+            modules.join(", ")
+        );
+        // Release on the store pairs with the AcqRel swap in
+        // execute_run: any per-connection `run` whose handler reads
+        // `dirty` after this point is guaranteed to observe `true`.
+        dirty.store(true, Ordering::Release);
+    }
+
+    debug!("apply_change: {} affected tests", tests.len());
+    let notif = Notification {
+        jsonrpc: "2.0".to_string(),
+        method: "discover_complete".to_string(),
+        params: DiscoverCompleteParams { tests },
+    };
+    if let Ok(mut bytes) = serde_json::to_vec(&notif) {
+        bytes.push(b'\n');
+        let _ = bcast_tx.send(Bytes::from(bytes));
+    }
+}

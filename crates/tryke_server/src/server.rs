@@ -1,4 +1,7 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{Arc, atomic::AtomicBool},
+};
 
 use bytes::Bytes;
 use log::{LevelFilter, debug};
@@ -9,11 +12,7 @@ use tokio::{
 use tryke_discovery::Discoverer;
 use tryke_runner::WorkerPool;
 
-use crate::{
-    handler::ConnectionHandler,
-    protocol::{DiscoverCompleteParams, Notification},
-    watcher::spawn_watcher,
-};
+use crate::{change::apply_change, handler::ConnectionHandler, watcher::spawn_watcher};
 
 pub struct Server {
     port: u16,
@@ -62,6 +61,16 @@ impl Server {
         // clients don't interleave test execution on the shared pool.
         let run_lock = Arc::new(Mutex::new(()));
 
+        // Set by the watcher whenever a real file change is accepted;
+        // drained by `execute_run` under `run_lock` to force a worker pool
+        // restart before any unit is dispatched. Without this, a `run`
+        // request that arrives within the watcher's debounce window can
+        // be served by a worker whose cached `sys.modules` predates the
+        // on-disk content — the test then runs against stale module
+        // globals (the original symptom: server mode flakily honours a
+        // just-edited assertion).
+        let dirty = Arc::new(AtomicBool::new(false));
+
         let (bcast_tx, _) = broadcast::channel::<Bytes>(256);
         let disc = Arc::new(Mutex::new(Discoverer::new_with_excludes(
             &self.root,
@@ -82,7 +91,7 @@ impl Server {
 
         let disc_for_watcher = Arc::clone(&disc);
         let bcast_for_watcher = bcast_tx.clone();
-        let pool_for_watcher = Arc::clone(&pool);
+        let dirty_for_watcher = Arc::clone(&dirty);
         let mut change_filter = crate::watcher::ChangeFilter::new();
         tokio::spawn(async move {
             while let Some(first) = watcher_rx.recv().await {
@@ -108,33 +117,17 @@ impl Server {
                     continue;
                 }
 
-                let (modules, tests) = {
-                    let mut disc = disc_for_watcher.lock().await;
-                    let modules = disc.affected_modules(&paths);
-                    disc.rediscover_changed(&paths);
-                    let tests = disc.tests_for_changed(&paths);
-                    (modules, tests)
-                };
-                if modules.is_empty() {
-                    debug!("server: no modules affected by change — skipping worker restart");
-                } else {
-                    debug!(
-                        "server: restarting worker pool to pick up changes in {} module(s): {}",
-                        modules.len(),
-                        modules.join(", ")
-                    );
-                    pool_for_watcher.restart_workers().await;
-                }
-                debug!("file change: {} affected tests", tests.len());
-                let notif = Notification {
-                    jsonrpc: "2.0".to_string(),
-                    method: "discover_complete".to_string(),
-                    params: DiscoverCompleteParams { tests },
-                };
-                if let Ok(mut bytes) = serde_json::to_vec(&notif) {
-                    bytes.push(b'\n');
-                    let _ = bcast_for_watcher.send(Bytes::from(bytes));
-                }
+                // Shared with the `did_change` RPC handler (handler.rs)
+                // so the FS path and the in-band path stay semantically
+                // identical. The next `run` will drain `dirty` and
+                // restart the worker pool before dispatch.
+                apply_change(
+                    &disc_for_watcher,
+                    &bcast_for_watcher,
+                    &dirty_for_watcher,
+                    &paths,
+                )
+                .await;
             }
         });
 
@@ -146,6 +139,7 @@ impl Server {
             let disc_conn = Arc::clone(&disc);
             let pool_conn = Arc::clone(&pool);
             let run_lock_conn = Arc::clone(&run_lock);
+            let dirty_conn = Arc::clone(&dirty);
             tokio::spawn(async move {
                 ConnectionHandler::new(
                     stream,
@@ -154,6 +148,7 @@ impl Server {
                     bcast_tx_conn,
                     pool_conn,
                     run_lock_conn,
+                    dirty_conn,
                 )
                 .run()
                 .await;
@@ -230,5 +225,164 @@ mod tests {
             .unwrap();
         let v2: serde_json::Value = serde_json::from_str(line2.trim()).unwrap();
         assert!(v2.get("method").is_some(), "c2 should receive a broadcast");
+    }
+
+    fn match_body(value: &str) -> String {
+        format!(
+            "from tryke import describe, expect, test\n\
+             \n\
+             def match() -> str:\n\
+             {INDENT}return \"{value}\"\n\
+             \n\
+             with describe(\"match\"):\n\
+             {INDENT}@test(\"basic\")\n\
+             {INDENT}def basic():\n\
+             {INDENT}{INDENT}expect(match()).to_equal(\"set\")\n",
+            INDENT = "    ",
+        )
+    }
+
+    /// Read JSON-RPC lines from `r` until one with an `id` field (the
+    /// response — notifications have no `id`).
+    async fn read_response(r: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -> serde_json::Value {
+        loop {
+            let mut line = String::new();
+            time::timeout(Duration::from_secs(30), r.read_line(&mut line))
+                .await
+                .unwrap()
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+            if v.get("id").is_some() {
+                return v;
+            }
+        }
+    }
+
+    /// Send `did_change` then `run` on the SAME TCP connection — the
+    /// invariant that makes the in-band approach race-free.
+    async fn did_change_then_run(
+        port: u16,
+        file: &std::path::Path,
+        rid: &str,
+    ) -> serde_json::Value {
+        let s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let (read, mut write) = s.into_split();
+        let mut r = BufReader::new(read);
+
+        let dc = format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"did_change\",\"params\":{{\"paths\":[\"{}\"]}}}}\n",
+            file.display(),
+        );
+        write.write_all(dc.as_bytes()).await.unwrap();
+        let _dc_resp = read_response(&mut r).await;
+
+        let run = format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"run\",\"params\":{{\"run_id\":\"{rid}\"}}}}\n"
+        );
+        write.write_all(run.as_bytes()).await.unwrap();
+        read_response(&mut r).await
+    }
+
+    /// Send `run` only (no `did_change`) — simulates a non-cooperating
+    /// client. Used to verify the FS-watcher fallback path.
+    async fn run_only(port: u16, rid: &str) -> serde_json::Value {
+        let s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let (read, mut write) = s.into_split();
+        let mut r = BufReader::new(read);
+        let run = format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"run\",\"params\":{{\"run_id\":\"{rid}\"}}}}\n"
+        );
+        write.write_all(run.as_bytes()).await.unwrap();
+        read_response(&mut r).await
+    }
+
+    /// Regression: a `run` issued *immediately* after a save (no sleep
+    /// to let the FS watcher catch up) must see fresh `sys.modules`,
+    /// not the previous cycle's cache. Drives the same phase-1/phase-2
+    /// shape that catches stale-cache leaks across 16 workers — but
+    /// this time the client sends `did_change` first so the server can
+    /// flip `dirty` synchronously before the `run` line is read.
+    ///
+    /// Without the `did_change` step (or without the conditional drain
+    /// in `execute_run`), phase 2 sees passing runs because workers
+    /// dispatched against their phase-1 cached "set" body even though
+    /// the file is now "st" on disk.
+    #[tokio::test]
+    async fn run_after_did_change_uses_fresh_module() {
+        let (port, dir) = start_server().await;
+        let test_file = dir.path().join("test_match.py");
+
+        fs::write(&test_file, match_body("set")).unwrap();
+        // One settling pause so the *initial* discovery picks up the
+        // file. After this, every iteration uses `did_change` and does
+        // not wait.
+        time::sleep(Duration::from_millis(300)).await;
+
+        // Phase 1 — every worker imports the "set" body.
+        for i in 0..16 {
+            fs::write(&test_file, match_body("set")).unwrap();
+            let resp = did_change_then_run(port, &test_file, &format!("set{i}")).await;
+            let summary = &resp["result"]["summary"];
+            let passed = summary["passed"].as_u64().unwrap_or(0);
+            assert_eq!(
+                passed, 1,
+                "phase 1 iter {i}: 'set' baseline must pass — got summary={summary}",
+            );
+        }
+
+        // Phase 2 — flip to "st"; assertion stays "set", so every fresh
+        // import must FAIL. A `passed=1` here means a worker served its
+        // phase-1 cached module: exactly the staleness `did_change` →
+        // `dirty` → drain is here to prevent.
+        for i in 0..16 {
+            fs::write(&test_file, match_body("st")).unwrap();
+            let resp = did_change_then_run(port, &test_file, &format!("st{i}")).await;
+            let summary = &resp["result"]["summary"];
+            let passed = summary["passed"].as_u64().unwrap_or(0);
+            let failed = summary["failed"].as_u64().unwrap_or(0);
+            let errors = summary["errors"].as_u64().unwrap_or(0);
+            assert!(
+                passed == 0 && (failed + errors) >= 1,
+                "phase 2 iter {i}: file has match()->\"st\" but the run \
+                 reported passed={passed}; a worker served the stale \
+                 phase-1 cache. summary={summary}",
+            );
+        }
+    }
+
+    /// Companion to the test above: a non-cooperating client (just
+    /// sends `run`, no `did_change`) still eventually gets correct
+    /// results once the FS watcher's 50 ms debounce expires. This
+    /// documents the fallback path and ensures we haven't accidentally
+    /// removed it.
+    #[tokio::test]
+    async fn run_only_falls_back_to_fs_watcher() {
+        let (port, dir) = start_server().await;
+        let test_file = dir.path().join("test_match.py");
+
+        fs::write(&test_file, match_body("set")).unwrap();
+        time::sleep(Duration::from_millis(300)).await;
+        let resp = run_only(port, "warm").await;
+        assert_eq!(
+            resp["result"]["summary"]["passed"].as_u64().unwrap_or(0),
+            1,
+            "warm-up: 'set' body must pass — got {}",
+            resp["result"]["summary"]
+        );
+
+        fs::write(&test_file, match_body("st")).unwrap();
+        // Give the FS watcher its debounce + a comfortable margin to
+        // process the change and mark dirty. Non-cooperating clients
+        // accept this latency.
+        time::sleep(Duration::from_millis(300)).await;
+        let resp = run_only(port, "after_save").await;
+        let summary = &resp["result"]["summary"];
+        let passed = summary["passed"].as_u64().unwrap_or(0);
+        let failed = summary["failed"].as_u64().unwrap_or(0);
+        assert!(
+            passed == 0 && failed >= 1,
+            "after FS-watcher debounce: 'st' body should fail the 'set' assertion — \
+             got summary={summary}",
+        );
     }
 }

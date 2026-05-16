@@ -1,9 +1,9 @@
 use std::io;
-use std::time::Duration;
 
 use owo_colors::OwoColorize;
 use tryke_types::{RunSummary, TestItem};
 
+use crate::duration::format_duration;
 use crate::reporter::WatchIdleInfo;
 
 /// Keyboard shortcuts shown beneath the summary/idle badge in watch
@@ -21,15 +21,6 @@ fn write_watch_keybindings<W: io::Write>(writer: &mut W) {
     for (key, label) in WATCH_KEYBINDINGS {
         let pad = " ".repeat(LABEL_COLUMN_WIDTH.saturating_sub(key.len()));
         let _ = writeln!(writer, "{pad}{}  {}", (*key).bold(), (*label).dimmed());
-    }
-}
-
-fn format_duration(d: Duration) -> String {
-    let ms = d.as_secs_f64() * 1000.0;
-    if ms < 1000.0 {
-        format!("{ms:.2}ms")
-    } else {
-        format!("{:.2}s", d.as_secs_f64())
     }
 }
 
@@ -436,6 +427,87 @@ mod tests {
             changed_selection: None,
         });
         assert!(out.contains("1.50s"));
+    }
+
+    #[test]
+    fn duration_minutes_seconds() {
+        let out = render(&RunSummary {
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            errors: 0,
+            xfailed: 0,
+            todo: 0,
+            duration: Duration::from_millis(65_500),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
+            changed_selection: None,
+        });
+        assert!(out.contains("1:05.50"), "expected M:SS.SS, got: {out}");
+        assert!(!out.contains("65.50s"));
+    }
+
+    #[test]
+    fn duration_exactly_one_minute() {
+        let out = render(&RunSummary {
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            errors: 0,
+            xfailed: 0,
+            todo: 0,
+            duration: Duration::from_secs(60),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
+            changed_selection: None,
+        });
+        assert!(out.contains("1:00.00"));
+    }
+
+    #[test]
+    fn duration_rounds_centiseconds_with_carry() {
+        // 119.999s should round up to 2:00.00, not truncate to 1:59.99.
+        let out = render(&RunSummary {
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            errors: 0,
+            xfailed: 0,
+            todo: 0,
+            duration: Duration::from_millis(119_999),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
+            changed_selection: None,
+        });
+        assert!(out.contains("2:00.00"), "expected carry, got: {out}");
+        assert!(!out.contains("1:59.99"));
+    }
+
+    #[test]
+    fn duration_breakdown_uses_minutes_seconds() {
+        let out = render(&RunSummary {
+            passed: 5,
+            failed: 0,
+            skipped: 0,
+            errors: 0,
+            xfailed: 0,
+            todo: 0,
+            duration: Duration::from_secs(125),
+            discovery_duration: Some(Duration::from_millis(30)),
+            test_duration: Some(Duration::from_secs(95)),
+            file_count: 0,
+            start_time: None,
+            changed_selection: None,
+        });
+        assert!(out.contains("2:05.00"));
+        assert!(out.contains("tests 1:35.00"));
+        assert!(out.contains("discover 30.00ms"));
     }
 
     #[test]

@@ -3,14 +3,13 @@
 A side-by-side guide for moving from pytest to Tryke.
 
 !!! tip "Let an LLM do the migration for you"
-    The fastest way to migrate is to hand the job to your AI coding assistant
-    (Claude Code, Cursor, Codex, Aider, etc.). We maintain a
+    The fastest way to migrate is to hand the job to your AI coding
+    assistant (Claude Code, Cursor, Codex, Aider, etc.). Install the
     [**pytest-to-tryke-migration skill**](skills/pytest-to-tryke-migration.md)
-    — installable as a Claude Code Skill or pasteable as a Codex `/goal` —
-    that walks the assistant through a **phased, gated** migration with
-    explicit discovery- and results-parity checks so nothing is silently
-    dropped or inverted. It pairs with `tryke test --reporter llm` for
-    concise, structured failure diagnostics tuned to LLM context windows.
+    — it converts one test file at a time and verifies its discovery
+    and outcomes match what pytest produced. The skill page also has a
+    Codex `/goal` template that wraps the skill for a whole-repo
+    migration.
     **[Install the migration skill &rarr;](skills/pytest-to-tryke-migration.md)**
 
 ## Cheat sheet
@@ -310,38 +309,17 @@ async def under_runner(runner):
 
 ## Migration skill
 
-The phased prompt that used to live here has moved to a Claude Code
-[**Skill**](https://docs.claude.com/en/docs/agents/skills) — also
-pasteable as a Codex [`/goal`](https://developers.openai.com/codex/use-cases/follow-goals).
-See the [pytest-to-tryke-migration skill page](skills/pytest-to-tryke-migration.md)
-for install instructions, the full SKILL.md, and the copyable
-`/goal` template.
-
-A single source of truth, shaped as a `/goal` contract (outcome →
-verification surface → constraints → boundaries → iteration policy →
-blocked stop), keeps the gates explicit no matter which assistant you
-hand the job to:
-
-- **Gate 0** — pytest baseline captured cleanly
-- **Gate 1** — tryke installed and `tryke test --collect-only` runs
-- **Gate 3** — discovery parity (no silently-dropped tests)
-- **Gate 4** — results parity (no silently-inverted assertions)
-- **Gate 5** — CI green on tryke, pytest uninstalled
-
-### Strong vs weak goals
-
-If you are driving the migration with Codex `/goal`, the docs on
-[follow-goals](https://developers.openai.com/codex/use-cases/follow-goals)
-emphasize a finish line the agent can verify. Compare:
-
-- **Weak.** `/goal migrate this repo to tryke` — no verification
-  surface, no stop condition. The agent decides what "done" means.
-- **Strong.** Reference the skill and name the gates as the
-  verification surface. The full template is on the
-  [skill page](skills/pytest-to-tryke-migration.md#invoke-codex-goal).
+For driving the migration with an AI coding assistant, install the
+[**pytest-to-tryke-migration skill**](skills/pytest-to-tryke-migration.md).
+The skill converts **one test file at a time** and verifies that
+file's discovery and outcomes match what pytest produced; a Codex
+[`/goal`](https://developers.openai.com/codex/use-cases/follow-goals)
+template on the skill page wraps it for a whole-repo migration —
+baseline capture, file-by-file iteration, and pytest removal all live
+in the goal.
 
 !!! note "LLM reporter"
-    Gate 4 in the skill uses `tryke test --reporter llm` specifically
-    because its output is tuned for LLM context windows — concise,
-    structured failure diagnostics. See the
-    [reporters guide](guides/reporters.md#llm).
+    When a converted test's outcome diverges from the pytest baseline,
+    rerun it with `tryke test -k <name> --reporter llm` — the LLM
+    reporter is tuned for context windows and gives concise, structured
+    failure diagnostics. See the [reporters guide](guides/reporters.md#llm).

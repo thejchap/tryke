@@ -56,6 +56,36 @@ fn xml_escape(s: &str) -> String {
 impl<W: io::Write> Reporter for JUnitReporter<W> {
     fn on_run_start(&mut self, _tests: &[TestItem]) {}
 
+    fn on_collect_complete(&mut self, tests: &[TestItem]) {
+        // `--collect-only` skips execution entirely. JUnit treats a
+        // bare `<testcase/>` as a passed test, which would mislead
+        // downstream CI/reporting tools into thinking every discovered
+        // test ran and passed. Mark each one as `<skipped/>` (and
+        // reflect that in the suite-level `skipped` count) so
+        // consumers see them as not-executed instead.
+        let _ = writeln!(self.writer, r#"<?xml version="1.0" encoding="UTF-8"?>"#);
+        let _ = writeln!(
+            self.writer,
+            r#"<testsuite name="tryke" tests="{0}" failures="0" errors="0" skipped="{0}" time="0.000">"#,
+            tests.len()
+        );
+        for test in tests {
+            let name = xml_escape(&test.display_label());
+            let classname = if test.groups.is_empty() {
+                xml_escape(&test.module_path)
+            } else {
+                xml_escape(&format!("{}.{}", test.module_path, test.groups.join(".")))
+            };
+            let _ = writeln!(
+                self.writer,
+                r#"  <testcase name="{name}" classname="{classname}" time="0.000">"#,
+            );
+            let _ = writeln!(self.writer, r#"    <skipped message="collect-only"/>"#);
+            let _ = writeln!(self.writer, "  </testcase>");
+        }
+        let _ = writeln!(self.writer, "</testsuite>");
+    }
+
     fn on_test_complete(&mut self, result: &TestResult) {
         self.results.push(result.clone());
     }
@@ -246,6 +276,41 @@ mod tests {
         let mut r = reporter();
         run_suite(&mut r);
         assert!(output(&r).contains("<skipped/>"));
+    }
+
+    #[test]
+    fn collect_only_emits_valid_testsuite() {
+        let mut r = reporter();
+        let tests = vec![
+            TestItem {
+                name: "test_add".into(),
+                module_path: "tests.math".into(),
+                ..Default::default()
+            },
+            TestItem {
+                name: "test_sub".into(),
+                module_path: "tests.math".into(),
+                groups: vec!["arithmetic".into()],
+                ..Default::default()
+            },
+        ];
+        r.on_collect_complete(&tests);
+        let out = output(&r);
+        assert!(out.starts_with("<?xml"));
+        assert!(out.contains(r#"tests="2""#));
+        assert!(out.contains(r#"failures="0""#));
+        assert!(out.contains(r#"errors="0""#));
+        // Bare `<testcase/>` is JUnit-equivalent to "passed" — mark
+        // collect-only entries as skipped so consumers don't conclude
+        // every discovered test ran successfully.
+        assert!(out.contains(r#"skipped="2""#));
+        assert!(out.contains(r#"name="test_add" classname="tests.math" time="0.000""#));
+        assert!(out.contains(r#"name="test_sub" classname="tests.math.arithmetic" time="0.000""#));
+        assert_eq!(
+            out.matches(r#"<skipped message="collect-only"/>"#).count(),
+            2
+        );
+        assert!(out.contains("</testsuite>"));
     }
 
     #[test]

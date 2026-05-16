@@ -2,7 +2,7 @@ use std::io;
 use std::time::Duration;
 
 use owo_colors::OwoColorize;
-use tryke_types::RunSummary;
+use tryke_types::{RunSummary, TestItem};
 
 use crate::reporter::WatchIdleInfo;
 
@@ -216,6 +216,59 @@ pub fn write_idle_summary<W: io::Write>(writer: &mut W, info: &WatchIdleInfo<'_>
     let _ = writeln!(writer);
     let _ = writeln!(writer, " {badge} {}", info.hint.dimmed());
     write_watch_keybindings(writer);
+}
+
+/// Render the canonical `--collect-only` view: a banner with the
+/// subcommand label, then tests grouped by file with `describe()`
+/// nesting indented, and a `N tests collected.` footer. Reporters
+/// share this implementation so the `--collect-only` output is
+/// identical regardless of `--reporter`, with the sole exception of
+/// machine-readable formats (json, junit) that have their own
+/// representation.
+pub fn write_collect_list<W: io::Write>(
+    writer: &mut W,
+    subcommand_label: &str,
+    tests: &[TestItem],
+) {
+    let _ = writeln!(
+        writer,
+        "{} {}",
+        subcommand_label.bold(),
+        format!("v{}", env!("CARGO_PKG_VERSION")).dimmed()
+    );
+    let _ = writeln!(writer);
+    let mut current_file: Option<&std::path::Path> = None;
+    let mut current_groups: Vec<String> = Vec::new();
+    for test in tests {
+        let file = test.file_path.as_deref();
+        if file != current_file {
+            if current_file.is_some() {
+                let _ = writeln!(writer);
+            }
+            if let Some(path) = file {
+                let _ = writeln!(writer, "{}:", path.display());
+            }
+            current_file = file;
+            current_groups.clear();
+        }
+        if test.groups != current_groups {
+            let common = current_groups
+                .iter()
+                .zip(test.groups.iter())
+                .take_while(|(a, b)| a == b)
+                .count();
+            for (depth, group) in test.groups.iter().enumerate().skip(common) {
+                let indent = "  ".repeat(depth + 1);
+                let _ = writeln!(writer, "{indent}{group}");
+            }
+            current_groups.clone_from(&test.groups);
+        }
+        let group_indent = "  ".repeat(test.groups.len());
+        let display = test.display_label();
+        let _ = writeln!(writer, "  {group_indent}{}", display.dimmed());
+    }
+    let _ = writeln!(writer);
+    let _ = writeln!(writer, "{} tests collected.", tests.len());
 }
 
 #[cfg(test)]

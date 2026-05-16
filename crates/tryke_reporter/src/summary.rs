@@ -31,14 +31,16 @@ fn format_duration(d: Duration) -> String {
     } else if secs < 60.0 {
         format!("{secs:.2}s")
     } else {
-        // Integer math avoids the float-cast precision lint and the
-        // formatted output only needs two-decimal precision anyway.
-        let total_ms = d.as_millis();
-        let total_secs = total_ms / 1000;
-        let minutes = total_secs / 60;
-        let rem_secs = total_secs % 60;
-        let rem_cs = (total_ms % 1000) / 10;
-        format!("{minutes}:{rem_secs:02}.{rem_cs:02}")
+        // Integer math avoids the float-cast precision lint. The `+ 5`
+        // rounds to the nearest centisecond so output matches the
+        // sub-minute branches (which round via `:.2`); collapsing
+        // everything into centiseconds first lets carry through
+        // seconds/minutes happen naturally on decomposition.
+        let centis = (d.as_millis() + 5) / 10;
+        let minutes = centis / 6000;
+        let secs = (centis / 100) % 60;
+        let cs = centis % 100;
+        format!("{minutes}:{secs:02}.{cs:02}")
     }
 }
 
@@ -484,6 +486,27 @@ mod tests {
             changed_selection: None,
         });
         assert!(out.contains("1:00.00"));
+    }
+
+    #[test]
+    fn duration_rounds_centiseconds_with_carry() {
+        // 119.999s should round up to 2:00.00, not truncate to 1:59.99.
+        let out = render(&RunSummary {
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            errors: 0,
+            xfailed: 0,
+            todo: 0,
+            duration: Duration::from_millis(119_999),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
+            changed_selection: None,
+        });
+        assert!(out.contains("2:00.00"), "expected carry, got: {out}");
+        assert!(!out.contains("1:59.99"));
     }
 
     #[test]

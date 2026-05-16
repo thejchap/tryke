@@ -23,6 +23,7 @@ nav = [
     "guides/configuration.md",
     "guides/editor-integration.md",
     "migration.md",
+    "skills/pytest-to-tryke-migration.md",
   ] },
   { "Concepts" = [
     "concepts/discovery.md",

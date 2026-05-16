@@ -4,6 +4,7 @@ use tryke_types::{DiscoveryError, RunSummary, TestItem, TestOutcome, TestResult}
 
 use crate::Reporter;
 use crate::diagnostic::render_assertions_plain;
+use crate::duration::format_duration;
 
 pub struct LlmReporter<W: io::Write = io::Stdout> {
     writer: W,
@@ -31,26 +32,6 @@ impl<W: io::Write> LlmReporter<W> {
 
     pub fn into_writer(self) -> W {
         self.writer
-    }
-}
-
-fn format_duration(d: std::time::Duration) -> String {
-    let secs = d.as_secs_f64();
-    if secs < 1.0 {
-        format!("{:.2}ms", secs * 1000.0)
-    } else if secs < 60.0 {
-        format!("{secs:.2}s")
-    } else {
-        // Integer math avoids the float-cast precision lint. The `+ 5`
-        // rounds to the nearest centisecond so output matches the
-        // sub-minute branches (which round via `:.2`); collapsing
-        // everything into centiseconds first lets carry through
-        // seconds/minutes happen naturally on decomposition.
-        let centis = (d.as_millis() + 5) / 10;
-        let minutes = centis / 6000;
-        let secs = (centis / 100) % 60;
-        let cs = centis % 100;
-        format!("{minutes}:{secs:02}.{cs:02}")
     }
 }
 

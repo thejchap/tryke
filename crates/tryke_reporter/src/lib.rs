@@ -1,6 +1,7 @@
 pub mod clear;
 pub mod diagnostic;
 pub mod dot;
+pub mod duration;
 pub mod json;
 pub mod junit;
 pub mod live;

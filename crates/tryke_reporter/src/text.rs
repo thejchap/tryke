@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use owo_colors::OwoColorize;
 use tryke_types::{RunSummary, TestItem, TestOutcome, TestResult};
@@ -13,6 +12,7 @@ use crate::diagnostic::{
     render_assertion, render_assertions, render_captured_output, render_error_message,
     render_failure_message,
 };
+use crate::duration::format_duration;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub enum Verbosity {
@@ -198,15 +198,6 @@ fn write_captured<W: io::Write>(writer: &mut W, label: &str, content: &str) {
     let mut buf = String::new();
     render_captured_output(label, content, &mut buf);
     let _ = write!(writer, "{buf}");
-}
-
-fn format_duration(d: Duration) -> String {
-    let ms = d.as_secs_f64() * 1000.0;
-    if ms < 1000.0 {
-        format!("{ms:.2}ms")
-    } else {
-        format!("{:.2}s", d.as_secs_f64())
-    }
 }
 
 impl<W: io::Write> Reporter for TextReporter<W> {
@@ -1300,24 +1291,6 @@ mod tests {
             out.contains("Exception") && out.contains("raise Exception"),
             "exception traceback should be shown after the per-assertion list: {out}"
         );
-    }
-
-    #[test]
-    fn format_duration_millis() {
-        let d = Duration::from_millis(48);
-        assert_eq!(format_duration(d), "48.00ms");
-    }
-
-    #[test]
-    fn format_duration_seconds() {
-        let d = Duration::from_millis(1500);
-        assert_eq!(format_duration(d), "1.50s");
-    }
-
-    #[test]
-    fn format_duration_sub_millis() {
-        let d = Duration::from_micros(170);
-        assert_eq!(format_duration(d), "0.17ms");
     }
 
     #[test]

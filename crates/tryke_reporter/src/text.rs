@@ -1025,6 +1025,7 @@ mod tests {
             args: args.into_iter().map(String::from).collect(),
             line: 1,
             label: None,
+            ..Default::default()
         }
     }
 
@@ -1126,6 +1127,7 @@ mod tests {
                 args: vec![],
                 line: 1,
                 label: None,
+                ..Default::default()
             }],
         ));
         let out = String::from_utf8_lossy(&r.into_writer()).into_owned();
@@ -1212,6 +1214,7 @@ mod tests {
                 args: vec!["1".into()],
                 line: 1,
                 label: Some("sum check".into()),
+                ..Default::default()
             }],
         ));
         let out = String::from_utf8_lossy(&r.into_writer()).into_owned();
@@ -1234,6 +1237,7 @@ mod tests {
                     args: vec!["1".into()],
                     line: 5,
                     label: None,
+                    ..Default::default()
                 }],
                 ..Default::default()
             },
@@ -1275,6 +1279,7 @@ mod tests {
                     args: vec!["1".into()],
                     line: 5,
                     label: None,
+                    ..Default::default()
                 }],
                 file_path: Some(PathBuf::from("tests/m.py")),
                 ..Default::default()
@@ -1320,6 +1325,7 @@ mod tests {
                         args: vec!["1".into()],
                         line: 5,
                         label: Some("first check".into()),
+                        ..Default::default()
                     },
                     tryke_types::ExpectedAssertion {
                         subject: "b".into(),
@@ -1328,6 +1334,7 @@ mod tests {
                         args: vec!["2".into()],
                         line: 5,
                         label: Some("second check".into()),
+                        ..Default::default()
                     },
                 ],
                 file_path: Some(PathBuf::from("tests/m.py")),
@@ -1398,6 +1405,7 @@ mod tests {
                         args: vec!["1".into()],
                         line: 3,
                         label: None,
+                        ..Default::default()
                     },
                     tryke_types::ExpectedAssertion {
                         subject: "b".into(),
@@ -1406,6 +1414,7 @@ mod tests {
                         args: vec!["2".into()],
                         line: 4,
                         label: None,
+                        ..Default::default()
                     },
                 ],
                 ..Default::default()
@@ -1454,6 +1463,7 @@ mod tests {
                         args: vec!["1".into()],
                         line: 3,
                         label: None,
+                        ..Default::default()
                     },
                     tryke_types::ExpectedAssertion {
                         subject: "\"hello\"".into(),
@@ -1462,6 +1472,7 @@ mod tests {
                         args: vec!["\"hello\"".into()],
                         line: 4,
                         label: None,
+                        ..Default::default()
                     },
                 ],
                 ..Default::default()

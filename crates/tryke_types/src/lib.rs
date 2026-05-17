@@ -21,7 +21,7 @@ pub fn path_to_module(root: &Path, path: &Path) -> Option<String> {
     Some(parts.join("."))
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExpectedAssertion {
     pub subject: String,
     pub matcher: String,
@@ -29,6 +29,20 @@ pub struct ExpectedAssertion {
     pub args: Vec<String>,
     pub line: u32,
     pub label: Option<String>,
+    #[serde(default)]
+    pub end_line: u32,
+    #[serde(default)]
+    pub start_column: Option<u32>,
+    #[serde(default)]
+    pub end_column: Option<u32>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub expression: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_span: Option<(usize, usize)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_arg_span: Option<(usize, usize)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_arg_value: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

@@ -42,6 +42,8 @@ cargo nextest run --workspace --all-features
 - get your tests to pass. if you didn't run the tests, your code does not work.
 - follow existing code style. check neighboring files for patterns.
 - always run uvx prek run -a at the end of a task.
+- when making changes that affect CLI output, render the ANSI output and
+  share a screenshot with the user for review.
 - When opening a PR, use `.github/pull_request_template.md` and keep each section concise.
 - When opening a PR, do not add any title prefix such as `[codex]`, `[claude]`,
 or a category tag; use the plain title.

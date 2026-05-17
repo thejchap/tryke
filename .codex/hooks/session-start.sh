@@ -1,5 +1,5 @@
 #!/bin/bash
-# SessionStart hook for Claude Code on the web.
+# SessionStart hook for Codex (wired via .codex/hooks.json).
 # Installs cargo-nextest (the project's canonical test runner per CLAUDE.md)
 # if it is not already available.
 set -euo pipefail

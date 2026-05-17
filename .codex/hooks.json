@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "'/Users/justinchapman/src/tryke/.codex/hooks/session-start.sh'"
+            "command": "\"$(git rev-parse --show-toplevel)/.codex/hooks/session-start.sh\""
           }
         ]
       }

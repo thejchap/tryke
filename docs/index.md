@@ -106,7 +106,7 @@ sheet and a
 
 ## License
 
-This repository is licensed under the MIT License.
+This repository is licensed under the [MIT License](https://github.com/thejchap/tryke/blob/main/LICENSE).
 
 ## Installation
 

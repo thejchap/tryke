@@ -89,3 +89,7 @@ uvx tryke # watch mode
 The [migration guide](https://tryke.dev/migration.html) has a side-by-side cheat
 sheet and a
 [copy-paste LLM prompt](https://tryke.dev/migration.html#migration-prompt).
+
+## License
+
+This repository is licensed under the [MIT License](LICENSE).

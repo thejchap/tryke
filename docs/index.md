@@ -62,6 +62,7 @@ def database():
 
 
 with t.describe("users"):
+
     @t.fixture
     def users(database: Annotated[dict[str, dict[str, str]], t.Depends(database)]):
         database["users"] = {}
@@ -69,6 +70,7 @@ with t.describe("users"):
         return database["users"]
 
     with t.describe("get"):
+
         @t.test("returns a stored user")
         async def test_get(users: Annotated[dict[str, str], t.Depends(users)]):
             users["alice"] = "alice@example.com"
@@ -89,13 +91,12 @@ with t.describe("users"):
 
 ```
 
-Run the suite once without installing:
+Run the tests:
 
 ```bash
-uvx tryke test
+uvx tryke test # run once
+uvx tryke # watch mode
 ```
-
-After adding Tryke to your project, `tryke` starts the watch loop.
 
 ## Coming from pytest?
 

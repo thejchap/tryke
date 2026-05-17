@@ -9,6 +9,25 @@
 
 <video src="https://github.com/user-attachments/assets/354e21a4-b49f-4e93-a052-df98c0dfc3ae" controls muted></video>
 
+## Highlights
+
+- [Fast](https://tryke.dev/concepts/discovery.html) Rust-powered test discovery
+- Concurrent tests by default
+- Pretty, per-assertion diagnostics
+- [Soft assertions](https://tryke.dev/concepts/soft-assertions.html) (like [pytest-check](https://github.com/okken/pytest-check))
+- Native `async` support — no plugin
+- [Watch mode](https://tryke.dev/guides/watch-mode.html)
+- [Changed mode](https://tryke.dev/guides/changed-mode.html) (like [pytest-picked](https://github.com/anapaulagomes/pytest-picked))
+- [Client/server](https://tryke.dev/concepts/client-server.html) mode for fast editor integrations
+- [Fixtures](https://tryke.dev/guides/writing-tests.html#fixtures) with setup / teardown and typed `Depends()` injection
+- [Parametrized tests](https://tryke.dev/concepts/cases.html) via `@test.cases`
+- [Grouping](https://tryke.dev/guides/writing-tests.html#grouping-tests-with-describe) with `describe()` blocks
+- `skip`, `skip_if`, `xfail`, and `todo` markers
+- [In-source testing](https://tryke.dev/guides/writing-tests.html#in-source-testing)
+- Support for [doctests](https://docs.python.org/3/library/doctest.html)
+- Filtering and marks
+- [Reporters](https://tryke.dev/guides/reporters.html) — text, dot, json, junit, llm, [nextest](https://nexte.st)-style, and [pytest-sugar](https://github.com/Teemu/pytest-sugar)-style
+
 ## Getting started
 
 For more information, see the [documentation](https://tryke.dev/).
@@ -37,7 +56,7 @@ with t.describe("users"):
         return database["users"]
 
     with t.describe("get"):
-    
+
         @t.test("returns a stored user")
         async def test_get(users: Annotated[dict[str, str], t.Depends(users)]):
             users["alice"] = "alice@example.com"

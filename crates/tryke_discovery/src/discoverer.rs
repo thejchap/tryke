@@ -437,6 +437,23 @@ impl Discoverer {
             .collect()
     }
 
+    /// Drop paths that don't fall under the project root.
+    ///
+    /// Used by callers that take untrusted input (notably the server's
+    /// `did_change` RPC handler, where a local process could otherwise
+    /// pass `/etc/passwd` and pollute the import graph by getting
+    /// `path_to_module` to return an empty string and `rediscover_changed`
+    /// to slurp arbitrary disk content). Canonicalises both sides so
+    /// macOS's `/var → /private/var` symlink and similar cases compare
+    /// correctly.
+    pub fn filter_in_root(&self, paths: &[PathBuf]) -> Vec<PathBuf> {
+        let canonical_root = Self::canonicalize_path(&self.root);
+        Self::canonicalize_paths(paths)
+            .into_iter()
+            .filter(|p| p.starts_with(&canonical_root))
+            .collect()
+    }
+
     pub fn rediscover_changed(&mut self, changed: &[PathBuf]) -> Vec<TestItem> {
         let changed = Self::canonicalize_paths(changed);
         debug!(

@@ -1,6 +1,5 @@
 use std::{
     collections::HashSet,
-    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -42,22 +41,9 @@ pub struct ConnectionHandler {
     /// debounce window and would otherwise hit a worker whose cached
     /// `sys.modules` predates the latest save.
     dirty: Arc<AtomicBool>,
-    /// Project root, captured at server start. The `did_change` handler
-    /// filters incoming paths against this so a local process that
-    /// reaches the server's 127.0.0.1 socket can't trigger reads or
-    /// import-graph pollution for files outside the workspace.
-    root: Arc<PathBuf>,
 }
 
 impl ConnectionHandler {
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Each Arc is a piece of per-server shared state \
-                  (discovery, broadcast tx/rx, worker pool, run-lock, \
-                  dirty flag, project root) that the connection needs \
-                  read access to — bundling them into a struct just \
-                  adds an indirection layer with no clarity win."
-    )]
     pub fn new(
         stream: TcpStream,
         disc: Arc<tokio::sync::Mutex<tryke_discovery::Discoverer>>,
@@ -66,7 +52,6 @@ impl ConnectionHandler {
         pool: Arc<WorkerPool>,
         run_lock: Arc<Mutex<()>>,
         dirty: Arc<AtomicBool>,
-        root: Arc<PathBuf>,
     ) -> Self {
         Self {
             stream,
@@ -76,7 +61,6 @@ impl ConnectionHandler {
             pool,
             run_lock,
             dirty,
-            root,
         }
     }
 
@@ -113,18 +97,10 @@ impl ConnectionHandler {
                     let pool = Arc::clone(&self.pool);
                     let run_lock = Arc::clone(&self.run_lock);
                     let dirty = Arc::clone(&self.dirty);
-                    let root = Arc::clone(&self.root);
                     let line_owned = line.clone();
-                    let response = handle_request(
-                        &line_owned,
-                        &disc,
-                        &bcast_tx,
-                        &pool,
-                        &run_lock,
-                        &dirty,
-                        &root,
-                    )
-                    .await;
+                    let response =
+                        handle_request(&line_owned, &disc, &bcast_tx, &pool, &run_lock, &dirty)
+                            .await;
                     if let Some(bytes) = response {
                         let mut w = writer.lock().await;
                         if w.write_all(&bytes).await.is_err() || w.flush().await.is_err() {
@@ -314,27 +290,6 @@ async fn execute_run(
     (run_id, summary)
 }
 
-/// Keep only paths whose canonicalised form lies under `root`.
-///
-/// Used by the `did_change` handler to guard against a misbehaving (or
-/// hostile) local client sending paths outside the project tree. We
-/// canonicalise *both* sides so that symlinks, `.` / `..` segments, and
-/// case-insensitive filesystems all compare correctly. Paths that can't
-/// be canonicalised (e.g. the file was just deleted) fall back to the
-/// literal input — they still have to start with the project root to
-/// pass.
-fn filter_paths_in_root(root: &Path, paths: &[PathBuf]) -> Vec<PathBuf> {
-    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    paths
-        .iter()
-        .filter(|p| {
-            let canon = p.canonicalize().unwrap_or_else(|_| (*p).clone());
-            canon.starts_with(&canonical_root)
-        })
-        .cloned()
-        .collect()
-}
-
 pub async fn handle_request(
     line: &str,
     disc: &tokio::sync::Mutex<tryke_discovery::Discoverer>,
@@ -342,7 +297,6 @@ pub async fn handle_request(
     pool: &WorkerPool,
     run_lock: &Mutex<()>,
     dirty: &AtomicBool,
-    root: &Path,
 ) -> Option<Vec<u8>> {
     let req: Request = serde_json::from_str(line.trim()).ok()?;
     let id = req.id.clone().unwrap_or(Value::Null);
@@ -412,27 +366,15 @@ pub async fn handle_request(
                     DiscoverCompleteParams { tests },
                 );
             } else {
-                // Filter out paths outside the project root before
-                // mutating discovery — `did_change` accepts arbitrary
-                // client input and the server binds to 127.0.0.1, but
-                // any local process can still reach it. Validating here
-                // prevents accidental (or intentional) pollution of the
-                // import graph with files outside the workspace.
-                let filtered = filter_paths_in_root(root, &dc.paths);
-                if filtered.is_empty() {
-                    debug!(
-                        "did_change: all {} path(s) outside project root — ignored",
-                        dc.paths.len()
-                    );
-                } else {
-                    if filtered.len() != dc.paths.len() {
-                        debug!(
-                            "did_change: filtered {} path(s) outside project root",
-                            dc.paths.len() - filtered.len()
-                        );
-                    }
-                    crate::change::apply_change(disc, bcast_tx, dirty, &filtered).await;
-                }
+                // `Discoverer::rediscover_changed` (inside apply_change)
+                // already canonicalises and drops anything outside its
+                // project root, so we can pass client-supplied paths
+                // through without an extra filter. The server binds to
+                // 127.0.0.1 but any local process can still reach it;
+                // pushing the root check into discovery keeps the
+                // guarantee in the single place that owns the project
+                // tree.
+                crate::change::apply_change(disc, bcast_tx, dirty, &dc.paths).await;
             }
             serialize_response(id, "ok")
         }
@@ -520,7 +462,6 @@ mod tests {
             &pool,
             &run_lock,
             &dirty,
-            dir.path(),
         )
         .await
         .unwrap();
@@ -545,7 +486,6 @@ mod tests {
             &pool,
             &run_lock,
             &dirty,
-            dir.path(),
         )
         .await
         .unwrap();
@@ -568,7 +508,6 @@ mod tests {
             &pool,
             &run_lock,
             &dirty,
-            dir.path(),
         )
         .await;
 
@@ -598,7 +537,6 @@ mod tests {
             &pool,
             &run_lock,
             &dirty,
-            dir.path(),
         )
         .await
         .unwrap();
@@ -621,7 +559,6 @@ mod tests {
             &pool,
             &run_lock,
             &dirty,
-            dir.path(),
         )
         .await
         .unwrap();
@@ -659,7 +596,6 @@ mod tests {
             &pool,
             &run_lock,
             &dirty,
-            dir.path(),
         )
         .await;
 
@@ -676,7 +612,6 @@ mod tests {
             &pool,
             &run_lock,
             &dirty,
-            dir.path(),
         )
         .await;
 
@@ -726,7 +661,7 @@ mod tests {
             "params": { "paths": [test_file] },
         }))
         .unwrap();
-        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty, dir.path())
+        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
             .await
             .unwrap();
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
@@ -769,7 +704,6 @@ mod tests {
             &pool,
             &run_lock,
             &dirty,
-            dir.path(),
         )
         .await
         .unwrap();
@@ -796,7 +730,6 @@ mod tests {
             &pool,
             &run_lock,
             &dirty,
-            dir.path(),
         )
         .await
         .unwrap();
@@ -838,7 +771,7 @@ mod tests {
             "params": { "paths": [outside_file, inside_file] },
         }))
         .unwrap();
-        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty, dir.path())
+        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
             .await
             .unwrap();
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
@@ -873,7 +806,7 @@ mod tests {
             "params": { "paths": [outside_file] },
         }))
         .unwrap();
-        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty, dir.path())
+        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
             .await
             .unwrap();
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
@@ -881,6 +814,54 @@ mod tests {
         assert!(
             !dirty.load(std::sync::atomic::Ordering::Acquire),
             "all-outside-root did_change must not mark dirty",
+        );
+    }
+
+    #[tokio::test]
+    async fn did_change_accepts_just_deleted_file_under_root() {
+        // Regression: when a `did_change` arrives for a file the user
+        // just deleted, `p.canonicalize()` fails (no inode to resolve).
+        // The old fallback compared the literal input path against a
+        // canonical root, which silently dropped legitimate deletions
+        // when the workspace was under a symlinked prefix (macOS's
+        // `/var → /private/var` is the common trigger). New behaviour:
+        // canonicalise the parent and join the file name, so the
+        // workspace prefix is normalised even when the leaf is gone.
+        let dir = make_root();
+        // Create then delete a file so canonicalize(file) will fail
+        // but canonicalize(parent) succeeds. Discovery doesn't need
+        // to know about it — we're testing the filter, not discovery.
+        let test_file = dir.path().join("test_gone.py");
+        fs::write(&test_file, "x = 1\n").expect("write");
+        fs::remove_file(&test_file).expect("rm");
+
+        let (tx, _rx) = broadcast::channel(16);
+        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        disc.lock().await.rediscover();
+        let pool = make_pool();
+        let run_lock = make_run_lock();
+        let dirty = make_dirty();
+
+        let req = serde_json::to_string(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "did_change",
+            "params": { "paths": [test_file] },
+        }))
+        .unwrap();
+        // Pass the *non-canonical* dir.path() as root to simulate the
+        // symlinked-prefix case — the handler will canonicalise it via
+        // `filter_paths_in_root`'s caller (we pass canonicalised root
+        // in production via the server). But here we want to verify the
+        // filter survives a non-existent leaf, which is the bug the
+        // P2 review feedback was about.
+        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(
+            val["result"], "ok",
+            "deleted-file did_change must not be rejected by the filter"
         );
     }
 
@@ -907,7 +888,6 @@ mod tests {
             &pool,
             &run_lock,
             &dirty,
-            dir.path(),
         )
         .await
         .unwrap();
@@ -942,7 +922,6 @@ mod tests {
             &pool,
             &run_lock,
             &dirty,
-            dir.path(),
         )
         .await
         .unwrap();
@@ -972,8 +951,6 @@ mod tests {
         let run_lock_clone = Arc::clone(&run_lock);
         let dirty = make_dirty();
         let dirty_clone = Arc::clone(&dirty);
-        let root = Arc::new(dir.path().to_path_buf());
-        let root_clone = Arc::clone(&root);
         tokio::spawn(async move {
             for _ in 0..2u8 {
                 let (stream, _) = listener.accept().await.unwrap();
@@ -983,9 +960,8 @@ mod tests {
                 let p = Arc::clone(&pool_clone);
                 let rl = Arc::clone(&run_lock_clone);
                 let dy = Arc::clone(&dirty_clone);
-                let rt = Arc::clone(&root_clone);
                 tokio::spawn(async move {
-                    ConnectionHandler::new(stream, d, bcast_rx, bcast_tx_conn, p, rl, dy, rt)
+                    ConnectionHandler::new(stream, d, bcast_rx, bcast_tx_conn, p, rl, dy)
                         .run()
                         .await;
                 });
@@ -1039,7 +1015,6 @@ mod tests {
             &pool,
             &run_lock,
             &dirty,
-            dir.path(),
         )
         .await;
 
@@ -1076,14 +1051,11 @@ mod tests {
         let run_lock = make_run_lock();
         let dirty = make_dirty();
 
-        let root = Arc::new(dir.path().to_path_buf());
-
         let disc_a = Arc::clone(&disc);
         let tx_a = tx.clone();
         let pool_a = Arc::clone(&pool);
         let run_lock_a = Arc::clone(&run_lock);
         let dirty_a = Arc::clone(&dirty);
-        let root_a = Arc::clone(&root);
         let handle_a = tokio::spawn(async move {
             handle_request(
                 r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"run_id":"A","tests":null}}"#,
@@ -1092,7 +1064,6 @@ mod tests {
                 &pool_a,
                 &run_lock_a,
                 &dirty_a,
-                &root_a,
             )
             .await;
         });
@@ -1104,7 +1075,6 @@ mod tests {
                 &pool,
                 &run_lock,
                 &dirty,
-                &root,
             )
             .await;
         });

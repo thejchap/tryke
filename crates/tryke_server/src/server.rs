@@ -71,13 +71,6 @@ impl Server {
         // just-edited assertion).
         let dirty = Arc::new(AtomicBool::new(false));
 
-        // Shared with every `ConnectionHandler` so the `did_change`
-        // handler can filter incoming paths and refuse to touch
-        // anything outside the project tree (defence-in-depth: the
-        // server already binds to 127.0.0.1, but any local process can
-        // still reach it).
-        let root = Arc::new(self.root.clone());
-
         let (bcast_tx, _) = broadcast::channel::<Bytes>(256);
         let disc = Arc::new(Mutex::new(Discoverer::new_with_excludes(
             &self.root,
@@ -147,7 +140,6 @@ impl Server {
             let pool_conn = Arc::clone(&pool);
             let run_lock_conn = Arc::clone(&run_lock);
             let dirty_conn = Arc::clone(&dirty);
-            let root_conn = Arc::clone(&root);
             tokio::spawn(async move {
                 ConnectionHandler::new(
                     stream,
@@ -157,7 +149,6 @@ impl Server {
                     pool_conn,
                     run_lock_conn,
                     dirty_conn,
-                    root_conn,
                 )
                 .run()
                 .await;

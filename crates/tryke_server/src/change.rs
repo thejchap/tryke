@@ -48,9 +48,21 @@ pub(crate) async fn apply_change(
 
     let (modules, tests) = {
         let mut guard = disc.lock().await;
-        let modules = guard.affected_modules(paths);
-        guard.rediscover_changed(paths);
-        let tests = guard.tests_for_changed(paths);
+        // Drop anything outside the project root before doing any
+        // discovery work. The FS watcher already emits only in-tree
+        // paths, so this is a no-op for that caller; for `did_change`
+        // (which accepts client-supplied paths over TCP) it stops a
+        // local process from polluting the import graph with arbitrary
+        // files. `Discoverer::filter_in_root` does the canonicalisation
+        // both sides need.
+        let paths = guard.filter_in_root(paths);
+        if paths.is_empty() {
+            debug!("apply_change: all paths outside project root — skipping");
+            return;
+        }
+        let modules = guard.affected_modules(&paths);
+        guard.rediscover_changed(&paths);
+        let tests = guard.tests_for_changed(&paths);
         // Set `dirty` *inside* the disc.lock critical section. Paired
         // with `execute_run`'s drain (which also happens inside its
         // disc.lock guard), this serialises the "discovery is updated

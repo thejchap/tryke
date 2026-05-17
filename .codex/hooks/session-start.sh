@@ -1,7 +1,7 @@
 #!/bin/bash
 # SessionStart hook for Claude Code on the web.
 # Installs cargo-nextest (the project's canonical test runner per CLAUDE.md)
-# and pre-warms the Rust + Python test suites.
+# if it is not already available.
 set -euo pipefail
 
 cd "${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel)}"

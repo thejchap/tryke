@@ -785,6 +785,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn did_change_non_py_paths_do_not_mark_dirty() {
+        // A `did_change` for non-Python files (README.md, pyproject.toml,
+        // config dotfiles) must NOT mark the pool dirty — those changes
+        // can't affect any imported module, so triggering a worker
+        // restart on the next run is pure waste. Pre-fix:
+        // `affected_modules` happily turned `README.md` into a "README"
+        // module name (the wrapper at lib.rs:106-108 unwraps None to
+        // empty), making `modules.is_empty()` false and setting dirty.
+        let dir = make_root();
+        let readme = dir.path().join("README.md");
+        let pyproject = dir.path().join("pyproject.toml"); // already exists from make_root
+        fs::write(&readme, "# project\n").expect("write readme");
+
+        let (tx, _rx) = broadcast::channel(16);
+        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        disc.lock().await.rediscover();
+        let pool = make_pool();
+        let run_lock = make_run_lock();
+        let dirty = make_dirty();
+
+        let req = serde_json::to_string(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "did_change",
+            "params": { "paths": [readme, pyproject] },
+        }))
+        .unwrap();
+        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(val["result"], "ok");
+        assert!(
+            !dirty.load(std::sync::atomic::Ordering::Acquire),
+            "non-.py did_change must not mark dirty (would force a needless worker restart)",
+        );
+    }
+
+    #[tokio::test]
     async fn did_change_all_paths_outside_root_is_noop() {
         // The opposite of the above: when EVERY path is outside root,
         // dirty must NOT be set and we must not mutate discovery.

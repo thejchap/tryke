@@ -48,16 +48,28 @@ pub(crate) async fn apply_change(
 
     let (modules, tests) = {
         let mut guard = disc.lock().await;
-        // Drop anything outside the project root before doing any
-        // discovery work. The FS watcher already emits only in-tree
-        // paths, so this is a no-op for that caller; for `did_change`
-        // (which accepts client-supplied paths over TCP) it stops a
-        // local process from polluting the import graph with arbitrary
-        // files. `Discoverer::filter_in_root` does the canonicalisation
-        // both sides need.
-        let paths = guard.filter_in_root(paths);
+        // Two filters on the way in:
+        //   1. Drop anything outside the project root. The FS watcher
+        //      already emits only in-tree paths, so this is a no-op
+        //      for that caller; for `did_change` (which accepts
+        //      client-supplied paths over TCP) it stops a local
+        //      process from polluting the import graph with files
+        //      outside the workspace.
+        //   2. Drop non-`.py` files. `Discoverer::rediscover_changed`
+        //      silently ignores them, but `affected_modules` doesn't
+        //      know about extensions — it would turn `README.md` into
+        //      a "module" entry, making `modules.is_empty()` false and
+        //      spuriously marking the pool dirty (→ unnecessary worker
+        //      restart on the next run). The FS watcher filters at
+        //      watcher.rs:42, so again this is a no-op for that path
+        //      and a correctness fix for `did_change`.
+        let paths: Vec<PathBuf> = guard
+            .filter_in_root(paths)
+            .into_iter()
+            .filter(|p| p.extension().is_some_and(|ext| ext == "py"))
+            .collect();
         if paths.is_empty() {
-            debug!("apply_change: all paths outside project root — skipping");
+            debug!("apply_change: no in-root Python paths — skipping");
             return;
         }
         let modules = guard.affected_modules(&paths);

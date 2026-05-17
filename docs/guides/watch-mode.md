@@ -5,7 +5,7 @@ Watch mode monitors your project for file changes and reruns only the affected t
 ## Basic usage
 
 ```bash
-tryke test --watch
+tryke
 ```
 
 On startup Tryke pre-warms the worker pool and runs discovery to
@@ -20,6 +20,9 @@ test set on startup. Either way, once a file changes, Tryke:
 4. Reruns only the affected tests
 
 This gives you fast feedback without rerunning the entire suite. Restarting the workers (rather than calling `importlib.reload` in-process) avoids the classic reload pitfalls — stale class objects, captured closures, and decorator-bound state from the old definitions are all dropped because the interpreter itself is gone.
+
+`tryke test --watch` is the explicit form when you want to combine watch mode
+with test flags.
 
 ## Keyboard shortcuts
 

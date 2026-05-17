@@ -281,12 +281,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join("pyproject.toml"),
-            "[tool.tryke]\nexclude = [\"benchmarks/suites\"]\n",
+            "[tool.tryke]\nexclude = [\"generated/suites\"]\n",
         )
         .expect("write pyproject.toml");
 
         let excludes = resolved_excludes(dir.path(), &[], &[]);
-        assert_eq!(excludes, vec!["benchmarks/suites"]);
+        assert_eq!(excludes, vec!["generated/suites"]);
     }
 
     #[test]
@@ -294,11 +294,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join("pyproject.toml"),
-            "[tool.tryke]\nexclude = [\"benchmarks/suites\", \"generated\"]\n",
+            "[tool.tryke]\nexclude = [\"generated/suites\", \"generated\"]\n",
         )
         .expect("write pyproject.toml");
 
-        let excludes = resolved_excludes(dir.path(), &[], &["benchmarks/suites".into()]);
+        let excludes = resolved_excludes(dir.path(), &[], &["generated/suites".into()]);
         assert_eq!(excludes, vec!["generated"]);
     }
 
@@ -307,14 +307,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join("pyproject.toml"),
-            "[tool.tryke]\nexclude = [\"benchmarks/suites\"]\n",
+            "[tool.tryke]\nexclude = [\"generated/suites\"]\n",
         )
         .expect("write pyproject.toml");
 
         let excludes = resolved_excludes(
             dir.path(),
             &["tmp".into(), "cache".into()],
-            &["benchmarks/suites".into()],
+            &["generated/suites".into()],
         );
         assert_eq!(excludes, vec!["tmp", "cache"]);
     }

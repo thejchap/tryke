@@ -25,9 +25,9 @@ pub enum Verbosity {
 impl Verbosity {
     /// Map a `log::LevelFilter` (the resolved CLI/env verbosity) to the
     /// reporter's UI knob. `Off` and `Error` mean the user asked for less
-    /// noise (e.g., `-q`); `Warn` is the default; anything more verbose
-    /// (`Info`/`Debug`/`Trace` from `-v`) flips the reporter into its
-    /// detailed mode.
+    /// noise (e.g., `-q`); `Warn` is the default text UI; anything more
+    /// verbose (`Info`/`Debug`/`Trace` from `-v`) keeps the same expectation
+    /// list but expands secondary diagnostics like tracebacks.
     #[must_use]
     pub fn from_level_filter(filter: log::LevelFilter) -> Self {
         match filter {
@@ -266,10 +266,8 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                         display,
                         format!("[{}]", format_duration(result.duration)).dimmed()
                     );
-                    if matches!(self.verbosity, Verbosity::Verbose) {
-                        let assert_indent = "  ".repeat(test_groups.len() + 2);
-                        write_expected_assertions(&mut self.writer, &assert_indent, result);
-                    }
+                    let assert_indent = "  ".repeat(test_groups.len() + 2);
+                    write_expected_assertions(&mut self.writer, &assert_indent, result);
                 }
             }
             TestOutcome::Failed {
@@ -290,10 +288,10 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                     .file_path
                     .as_ref()
                     .map(|p| p.to_string_lossy().into_owned());
-                if matches!(self.verbosity, Verbosity::Verbose)
+                if !matches!(self.verbosity, Verbosity::Quiet)
                     && !result.test.expected_assertions.is_empty()
                 {
-                    // Interleave verbose assertion lines with inline diagnostics.
+                    // Interleave expectation lines with inline diagnostics.
                     // An expectation renders as ✗ if it's in failed_by_line,
                     // ✓ if the worker reports it as executed, and is omitted
                     // entirely if it was never reached (e.g. an earlier
@@ -347,8 +345,9 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                     // message + traceback after it so the user sees what
                     // actually aborted the test.
                     if assertions.is_empty() && !message.is_empty() {
+                        let verbose = matches!(self.verbosity, Verbosity::Verbose);
                         let mut buf = String::new();
-                        render_failure_message(message, traceback.as_deref(), true, &mut buf);
+                        render_failure_message(message, traceback.as_deref(), verbose, &mut buf);
                         let _ = write!(self.writer, "{buf}");
                     }
                 } else if !assertions.is_empty() {
@@ -987,8 +986,8 @@ mod tests {
     }
 
     #[test]
-    fn verbose_shows_expected_assertions_on_pass() {
-        let mut r = TextReporter::with_writer_and_verbosity(Vec::new(), Verbosity::Verbose);
+    fn normal_shows_expected_assertions_on_pass() {
+        let mut r = reporter();
         r.on_test_complete(&make_passed(
             "test_add",
             vec![make_assertion("add(1, 1)", "to_equal", vec!["2"])],
@@ -999,13 +998,13 @@ mod tests {
     }
 
     #[test]
-    fn normal_hides_expected_assertions() {
-        let mut r = reporter();
+    fn quiet_hides_expected_assertions_on_pass() {
+        let mut r = TextReporter::with_writer_and_verbosity(Vec::new(), Verbosity::Quiet);
         r.on_test_complete(&make_passed(
             "test_add",
             vec![make_assertion("add(1, 1)", "to_equal", vec!["2"])],
         ));
-        let out = output(&r);
+        let out = String::from_utf8_lossy(&r.into_writer()).into_owned();
         assert!(!out.contains("expect("));
     }
 
@@ -1043,8 +1042,8 @@ mod tests {
     }
 
     #[test]
-    fn verbose_shows_negated_assertion() {
-        let mut r = TextReporter::with_writer_and_verbosity(Vec::new(), Verbosity::Verbose);
+    fn normal_shows_negated_assertion() {
+        let mut r = reporter();
         r.on_test_complete(&make_passed(
             "test_neg",
             vec![tryke_types::ExpectedAssertion {
@@ -1129,8 +1128,8 @@ mod tests {
     }
 
     #[test]
-    fn verbose_shows_labeled_assertion() {
-        let mut r = TextReporter::with_writer_and_verbosity(Vec::new(), Verbosity::Verbose);
+    fn normal_shows_labeled_assertion() {
+        let mut r = reporter();
         r.on_test_complete(&make_passed(
             "test_add",
             vec![tryke_types::ExpectedAssertion {
@@ -1149,8 +1148,8 @@ mod tests {
     }
 
     #[test]
-    fn verbose_shows_failed_assertion_with_x() {
-        let mut r = TextReporter::with_writer_and_verbosity(Vec::new(), Verbosity::Verbose);
+    fn normal_shows_failed_assertion_with_x() {
+        let mut r = reporter();
         r.on_test_complete(&TestResult {
             test: TestItem {
                 name: "test_fail".into(),
@@ -1190,8 +1189,8 @@ mod tests {
     }
 
     #[test]
-    fn verbose_shows_mixed_pass_fail() {
-        let mut r = TextReporter::with_writer_and_verbosity(Vec::new(), Verbosity::Verbose);
+    fn normal_shows_mixed_pass_fail() {
+        let mut r = reporter();
         r.on_test_complete(&TestResult {
             test: TestItem {
                 name: "test_mixed".into(),
@@ -1243,11 +1242,11 @@ mod tests {
     }
 
     #[test]
-    fn verbose_hides_unexecuted_expectations_and_shows_traceback() {
+    fn normal_hides_unexecuted_expectations_and_shows_traceback() {
         // Reproduces the bug where a `raise` before any expect() call
         // would render all expected assertions as ✓ (because nothing
         // failed) and suppress the exception traceback entirely.
-        let mut r = TextReporter::with_writer_and_verbosity(Vec::new(), Verbosity::Verbose);
+        let mut r = reporter();
         r.on_test_complete(&TestResult {
             test: TestItem {
                 name: "test_raise".into(),

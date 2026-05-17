@@ -2,16 +2,22 @@
 
 ## Basic usage
 
+Start the default watch loop:
+
+```bash
+tryke
+```
+
 Run all tests in your project:
 
 ```bash
 tryke test
 ```
 
-Or without installing:
+Or start the watch loop without installing:
 
 ```bash
-uvx tryke test
+uvx tryke
 ```
 
 ## Specifying paths

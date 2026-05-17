@@ -1929,7 +1929,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         fs::write(
             dir.path().join("pyproject.toml"),
-            "[tool.tryke]\nexclude = [\"benchmarks/suites\"]\n",
+            "[tool.tryke]\nexclude = [\"generated/suites\"]\n",
         )
         .expect("write pyproject");
         let excludes = configured_excludes(dir.path(), &["tmp".into(), "cache".into()]);
@@ -1938,8 +1938,8 @@ mod tests {
 
     #[test]
     fn collect_python_files_respects_custom_excludes() {
-        let dir = make_tree(&["a.py", "benchmarks/suites/test_bench.py"]);
-        let mut files = collect_python_files(dir.path(), &["benchmarks/suites".into()]);
+        let dir = make_tree(&["a.py", "generated/suites/test_generated.py"]);
+        let mut files = collect_python_files(dir.path(), &["generated/suites".into()]);
         files.sort();
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("a.py"));

@@ -9,13 +9,13 @@ Tryke requires **Python 3.12 or newer**. Wheels are published for Linux (x86_64)
 The easiest way to get started with Tryke is with [uvx](https://docs.astral.sh/uv/guides/tools/):
 
 ```bash
-uvx tryke test
+uvx tryke
 ```
 
 Or with [pipx](https://pipx.pypa.io/):
 
 ```bash
-pipx run tryke test
+pipx run tryke
 ```
 
 ## Installation methods
@@ -51,7 +51,7 @@ pip install tryke
 Invoke it directly:
 
 ```bash
-tryke test
+tryke
 ```
 
 To upgrade:

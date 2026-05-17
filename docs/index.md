@@ -54,9 +54,6 @@ from typing import Annotated
 import tryke as t
 
 
-# Fixtures with `per="scope"` are cached for their scope:
-# - Module-level for globally defined fixtures
-# - Per `describe` block for fixtures defined within a `describe` block
 @t.fixture(per="scope")
 def database():
     db = {}
@@ -65,22 +62,18 @@ def database():
 
 
 with t.describe("users"):
-    # By default, fixtures run per-test
-    # Fixtures can be composed by requesting other fixtures
     @t.fixture
     def users(database: Annotated[dict[str, dict[str, str]], t.Depends(database)]):
         database["users"] = {}
+
         return database["users"]
 
     with t.describe("get"):
-        # Define display labels for tests
-        # Async tests are supported
         @t.test("returns a stored user")
         async def test_get(users: Annotated[dict[str, str], t.Depends(users)]):
             users["alice"] = "alice@example.com"
-            # Pass a label as the second argument to expect() so reports
-            # show "returns stored email" instead of the raw expression
-            t.expect(users["alice"], "returns stored email").to_equal(
+
+            t.expect(users["alice"], name="returns stored email").to_equal(
                 "alice@example.com"
             )
 
@@ -89,51 +82,24 @@ with t.describe("users"):
         @t.test("stores a new user")
         async def test_set(users: Annotated[dict[str, str], t.Depends(users)]):
             users["bob"] = "bob@example.com"
-            t.expect(users["bob"], "stores email under user key").to_equal(
+
+            t.expect(users["bob"], name="stores email under user key").to_equal(
                 "bob@example.com"
             )
 
 ```
 
-Run your tests — `tryke test --watch` for an always-on loop, `tryke test --changed`
-for just what your working tree touched, or plain:
+Run the tests:
 
 ```bash
-uvx tryke test
+uvx tryke
 ```
-
-<!-- REPORTER:text:START -->
-
-```ansi
-[1mtryke test[0m [2mv0.0.28[0m
-
-[1m[33mwarning:[39m[0m scheduler: upgrading --dist test → file for 1 module(s) because of per="scope" fixtures (sample). Move the fixture into a describe() to keep finer-grained distribution.
-sample.py:
-  users
-    get
-      [32m✓[39m returns a stored user [2m[0.00ms][0m
-        [32m✓[39m [2mreturns stored email[0m
-    set
-      [32m✓[39m stores a new user [2m[0.00ms][0m
-        [32m✓[39m [2mstores email under user key[0m
-
- [2mTest Files[0m  [1m[32m1 passed[39m[0m [2m(1)[0m
-      [2mTests[0m  [1m[32m2 passed[39m[0m [2m(2)[0m
-   [2mStart at[0m  10:02:24
-   [2mDuration[0m  36.36ms [2m(discover 0.76ms, tests 35.60ms)[0m
-
- [1m[30;42m PASS [0m[0m
-```
-
-<!-- REPORTER:text:END -->
 
 ## Coming from pytest?
 
 The [migration guide](https://tryke.dev/migration.html) has a side-by-side cheat
-sheet and — faster — a
-[copy-paste LLM prompt](https://tryke.dev/migration.html#migration-prompt) that
-walks an AI coding assistant through a phased, gated pytest &rarr; Tryke
-migration with discovery- and results-parity checks built in.
+sheet and a
+[copy-paste LLM prompt](https://tryke.dev/migration.html#migration-prompt).
 
 ## License
 

@@ -10,7 +10,11 @@ use crate::reporter::WatchIdleInfo;
 /// mode. Stacked vertically with keys right-aligned in the same
 /// column as the `Tests` / `Discovery` labels so the footer reads as
 /// a continuation of the summary block.
-const WATCH_KEYBINDINGS: &[(&str, &str)] = &[("q / esc", "Quit"), ("enter", "Run all tests")];
+const WATCH_KEYBINDINGS: &[(&str, &str)] = &[
+    ("q / esc", "Quit"),
+    ("enter", "Run all tests"),
+    ("c", "Clear results"),
+];
 
 /// Width of the right-aligned label column shared by `Tests`,
 /// `Start at`, `Duration`, and the watch keybinding keys.
@@ -194,6 +198,34 @@ pub fn write_idle_summary<W: io::Write>(writer: &mut W, info: &WatchIdleInfo<'_>
         "Tests".dimmed(),
         "No tests run yet".dimmed(),
         "(0)".dimmed()
+    );
+
+    if let Some(t) = info.start_time {
+        let _ = writeln!(writer, "   {}  {}", "Start at".dimmed(), t);
+    }
+
+    if let Some(d) = info.discovery_duration {
+        let _ = writeln!(writer, "  {}  {}", "Discovery".dimmed(), format_duration(d));
+    }
+
+    let _ = writeln!(writer);
+    let _ = writeln!(writer, " {badge} {}", info.hint.dimmed());
+    write_watch_keybindings(writer);
+}
+
+/// Render the watch frame shown after the user clears prior run
+/// results. It uses the same badge/keybinding footer as the startup
+/// idle frame, but avoids saying "No tests run yet" after a run has
+/// already completed.
+pub fn write_cleared_summary<W: io::Write>(writer: &mut W, info: &WatchIdleInfo<'_>) {
+    let badge = format!("{}", " IDLE ".on_blue().black().bold());
+
+    let _ = writeln!(writer);
+    let _ = writeln!(
+        writer,
+        "      {}  {}",
+        "Tests".dimmed(),
+        "Results cleared".dimmed()
     );
 
     if let Some(t) = info.start_time {
@@ -761,6 +793,25 @@ mod tests {
         // Keybindings render on a separate line below the badge.
         assert!(out.contains("Quit"));
         assert!(out.contains("Run all tests"));
+        assert!(out.contains("Clear results"));
+    }
+
+    #[test]
+    fn cleared_summary_shows_results_cleared_state() {
+        let mut buf = Vec::new();
+        write_cleared_summary(
+            &mut buf,
+            &WatchIdleInfo {
+                hint: "Results cleared. Waiting for file changes...",
+                start_time: None,
+                discovery_duration: None,
+            },
+        );
+        let out = String::from_utf8(buf).expect("utf-8");
+        assert!(out.contains("IDLE"));
+        assert!(out.contains("Results cleared"));
+        assert!(out.contains("Waiting for file changes"));
+        assert!(!out.contains("No tests run yet"));
     }
 
     #[test]

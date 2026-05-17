@@ -367,6 +367,16 @@ impl<W: Write> Reporter for NextReporter<W> {
         self.write_header();
         summary::write_idle_summary(&mut self.writer, info);
     }
+
+    fn on_watch_results_cleared(&mut self, info: &crate::reporter::WatchIdleInfo<'_>) {
+        self.live.finish_and_clear();
+        self.clear_armed = true;
+        self.flush_pending_clear();
+        self.header_pending = false;
+        self.started = false;
+        self.write_header();
+        summary::write_cleared_summary(&mut self.writer, info);
+    }
 }
 
 #[cfg(test)]

@@ -29,12 +29,32 @@ const QUIT_POLL_INTERVAL: Duration = Duration::from_millis(150);
 struct WatchKeys {
     quit: AtomicBool,
     run_all: AtomicBool,
+    clear_results: AtomicBool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchKeyAction {
+    Quit,
+    RunAll,
+    ClearResults,
+    Ignore,
+}
+
+fn watch_key_action(key: Key) -> WatchKeyAction {
+    match key {
+        Key::Char('q' | 'Q') | Key::Escape => WatchKeyAction::Quit,
+        Key::Enter => WatchKeyAction::RunAll,
+        Key::Char('c' | 'C') => WatchKeyAction::ClearResults,
+        _ => WatchKeyAction::Ignore,
+    }
 }
 
 /// Spawn a thread that reads single keypresses from stdin and flips
 /// `keys` accordingly: `q`/`Q`/Escape sets `quit`; Enter sets
 /// `run_all` (consumed once by the watch loop to trigger an explicit
-/// full-suite run). No-op when stdin isn't a TTY (CI, piped input).
+/// full-suite run); `c`/`C` sets `clear_results` (consumed once by
+/// the watch loop to clear the displayed run output). No-op when
+/// stdin isn't a TTY (CI, piped input).
 fn spawn_key_listener(keys: Arc<WatchKeys>) {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
@@ -42,17 +62,19 @@ fn spawn_key_listener(keys: Arc<WatchKeys>) {
     }
     let term = Term::stdout();
     std::thread::spawn(move || {
-        loop {
-            match term.read_key() {
-                Ok(Key::Char('q' | 'Q') | Key::Escape) => {
+        while let Ok(key) = term.read_key() {
+            match watch_key_action(key) {
+                WatchKeyAction::Quit => {
                     keys.quit.store(true, Ordering::SeqCst);
                     break;
                 }
-                Ok(Key::Enter) => {
+                WatchKeyAction::RunAll => {
                     keys.run_all.store(true, Ordering::SeqCst);
                 }
-                Err(_) => break,
-                Ok(_) => continue,
+                WatchKeyAction::ClearResults => {
+                    keys.clear_results.store(true, Ordering::SeqCst);
+                }
+                WatchKeyAction::Ignore => continue,
             }
         }
     });
@@ -82,6 +104,14 @@ fn emit_discovery_warnings(reporter: &mut dyn Reporter, discoverer: &Discoverer)
             message,
         });
     }
+}
+
+fn clear_watch_results(reporter: &mut dyn Reporter) {
+    reporter.on_watch_results_cleared(&WatchIdleInfo {
+        hint: "Results cleared. Waiting for file changes...",
+        start_time: None,
+        discovery_duration: None,
+    });
 }
 
 /// Run a single watch cycle. Test failures are non-fatal here: in watch
@@ -205,6 +235,7 @@ pub async fn run_watch(
         // after, then run the full discovered set against fresh
         // workers.
         if keys.run_all.swap(false, Ordering::SeqCst) {
+            keys.clear_results.store(false, Ordering::SeqCst);
             while rx.try_recv().is_ok() {}
             pool.restart_workers().await;
             reporter.arm_clear();
@@ -216,6 +247,10 @@ pub async fn run_watch(
             let disc_dur = Some(disc_start.elapsed());
             emit_discovery_warnings(reporter, &discoverer);
             run_watch_cycle(reporter, tests, &hooks, &pool, maxfail, dist, disc_dur).await;
+            continue;
+        }
+        if keys.clear_results.swap(false, Ordering::SeqCst) {
+            clear_watch_results(reporter);
             continue;
         }
         let first = match rx.recv_timeout(QUIT_POLL_INTERVAL) {
@@ -408,5 +443,22 @@ mod tests {
         assert_eq!(reporter.run_starts, 1, "exactly one initial run expected");
         assert_eq!(reporter.test_completes, 1);
         assert_eq!(reporter.run_completes, 1);
+    }
+
+    #[test]
+    fn watch_keys_map_to_actions() {
+        assert_eq!(watch_key_action(Key::Char('q')), WatchKeyAction::Quit);
+        assert_eq!(watch_key_action(Key::Char('Q')), WatchKeyAction::Quit);
+        assert_eq!(watch_key_action(Key::Escape), WatchKeyAction::Quit);
+        assert_eq!(watch_key_action(Key::Enter), WatchKeyAction::RunAll);
+        assert_eq!(
+            watch_key_action(Key::Char('c')),
+            WatchKeyAction::ClearResults
+        );
+        assert_eq!(
+            watch_key_action(Key::Char('C')),
+            WatchKeyAction::ClearResults
+        );
+        assert_eq!(watch_key_action(Key::Char('x')), WatchKeyAction::Ignore);
     }
 }

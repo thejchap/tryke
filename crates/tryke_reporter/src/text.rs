@@ -529,6 +529,16 @@ impl<W: io::Write> Reporter for TextReporter<W> {
         crate::summary::write_idle_summary(&mut self.writer, info);
     }
 
+    fn on_watch_results_cleared(&mut self, info: &crate::reporter::WatchIdleInfo<'_>) {
+        self.clear_armed = true;
+        self.flush_pending_clear();
+        self.header_pending = false;
+        self.current_file = None;
+        self.current_groups.clear();
+        self.write_header();
+        crate::summary::write_cleared_summary(&mut self.writer, info);
+    }
+
     fn on_discovery_warning(&mut self, warning: &DiscoveryWarning) {
         self.flush_pending_clear();
         match warning.kind {

@@ -33,6 +33,7 @@ Watch mode listens for keypresses while it waits between runs:
 | ------------- | ----------------------------------------------------------------------- |
 | `q` / `esc`   | Quit                                                                    |
 | `enter`       | Run all discovered tests against fresh workers (ignores affected-only). |
+| `c`           | Clear the current test results and keep watching.                       |
 
 ## How affected tests are determined
 

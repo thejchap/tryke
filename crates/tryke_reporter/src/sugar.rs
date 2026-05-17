@@ -385,6 +385,19 @@ impl<W: Write> Reporter for SugarReporter<W> {
         self.write_header();
         summary::write_idle_summary(&mut self.writer, info);
     }
+
+    fn on_watch_results_cleared(&mut self, info: &crate::reporter::WatchIdleInfo<'_>) {
+        self.live.finish_and_clear();
+        self.clear_armed = true;
+        self.flush_pending_clear();
+        self.header_pending = false;
+        self.started = false;
+        self.current_file = None;
+        self.current_marks.clear();
+        self.failures.clear();
+        self.write_header();
+        summary::write_cleared_summary(&mut self.writer, info);
+    }
 }
 
 fn write_failure<W: Write>(live: &LiveArea, writer: &mut W, fail: &TestResult) {

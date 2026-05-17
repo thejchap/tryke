@@ -216,8 +216,8 @@ pub enum Commands {
         /// Enters an interactive loop: tryke watches all `.py` files
         /// (respecting `.gitignore`), and on each save it walks the import
         /// graph from the modified file forward to find affected tests,
-        /// restarts the worker pool, and reruns just those tests. Press
-        /// `q` to quit.
+        /// restarts the worker pool, and reruns just those tests. Press `q`
+        /// to quit, `enter` to run all tests, or `c` to clear results.
         #[arg(short = 'w', long = "watch")]
         watch: bool,
 

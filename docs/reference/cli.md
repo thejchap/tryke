@@ -319,7 +319,7 @@ tryke test [OPTIONS] [PATHS]...
 
   Watch the project and rerun affected tests on each change.
 
-  Enters an interactive loop: tryke watches all `.py` files (respecting `.gitignore`), and on each save it walks the import graph from the modified file forward to find affected tests, restarts the worker pool, and reruns just those tests. Press `q` to quit.
+  Enters an interactive loop: tryke watches all `.py` files (respecting `.gitignore`), and on each save it walks the import graph from the modified file forward to find affected tests, restarts the worker pool, and reruns just those tests. Press `q` to quit, `enter` to run all tests, or `c` to clear results.
 
 - `-j`, `--workers` `<WORKERS>`
 

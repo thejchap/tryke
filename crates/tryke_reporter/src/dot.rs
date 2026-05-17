@@ -135,6 +135,14 @@ impl<W: io::Write> Reporter for DotReporter<W> {
         self.write_header();
         crate::summary::write_idle_summary(&mut self.writer, info);
     }
+
+    fn on_watch_results_cleared(&mut self, info: &crate::reporter::WatchIdleInfo<'_>) {
+        self.clear_armed = true;
+        self.flush_pending_clear();
+        self.header_pending = false;
+        self.write_header();
+        crate::summary::write_cleared_summary(&mut self.writer, info);
+    }
 }
 
 #[cfg(test)]

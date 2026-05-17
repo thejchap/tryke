@@ -42,6 +42,11 @@ pub trait Reporter {
     /// reporters paint a header + IDLE badge with the supplied hint;
     /// non-TTY reporters can ignore this.
     fn on_watch_idle(&mut self, _info: &WatchIdleInfo<'_>) {}
+    /// Render the watch-mode frame shown after the user clears the
+    /// previous run's results with the keyboard shortcut. TTY-facing
+    /// reporters clear the screen and paint a compact IDLE frame;
+    /// structured reporters can ignore this.
+    fn on_watch_results_cleared(&mut self, _info: &WatchIdleInfo<'_>) {}
     /// Surface a non-fatal scheduler warning emitted between
     /// `on_run_start` and the first `on_test_complete` (e.g. dist
     /// upgrades forced by per-scope fixtures). Routing through the

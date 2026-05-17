@@ -48,28 +48,31 @@ pub(crate) async fn apply_change(
 
     let (modules, tests) = {
         let mut guard = disc.lock().await;
-        // Two filters on the way in:
-        //   1. Drop anything outside the project root. The FS watcher
-        //      already emits only in-tree paths, so this is a no-op
-        //      for that caller; for `did_change` (which accepts
-        //      client-supplied paths over TCP) it stops a local
-        //      process from polluting the import graph with files
-        //      outside the workspace.
-        //   2. Drop non-`.py` files. `Discoverer::rediscover_changed`
-        //      silently ignores them, but `affected_modules` doesn't
-        //      know about extensions — it would turn `README.md` into
-        //      a "module" entry, making `modules.is_empty()` false and
-        //      spuriously marking the pool dirty (→ unnecessary worker
-        //      restart on the next run). The FS watcher filters at
-        //      watcher.rs:42, so again this is a no-op for that path
-        //      and a correctness fix for `did_change`.
+        // Three filters on the way in. All three are no-ops for the
+        // FS watcher caller (it filters upstream); they're a
+        // correctness fix for the `did_change` caller, which takes
+        // client-supplied paths over TCP and must defend itself.
+        //   1. In-root. Stops `/etc/passwd` and similar from reaching
+        //      discovery, where `path_to_module` would otherwise turn
+        //      it into a phantom module entry.
+        //   2. `.py` extension. `rediscover_changed` already silently
+        //      ignores non-Python files, but `affected_modules` would
+        //      turn `README.md` into a bogus module name, spuriously
+        //      marking the pool dirty (→ unnecessary worker restart).
+        //   3. Not excluded by gitignore / .ignore / [tool.tryke]
+        //      exclude. `.venv/`, vendored deps, etc. — same matcher
+        //      the FS watcher applies at watcher.rs:43-47. Without
+        //      this a client could ingest `.venv/whatever.py` into
+        //      discovery (and any subsequent `run` would try to
+        //      import + execute it).
         let paths: Vec<PathBuf> = guard
             .filter_in_root(paths)
             .into_iter()
             .filter(|p| p.extension().is_some_and(|ext| ext == "py"))
+            .filter(|p| !guard.is_excluded(p))
             .collect();
         if paths.is_empty() {
-            debug!("apply_change: no in-root Python paths — skipping");
+            debug!("apply_change: no eligible paths — skipping");
             return;
         }
         let modules = guard.affected_modules(&paths);

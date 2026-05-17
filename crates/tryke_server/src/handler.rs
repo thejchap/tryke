@@ -785,6 +785,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn did_change_excluded_paths_do_not_reach_discovery() {
+        // The FS watcher applies `.gitignore` + `[tool.tryke] exclude`
+        // before calling apply_change. Without parity in the
+        // `did_change` path, a cooperating-but-misconfigured (or
+        // malicious-local) client could ingest a `.venv/whatever.py`
+        // into the import graph — and a subsequent `run` would try
+        // to import + execute it.
+        let dir = make_root();
+        // Discoverer constructed with an explicit exclude (mirroring
+        // `[tool.tryke] exclude = ["vendored/**"]`). The path we send
+        // lives under that excluded prefix.
+        let excluded_dir = dir.path().join("vendored");
+        fs::create_dir(&excluded_dir).expect("mkdir");
+        let excluded_file = excluded_dir.join("test_vendored.py");
+        fs::write(&excluded_file, "@test\ndef test_v(): pass\n").expect("write");
+
+        let (tx, _rx) = broadcast::channel(16);
+        let disc = Arc::new(Mutex::new(Discoverer::new_with_excludes(
+            dir.path(),
+            &["vendored/**".to_string()],
+        )));
+        disc.lock().await.rediscover();
+        let pool = make_pool();
+        let run_lock = make_run_lock();
+        let dirty = make_dirty();
+
+        let req = serde_json::to_string(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "did_change",
+            "params": { "paths": [excluded_file] },
+        }))
+        .unwrap();
+        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(val["result"], "ok");
+        assert!(
+            !dirty.load(std::sync::atomic::Ordering::Acquire),
+            "excluded path must not mark the pool dirty",
+        );
+    }
+
+    #[tokio::test]
     async fn did_change_non_py_paths_do_not_mark_dirty() {
         // A `did_change` for non-Python files (README.md, pyproject.toml,
         // config dotfiles) must NOT mark the pool dirty — those changes

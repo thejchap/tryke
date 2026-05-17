@@ -5,10 +5,10 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use log::debug;
 use notify::RecommendedWatcher;
 use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
+use tryke_discovery::build_change_set_ignore;
 
 // 50ms is enough to coalesce the burst of inotify events the kernel emits
 // for a single write syscall (typically sub-ms apart). We rely on
@@ -17,24 +17,19 @@ use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
 // this window.
 const DEBOUNCE_DELAY: Duration = Duration::from_millis(50);
 
-fn build_gitignore(root: &Path, excludes: &[String]) -> Gitignore {
-    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let mut builder = GitignoreBuilder::new(&canonical);
-    let _ = builder.add(canonical.join(".gitignore"));
-    let _ = builder.add(canonical.join(".ignore"));
-    for exclude in excludes {
-        let _ = builder.add_line(None, exclude);
-    }
-    builder.build().unwrap_or_else(|_| Gitignore::empty())
-}
-
 #[expect(clippy::missing_errors_doc)]
 pub fn spawn_watcher(
     root: &Path,
     excludes: &[String],
     tx: mpsc::Sender<Vec<PathBuf>>,
 ) -> anyhow::Result<Debouncer<RecommendedWatcher>> {
-    let gitignore = build_gitignore(root, excludes);
+    // Shared with `did_change` (via `Discoverer::is_excluded`) so a
+    // change ingested through the in-band RPC path obeys the same
+    // .gitignore / .ignore / [tool.tryke] exclude rules as one picked
+    // up by this watcher. Built once here; rebuilt per-call in the
+    // discovery method (acceptable because that path is cold compared
+    // to this hot one).
+    let gitignore = build_change_set_ignore(root, excludes);
     let mut debouncer = new_debouncer(DEBOUNCE_DELAY, move |res: DebounceEventResult| {
         if let Ok(events) = res {
             let paths: Vec<PathBuf> = events

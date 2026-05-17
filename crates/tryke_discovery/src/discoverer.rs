@@ -454,6 +454,24 @@ impl Discoverer {
             .collect()
     }
 
+    /// `true` if `path` is excluded from discovery by the project's
+    /// `.gitignore`, `.ignore`, or `[tool.tryke] exclude` rules — the
+    /// same layered matcher the FS watcher uses to decide which file
+    /// changes to act on.
+    ///
+    /// Builds the matcher per call. That's intentional: discovery
+    /// callers invoke this at most a handful of times per save
+    /// (`apply_change` calls it once per change set), so the per-call
+    /// build is negligible and keeps construction free of `OnceCell`
+    /// / `Arc` machinery. If a hot path ever needs many calls, cache
+    /// at the caller.
+    #[must_use]
+    pub fn is_excluded(&self, path: &Path) -> bool {
+        crate::build_change_set_ignore(&self.root, &self.excludes)
+            .matched_path_or_any_parents(path, false)
+            .is_ignore()
+    }
+
     pub fn rediscover_changed(&mut self, changed: &[PathBuf]) -> Vec<TestItem> {
         let changed = Self::canonicalize_paths(changed);
         debug!(

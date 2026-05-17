@@ -27,7 +27,7 @@ impl Verbosity {
     /// reporter's UI knob. `Off` and `Error` mean the user asked for less
     /// noise (e.g., `-q`); `Warn` is the default text UI; anything more
     /// verbose (`Info`/`Debug`/`Trace` from `-v`) keeps the same expectation
-    /// list but expands secondary diagnostics like tracebacks.
+    /// list while still allowing reporters to opt into extra diagnostics.
     #[must_use]
     pub fn from_level_filter(filter: log::LevelFilter) -> Self {
         match filter {
@@ -297,8 +297,20 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                     // entirely if it was never reached (e.g. an earlier
                     // statement raised before we got to it).
                     let assert_indent = "  ".repeat(test_groups.len() + 2);
-                    let failed_by_line: HashMap<usize, &_> =
-                        assertions.iter().map(|a| (a.line, a)).collect();
+                    let mut failed_by_line: HashMap<usize, Vec<&tryke_types::Assertion>> =
+                        HashMap::new();
+                    for assertion in assertions {
+                        failed_by_line
+                            .entry(assertion.line)
+                            .or_default()
+                            .push(assertion);
+                    }
+                    let expected_lines: HashSet<usize> = result
+                        .test
+                        .expected_assertions
+                        .iter()
+                        .map(|a| a.line as usize)
+                        .collect();
                     let executed: std::collections::HashSet<usize> =
                         executed_lines.iter().map(|l| *l as usize).collect();
                     for ea in &result.test.expected_assertions {
@@ -310,17 +322,19 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                         );
                         let text = ea.label.as_deref().unwrap_or(&full);
                         let ea_line = ea.line as usize;
-                        if let Some(fa) = failed_by_line.get(&ea_line) {
+                        if let Some(failed_assertions) = failed_by_line.get(&ea_line) {
                             let _ = writeln!(
                                 self.writer,
                                 "{assert_indent}{} {}",
                                 "✗".red(),
                                 text.dimmed()
                             );
-                            let mut buf = String::new();
-                            render_assertion(test_file.as_deref(), fa, &mut buf);
-                            for line in buf.lines() {
-                                let _ = writeln!(self.writer, "{group_indent}  {line}");
+                            for assertion in failed_assertions {
+                                let mut buf = String::new();
+                                render_assertion(test_file.as_deref(), assertion, &mut buf);
+                                for line in buf.lines() {
+                                    let _ = writeln!(self.writer, "{group_indent}  {line}");
+                                }
                             }
                         } else if executed.contains(&ea_line) {
                             let _ = writeln!(
@@ -331,12 +345,25 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                             );
                         }
                     }
+                    let unmatched_failures: Vec<_> = assertions
+                        .iter()
+                        .filter(|assertion| !expected_lines.contains(&assertion.line))
+                        .collect();
+                    for assertion in &unmatched_failures {
+                        let mut buf = String::new();
+                        render_assertion(test_file.as_deref(), assertion, &mut buf);
+                        for line in buf.lines() {
+                            let _ = writeln!(self.writer, "{group_indent}  {line}");
+                        }
+                    }
                     if !assertions.is_empty() {
+                        let total_assertions =
+                            result.test.expected_assertions.len() + unmatched_failures.len();
                         let _ = writeln!(
                             self.writer,
                             "{group_indent}  {}/{} assertions failed",
                             assertions.len(),
-                            result.test.expected_assertions.len()
+                            total_assertions
                         );
                     }
                     // If the test was killed by something other than an
@@ -345,9 +372,8 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                     // message + traceback after it so the user sees what
                     // actually aborted the test.
                     if assertions.is_empty() && !message.is_empty() {
-                        let verbose = matches!(self.verbosity, Verbosity::Verbose);
                         let mut buf = String::new();
-                        render_failure_message(message, traceback.as_deref(), verbose, &mut buf);
+                        render_failure_message(message, traceback.as_deref(), true, &mut buf);
                         let _ = write!(self.writer, "{buf}");
                     }
                 } else if !assertions.is_empty() {
@@ -357,9 +383,8 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                         let _ = writeln!(self.writer, "{group_indent}{line}");
                     }
                 } else if !message.is_empty() {
-                    let verbose = matches!(self.verbosity, Verbosity::Verbose);
                     let mut buf = String::new();
-                    render_failure_message(message, traceback.as_deref(), verbose, &mut buf);
+                    render_failure_message(message, traceback.as_deref(), true, &mut buf);
                     let _ = write!(self.writer, "{buf}");
                 }
                 if !result.stdout.is_empty() {
@@ -1189,6 +1214,50 @@ mod tests {
     }
 
     #[test]
+    fn normal_shows_unmatched_failed_assertion_diagnostic() {
+        let mut r = reporter();
+        r.on_test_complete(&TestResult {
+            test: TestItem {
+                name: "test_helper".into(),
+                module_path: "tests.m".into(),
+                expected_assertions: vec![tryke_types::ExpectedAssertion {
+                    subject: "x".into(),
+                    matcher: "to_equal".into(),
+                    negated: false,
+                    args: vec!["1".into()],
+                    line: 5,
+                    label: None,
+                }],
+                file_path: Some(PathBuf::from("tests/m.py")),
+                ..Default::default()
+            },
+            outcome: TestOutcome::Failed {
+                message: "assertion failed".into(),
+                traceback: None,
+                assertions: vec![Assertion {
+                    expression: "expect(helper()).to_equal(1)".into(),
+                    file: None,
+                    line: 10,
+                    span_offset: 7,
+                    span_length: 8,
+                    expected: "1".into(),
+                    received: "2".into(),
+                    expected_arg_span: Some((26, 1)),
+                }],
+                executed_lines: vec![5, 10],
+            },
+            duration: Duration::from_millis(1),
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+        let out = String::from_utf8_lossy(&r.into_writer()).into_owned();
+        assert!(out.contains("expect(x).to_equal(1)"));
+        assert!(out.contains("expected 1"));
+        assert!(out.contains("received 2"));
+        assert!(out.contains("1/2 assertions failed"));
+    }
+
+    #[test]
     fn normal_shows_mixed_pass_fail() {
         let mut r = reporter();
         r.on_test_complete(&TestResult {
@@ -1273,7 +1342,7 @@ mod tests {
             },
             outcome: TestOutcome::Failed {
                 message: "Exception: ".into(),
-                traceback: Some("Traceback (most recent call last):\n  File \"x.py\", line 2\n    raise Exception\nException".into()),
+                traceback: Some("Traceback (most recent call last):\n  File \"outer.py\", line 10, in caller\n    run_test()\n  File \"x.py\", line 2\n    raise Exception\nException".into()),
                 assertions: vec![],
                 executed_lines: vec![],
             },
@@ -1287,8 +1356,8 @@ mod tests {
             "unexecuted expectations must not render as passing: {out}"
         );
         assert!(
-            out.contains("Exception") && out.contains("raise Exception"),
-            "exception traceback should be shown after the per-assertion list: {out}"
+            out.contains("outer.py") && out.contains("raise Exception"),
+            "full exception traceback should be shown after the per-assertion list: {out}"
         );
     }
 

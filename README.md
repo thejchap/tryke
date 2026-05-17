@@ -56,7 +56,7 @@ with t.describe("users"):
 
 ```
 
-Start the watch loop:
+Start the watch loop (press `q` or Ctrl-C to exit):
 
 ```bash
 uvx tryke

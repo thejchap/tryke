@@ -21,8 +21,9 @@ test set on startup. Either way, once a file changes, Tryke:
 
 This gives you fast feedback without rerunning the entire suite. Restarting the workers (rather than calling `importlib.reload` in-process) avoids the classic reload pitfalls — stale class objects, captured closures, and decorator-bound state from the old definitions are all dropped because the interpreter itself is gone.
 
-`tryke test --watch` is the explicit form when you want to combine watch mode
-with test flags.
+Use `tryke test --watch ...` whenever you need to pass test flags such as
+paths, filters, `-j`, `--all`, or `--now`. The bare `tryke` form is only a
+shortcut for the no-argument watch loop.
 
 ## Keyboard shortcuts
 

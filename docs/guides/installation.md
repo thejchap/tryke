@@ -18,6 +18,9 @@ Or with [pipx](https://pipx.pypa.io/):
 pipx run tryke
 ```
 
+With no arguments, `tryke` starts watch mode. Press `q` or Ctrl-C to exit.
+For a one-shot run, use `uvx tryke test` or `pipx run tryke test`.
+
 ## Installation methods
 
 ### Adding Tryke to your project (uv)
@@ -33,6 +36,8 @@ Then, use uv run to invoke Tryke:
 ```bash
 uv run tryke
 ```
+
+That starts the default watch loop. Use `uv run tryke test` for a one-shot run.
 
 To update Tryke, use --upgrade-package:
 
@@ -53,6 +58,8 @@ Invoke it directly:
 ```bash
 tryke
 ```
+
+That starts the default watch loop. Use `tryke test` for a one-shot run.
 
 To upgrade:
 

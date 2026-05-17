@@ -89,7 +89,7 @@ with t.describe("users"):
 
 ```
 
-Run the tests:
+Start the watch loop (press `q` or Ctrl-C to exit):
 
 ```bash
 uvx tryke

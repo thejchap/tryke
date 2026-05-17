@@ -2,7 +2,7 @@
 
 ## Basic usage
 
-Start the default watch loop:
+Start the default watch loop (press `q` or Ctrl-C to exit):
 
 ```bash
 tryke
@@ -19,6 +19,8 @@ Or start the watch loop without installing:
 ```bash
 uvx tryke
 ```
+
+Use `uvx tryke test` for a one-shot run without installing.
 
 ## Specifying paths
 

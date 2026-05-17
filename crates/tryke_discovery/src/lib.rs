@@ -43,6 +43,28 @@ fn build_excludes(root: &Path, excludes: &[String]) -> Gitignore {
     builder.build().unwrap_or_else(|_| Gitignore::empty())
 }
 
+/// Build the full ignore matcher used to decide whether an incoming
+/// path (from the FS watcher or a `did_change` RPC) should reach
+/// discovery. Layers `.gitignore`, `.ignore`, and the project's
+/// `[tool.tryke] exclude` list — same composition the FS watcher uses,
+/// extracted so the `did_change` path stays consistent.
+///
+/// Returns an empty matcher (matches nothing) on build failure rather
+/// than propagating an error, matching the watcher's existing
+/// behaviour: degraded into "let everything through" is preferable to
+/// blocking discovery entirely.
+#[must_use]
+pub fn build_change_set_ignore(root: &Path, excludes: &[String]) -> Gitignore {
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut builder = GitignoreBuilder::new(&canonical);
+    let _ = builder.add(canonical.join(".gitignore"));
+    let _ = builder.add(canonical.join(".ignore"));
+    for exclude in excludes {
+        let _ = builder.add_line(None, exclude);
+    }
+    builder.build().unwrap_or_else(|_| Gitignore::empty())
+}
+
 pub(crate) fn collect_python_files(root: &Path, excludes: &[String]) -> Vec<PathBuf> {
     let exclude_matcher = build_excludes(root, excludes);
     WalkBuilder::new(root)

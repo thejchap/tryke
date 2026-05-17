@@ -42,6 +42,7 @@ cargo nextest run --workspace --all-features
 - get your tests to pass. if you didn't run the tests, your code does not work.
 - follow existing code style. check neighboring files for patterns.
 - always run uvx prek run -a at the end of a task.
+- When opening a PR, use `.github/pull_request_template.md` and keep each section concise.
 - avoid falling back to patterns that require panic!, unreachable!, or .unwrap().
 Instead, try to encode those constraints in the type system.
 - prefer let chains (if let combined with &&) over nested if let statements

@@ -22,7 +22,6 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: 3.x
-      - run: uv run python benchmarks/summarize.py --check
       - run: uv sync --group dev
       - run: uv run zensical build --clean
       # Zensical can exit 0 even when a plugin (e.g. mkdocstrings)

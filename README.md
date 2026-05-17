@@ -72,8 +72,9 @@ uvx tryke test
 <!-- REPORTER:text:plain:START -->
 
 ```text
-tryke test v0.0.27
+tryke test v0.0.28
 
+warning: scheduler: upgrading --dist test → file for 1 module(s) because of per="scope" fixtures (sample). Move the fixture into a describe() to keep finer-grained distribution.
 sample.py:
   users
     get

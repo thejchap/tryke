@@ -68,12 +68,12 @@ impl Diagnostic for AssertionReport {
 
 /// Render the miette diagnostic for a single assertion (no summary line).
 pub fn render_assertion(test_file: Option<&str>, assertion: &Assertion, buf: &mut String) {
-    let handler = GraphicalReportHandler::new_themed(GraphicalTheme::unicode());
+    let handler = GraphicalReportHandler::new_themed(assertion_theme());
     render_one(&handler, test_file, assertion, buf);
 }
 
 pub fn render_assertions(test_file: Option<&str>, assertions: &[Assertion], buf: &mut String) {
-    render_assertions_themed(test_file, assertions, GraphicalTheme::unicode(), true, buf);
+    render_assertions_themed(test_file, assertions, assertion_theme(), true, buf);
 }
 
 pub fn render_assertions_plain(
@@ -88,6 +88,19 @@ pub fn render_assertions_plain(
         false,
         buf,
     );
+}
+
+fn assertion_theme() -> GraphicalTheme {
+    let mut theme = GraphicalTheme::unicode();
+    // Miette assigns highlight styles after sorting labels by source offset.
+    // The received span is the leftmost label for expect(...).to_equal(...).
+    // Keep received first in the expected/received visual pairing.
+    theme.styles.highlights = vec![
+        owo_colors::Style::new().yellow().bold(),
+        owo_colors::Style::new().magenta().bold(),
+        owo_colors::Style::new().green().bold(),
+    ];
+    theme
 }
 
 fn render_one(
@@ -250,6 +263,13 @@ mod tests {
             received: "3".into(),
             expected_arg_span: None,
         }
+    }
+
+    fn line_has_sgr_code(line: &str, code: &str) -> bool {
+        line.split("\x1b[").skip(1).any(|seq| {
+            seq.split_once('m')
+                .is_some_and(|(codes, _)| codes.split(';').any(|part| part == code))
+        })
     }
 
     #[test]
@@ -470,6 +490,40 @@ ZeroDivisionError: division by zero";
         assert!(
             !buf.contains("expected 2, received 3"),
             "should use separate labels, got:\n{buf}"
+        );
+    }
+
+    #[test]
+    fn colored_assertion_pairs_received_and_expected_values() {
+        let assertions = vec![Assertion {
+            expression: "expect(x).to_equal(2)".into(),
+            file: Some("test.py".into()),
+            line: 10,
+            span_offset: 7,
+            span_length: 1,
+            expected: "2".into(),
+            received: "3".into(),
+            expected_arg_span: Some((19, 1)),
+        }];
+        let mut buf = String::new();
+        render_assertions(None, &assertions, &mut buf);
+
+        let received_line = buf
+            .lines()
+            .find(|line| line.contains("received 3"))
+            .expect("received label should render");
+        assert!(
+            line_has_sgr_code(received_line, "33"),
+            "received label should use the yellow highlight, got:\n{buf}"
+        );
+
+        let expected_line = buf
+            .lines()
+            .find(|line| line.contains("expected 2"))
+            .expect("expected label should render");
+        assert!(
+            line_has_sgr_code(expected_line, "35"),
+            "expected label should use the magenta highlight, got:\n{buf}"
         );
     }
 

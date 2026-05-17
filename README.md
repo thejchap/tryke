@@ -21,9 +21,6 @@ from typing import Annotated
 import tryke as t
 
 
-# Fixtures with `per="scope"` are cached for their scope:
-# - Module-level for globally defined fixtures
-# - Per `describe` block for fixtures defined within a `describe` block
 @t.fixture(per="scope")
 def database():
     db = {}
@@ -32,22 +29,18 @@ def database():
 
 
 with t.describe("users"):
-    # By default, fixtures run per-test
-    # Fixtures can be composed by requesting other fixtures
     @t.fixture
     def users(database: Annotated[dict[str, dict[str, str]], t.Depends(database)]):
         database["users"] = {}
+
         return database["users"]
 
     with t.describe("get"):
-        # Define display labels for tests
-        # Async tests are supported
         @t.test("returns a stored user")
         async def test_get(users: Annotated[dict[str, str], t.Depends(users)]):
             users["alice"] = "alice@example.com"
-            # Pass a label as the second argument to expect() so reports
-            # show "returns stored email" instead of the raw expression
-            t.expect(users["alice"], "returns stored email").to_equal(
+
+            t.expect(users["alice"], name="returns stored email").to_equal(
                 "alice@example.com"
             )
 
@@ -56,50 +49,23 @@ with t.describe("users"):
         @t.test("stores a new user")
         async def test_set(users: Annotated[dict[str, str], t.Depends(users)]):
             users["bob"] = "bob@example.com"
-            t.expect(users["bob"], "stores email under user key").to_equal(
+
+            t.expect(users["bob"], name="stores email under user key").to_equal(
                 "bob@example.com"
             )
 
 ```
 
-Run your tests — `tryke test --watch` for an always-on loop, `tryke test --changed`
-for just what your working tree touched, or plain:
+Run the suite once without installing:
 
 ```bash
 uvx tryke test
 ```
 
-<!-- REPORTER:text:plain:START -->
-
-```text
-tryke test v0.0.27
-
-sample.py:
-  users
-    get
-      ✓ returns a stored user [0.00ms]
-        ✓ returns stored email
-    set
-      ✓ stores a new user [0.00ms]
-        ✓ stores email under user key
-
- Test Files  1 passed (1)
-      Tests  2 passed (2)
-   Start at  10:02:24
-   Duration  36.36ms (discover 0.76ms, tests 35.60ms)
-
-  PASS
-```
-
-<!-- REPORTER:text:plain:END -->
+After adding Tryke to your project, `tryke` starts the watch loop.
 
 ## Coming from pytest?
 
 The [migration guide](https://tryke.dev/migration.html) has a side-by-side cheat
-sheet and — faster — a [copy-paste LLM prompt](https://tryke.dev/migration.html#migration-prompt) that
-walks an AI coding assistant through a phased, gated pytest &rarr; Tryke
-migration with discovery- and results-parity checks built in.
-
-## License
-
-This repository is licensed under the MIT License.
+sheet and a
+[copy-paste LLM prompt](https://tryke.dev/migration.html#migration-prompt).

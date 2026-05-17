@@ -6,7 +6,7 @@ Tryke is configured via `pyproject.toml` under the `[tool.tryke]` table.
 
 ```toml
 [tool.tryke]
-exclude = ["benchmarks/", "scripts/generate.py"]
+exclude = ["scripts/generated.py", "tests/fixtures/generated/"]
 ```
 
 ### `exclude`
@@ -16,7 +16,6 @@ A list of file paths or directory patterns to exclude from test discovery:
 ```toml
 [tool.tryke]
 exclude = [
-    "benchmarks/",
     "scripts/",
     "tests/generated/",
 ]
@@ -61,7 +60,7 @@ Defaults to `python` on Windows and `python3` on Unix from `PATH`.
 Override the `pyproject.toml` exclude list from the command line:
 
 ```bash
-tryke test --exclude benchmarks/ --exclude scripts/
+tryke test --exclude scripts/ --exclude tests/fixtures/generated/
 ```
 
 Note: `--exclude` **replaces** the config file setting, it does not extend it.
@@ -90,7 +89,7 @@ Tryke has a single user-facing verbosity knob with a precedence chain spanning C
 
 ### CLI flags
 
-`-v`, `-vv`, `-vvv` raise the level (info → debug → trace). `-q`, `-qq` lower it (error → silent). The default is `warn`.
+`-v`, `-vv`, `-vvv` raise the logging and diagnostic level (info → debug → trace). `-q`, `-qq` lower it (error → silent). The default is `warn`. The text reporter shows per-expectation lines by default; `-v` is not required for that output.
 
 ### Environment variables
 
@@ -133,12 +132,11 @@ TRYKE_LOG=info RUST_LOG=tryke=warn tryke test
 
 ## Example
 
-A typical configuration for a project with benchmarks and generated code:
+A typical configuration for a project with generated code and large fixtures:
 
 ```toml
 [tool.tryke]
 exclude = [
-    "benchmarks/",
     "scripts/codegen/",
     "tests/fixtures/generated/",
 ]
@@ -148,8 +146,8 @@ exclude = [
 # Normal run — respects pyproject.toml excludes
 tryke test
 
-# One-off: include the benchmarks
-tryke test --include benchmarks/
+# One-off: include normally excluded generated fixtures
+tryke test --include tests/fixtures/generated/
 
 # One-off: different exclude set
 tryke test --exclude tests/slow/

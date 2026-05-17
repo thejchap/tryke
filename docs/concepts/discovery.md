@@ -141,13 +141,13 @@ __lazy_modules__ = ["plugins", "heavy_helpers"]
 
 ### Exclude files that don't contain tests
 
-If a file uses dynamic imports for non-test purposes (code generation, benchmarks,
+If a file uses dynamic imports for non-test purposes (code generation,
 scripts) and contains no tests, tell Tryke to ignore it:
 
 ```toml
 # pyproject.toml
 [tool.tryke]
-exclude = ["scripts/generate.py", "benchmarks/suites"]
+exclude = ["scripts/generate.py", "scripts/generated/"]
 ```
 
 ### Accept the tradeoff when it's intentional

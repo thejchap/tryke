@@ -2,13 +2,19 @@
 
 ## Basic usage
 
+Start the default watch loop (press `q` or Ctrl-C to exit):
+
+```bash
+tryke
+```
+
 Run all tests in your project:
 
 ```bash
 tryke test
 ```
 
-Or without installing:
+Or run once without installing:
 
 ```bash
 uvx tryke test

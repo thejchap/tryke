@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
 
@@ -25,9 +25,9 @@ pub enum Verbosity {
 impl Verbosity {
     /// Map a `log::LevelFilter` (the resolved CLI/env verbosity) to the
     /// reporter's UI knob. `Off` and `Error` mean the user asked for less
-    /// noise (e.g., `-q`); `Warn` is the default; anything more verbose
-    /// (`Info`/`Debug`/`Trace` from `-v`) flips the reporter into its
-    /// detailed mode.
+    /// noise (e.g., `-q`); `Warn` is the default text UI; anything more
+    /// verbose (`Info`/`Debug`/`Trace` from `-v`) keeps the same expectation
+    /// list while still allowing reporters to opt into extra diagnostics.
     #[must_use]
     pub fn from_level_filter(filter: log::LevelFilter) -> Self {
         match filter {
@@ -266,10 +266,8 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                         display,
                         format!("[{}]", format_duration(result.duration)).dimmed()
                     );
-                    if matches!(self.verbosity, Verbosity::Verbose) {
-                        let assert_indent = "  ".repeat(test_groups.len() + 2);
-                        write_expected_assertions(&mut self.writer, &assert_indent, result);
-                    }
+                    let assert_indent = "  ".repeat(test_groups.len() + 2);
+                    write_expected_assertions(&mut self.writer, &assert_indent, result);
                 }
             }
             TestOutcome::Failed {
@@ -290,18 +288,18 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                     .file_path
                     .as_ref()
                     .map(|p| p.to_string_lossy().into_owned());
-                if matches!(self.verbosity, Verbosity::Verbose)
+                let show_full_traceback = !matches!(self.verbosity, Verbosity::Quiet);
+                if !matches!(self.verbosity, Verbosity::Quiet)
                     && !result.test.expected_assertions.is_empty()
                 {
-                    // Interleave verbose assertion lines with inline diagnostics.
+                    // Interleave expectation lines with inline diagnostics.
                     // An expectation renders as ✗ if it's in failed_by_line,
                     // ✓ if the worker reports it as executed, and is omitted
                     // entirely if it was never reached (e.g. an earlier
                     // statement raised before we got to it).
                     let assert_indent = "  ".repeat(test_groups.len() + 2);
-                    let failed_by_line: HashMap<usize, &_> =
-                        assertions.iter().map(|a| (a.line, a)).collect();
-                    let executed: std::collections::HashSet<usize> =
+                    let mut matched_failures = vec![false; assertions.len()];
+                    let executed: HashSet<usize> =
                         executed_lines.iter().map(|l| *l as usize).collect();
                     for ea in &result.test.expected_assertions {
                         let not_part = if ea.negated { "not_." } else { "" };
@@ -312,7 +310,16 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                         );
                         let text = ea.label.as_deref().unwrap_or(&full);
                         let ea_line = ea.line as usize;
-                        if let Some(fa) = failed_by_line.get(&ea_line) {
+                        let matched_index =
+                            assertions
+                                .iter()
+                                .enumerate()
+                                .find_map(|(index, assertion)| {
+                                    (!matched_failures[index] && assertion.line == ea_line)
+                                        .then_some(index)
+                                });
+                        if let Some(index) = matched_index {
+                            matched_failures[index] = true;
                             let _ = writeln!(
                                 self.writer,
                                 "{assert_indent}{} {}",
@@ -320,7 +327,7 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                                 text.dimmed()
                             );
                             let mut buf = String::new();
-                            render_assertion(test_file.as_deref(), fa, &mut buf);
+                            render_assertion(test_file.as_deref(), &assertions[index], &mut buf);
                             for line in buf.lines() {
                                 let _ = writeln!(self.writer, "{group_indent}  {line}");
                             }
@@ -333,12 +340,28 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                             );
                         }
                     }
+                    let unmatched_failures: Vec<_> = assertions
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, assertion)| {
+                            (!matched_failures[index]).then_some(assertion)
+                        })
+                        .collect();
+                    for assertion in &unmatched_failures {
+                        let mut buf = String::new();
+                        render_assertion(test_file.as_deref(), assertion, &mut buf);
+                        for line in buf.lines() {
+                            let _ = writeln!(self.writer, "{group_indent}  {line}");
+                        }
+                    }
                     if !assertions.is_empty() {
+                        let total_assertions =
+                            result.test.expected_assertions.len() + unmatched_failures.len();
                         let _ = writeln!(
                             self.writer,
                             "{group_indent}  {}/{} assertions failed",
                             assertions.len(),
-                            result.test.expected_assertions.len()
+                            total_assertions
                         );
                     }
                     // If the test was killed by something other than an
@@ -348,7 +371,12 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                     // actually aborted the test.
                     if assertions.is_empty() && !message.is_empty() {
                         let mut buf = String::new();
-                        render_failure_message(message, traceback.as_deref(), true, &mut buf);
+                        render_failure_message(
+                            message,
+                            traceback.as_deref(),
+                            show_full_traceback,
+                            &mut buf,
+                        );
                         let _ = write!(self.writer, "{buf}");
                     }
                 } else if !assertions.is_empty() {
@@ -358,9 +386,13 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                         let _ = writeln!(self.writer, "{group_indent}{line}");
                     }
                 } else if !message.is_empty() {
-                    let verbose = matches!(self.verbosity, Verbosity::Verbose);
                     let mut buf = String::new();
-                    render_failure_message(message, traceback.as_deref(), verbose, &mut buf);
+                    render_failure_message(
+                        message,
+                        traceback.as_deref(),
+                        show_full_traceback,
+                        &mut buf,
+                    );
                     let _ = write!(self.writer, "{buf}");
                 }
                 if !result.stdout.is_empty() {
@@ -987,8 +1019,8 @@ mod tests {
     }
 
     #[test]
-    fn verbose_shows_expected_assertions_on_pass() {
-        let mut r = TextReporter::with_writer_and_verbosity(Vec::new(), Verbosity::Verbose);
+    fn normal_shows_expected_assertions_on_pass() {
+        let mut r = reporter();
         r.on_test_complete(&make_passed(
             "test_add",
             vec![make_assertion("add(1, 1)", "to_equal", vec!["2"])],
@@ -999,13 +1031,13 @@ mod tests {
     }
 
     #[test]
-    fn normal_hides_expected_assertions() {
-        let mut r = reporter();
+    fn quiet_hides_expected_assertions_on_pass() {
+        let mut r = TextReporter::with_writer_and_verbosity(Vec::new(), Verbosity::Quiet);
         r.on_test_complete(&make_passed(
             "test_add",
             vec![make_assertion("add(1, 1)", "to_equal", vec!["2"])],
         ));
-        let out = output(&r);
+        let out = String::from_utf8_lossy(&r.into_writer()).into_owned();
         assert!(!out.contains("expect("));
     }
 
@@ -1043,8 +1075,38 @@ mod tests {
     }
 
     #[test]
-    fn verbose_shows_negated_assertion() {
-        let mut r = TextReporter::with_writer_and_verbosity(Vec::new(), Verbosity::Verbose);
+    fn quiet_shortens_tracebacks() {
+        let mut r = TextReporter::with_writer_and_verbosity(Vec::new(), Verbosity::Quiet);
+        r.on_test_complete(&TestResult {
+            test: TestItem {
+                name: "test_raise".into(),
+                module_path: "tests.m".into(),
+                ..Default::default()
+            },
+            outcome: TestOutcome::Failed {
+                message: "Exception: boom".into(),
+                traceback: Some("Traceback (most recent call last):\n  File \"outer.py\", line 10, in caller\n    run_test()\n  File \"inner.py\", line 2, in test_raise\n    raise Exception(\"boom\")\nException: boom".into()),
+                assertions: vec![],
+                executed_lines: vec![],
+            },
+            duration: Duration::from_millis(1),
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+        let out = String::from_utf8_lossy(&r.into_writer()).into_owned();
+        assert!(
+            !out.contains("outer.py"),
+            "quiet output should elide earlier frames: {out}"
+        );
+        assert!(
+            out.contains("inner.py"),
+            "quiet output should retain the failing frame: {out}"
+        );
+    }
+
+    #[test]
+    fn normal_shows_negated_assertion() {
+        let mut r = reporter();
         r.on_test_complete(&make_passed(
             "test_neg",
             vec![tryke_types::ExpectedAssertion {
@@ -1129,8 +1191,8 @@ mod tests {
     }
 
     #[test]
-    fn verbose_shows_labeled_assertion() {
-        let mut r = TextReporter::with_writer_and_verbosity(Vec::new(), Verbosity::Verbose);
+    fn normal_shows_labeled_assertion() {
+        let mut r = reporter();
         r.on_test_complete(&make_passed(
             "test_add",
             vec![tryke_types::ExpectedAssertion {
@@ -1149,8 +1211,8 @@ mod tests {
     }
 
     #[test]
-    fn verbose_shows_failed_assertion_with_x() {
-        let mut r = TextReporter::with_writer_and_verbosity(Vec::new(), Verbosity::Verbose);
+    fn normal_shows_failed_assertion_with_x() {
+        let mut r = reporter();
         r.on_test_complete(&TestResult {
             test: TestItem {
                 name: "test_fail".into(),
@@ -1190,8 +1252,130 @@ mod tests {
     }
 
     #[test]
-    fn verbose_shows_mixed_pass_fail() {
-        let mut r = TextReporter::with_writer_and_verbosity(Vec::new(), Verbosity::Verbose);
+    fn normal_shows_unmatched_failed_assertion_diagnostic() {
+        let mut r = reporter();
+        r.on_test_complete(&TestResult {
+            test: TestItem {
+                name: "test_helper".into(),
+                module_path: "tests.m".into(),
+                expected_assertions: vec![tryke_types::ExpectedAssertion {
+                    subject: "x".into(),
+                    matcher: "to_equal".into(),
+                    negated: false,
+                    args: vec!["1".into()],
+                    line: 5,
+                    label: None,
+                }],
+                file_path: Some(PathBuf::from("tests/m.py")),
+                ..Default::default()
+            },
+            outcome: TestOutcome::Failed {
+                message: "assertion failed".into(),
+                traceback: None,
+                assertions: vec![Assertion {
+                    expression: "expect(helper()).to_equal(1)".into(),
+                    file: None,
+                    line: 10,
+                    span_offset: 7,
+                    span_length: 8,
+                    expected: "1".into(),
+                    received: "2".into(),
+                    expected_arg_span: Some((26, 1)),
+                }],
+                executed_lines: vec![5, 10],
+            },
+            duration: Duration::from_millis(1),
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+        let out = String::from_utf8_lossy(&r.into_writer()).into_owned();
+        assert!(out.contains("expect(x).to_equal(1)"));
+        assert!(out.contains("expected 1"));
+        assert!(out.contains("received 2"));
+        assert!(out.contains("1/2 assertions failed"));
+    }
+
+    #[test]
+    fn normal_pairs_same_line_failures_without_duplication() {
+        let mut r = reporter();
+        r.on_test_complete(&TestResult {
+            test: TestItem {
+                name: "test_same_line".into(),
+                module_path: "tests.m".into(),
+                expected_assertions: vec![
+                    tryke_types::ExpectedAssertion {
+                        subject: "a".into(),
+                        matcher: "to_equal".into(),
+                        negated: false,
+                        args: vec!["1".into()],
+                        line: 5,
+                        label: Some("first check".into()),
+                    },
+                    tryke_types::ExpectedAssertion {
+                        subject: "b".into(),
+                        matcher: "to_equal".into(),
+                        negated: false,
+                        args: vec!["2".into()],
+                        line: 5,
+                        label: Some("second check".into()),
+                    },
+                ],
+                file_path: Some(PathBuf::from("tests/m.py")),
+                ..Default::default()
+            },
+            outcome: TestOutcome::Failed {
+                message: "assertion failed".into(),
+                traceback: None,
+                assertions: vec![
+                    Assertion {
+                        expression: "expect(a).to_equal(1)".into(),
+                        file: None,
+                        line: 5,
+                        span_offset: 7,
+                        span_length: 1,
+                        expected: "1".into(),
+                        received: "10".into(),
+                        expected_arg_span: Some((19, 1)),
+                    },
+                    Assertion {
+                        expression: "expect(b).to_equal(2)".into(),
+                        file: None,
+                        line: 5,
+                        span_offset: 7,
+                        span_length: 1,
+                        expected: "2".into(),
+                        received: "20".into(),
+                        expected_arg_span: Some((19, 1)),
+                    },
+                    Assertion {
+                        expression: "expect(helper()).to_equal(3)".into(),
+                        file: None,
+                        line: 5,
+                        span_offset: 7,
+                        span_length: 8,
+                        expected: "3".into(),
+                        received: "30".into(),
+                        expected_arg_span: Some((26, 1)),
+                    },
+                ],
+                executed_lines: vec![5],
+            },
+            duration: Duration::from_millis(1),
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+        let out = String::from_utf8_lossy(&r.into_writer()).into_owned();
+        assert!(out.contains("first check"));
+        assert!(out.contains("second check"));
+        assert_eq!(out.matches("received 10").count(), 1, "{out}");
+        assert_eq!(out.matches("received 20").count(), 1, "{out}");
+        assert_eq!(out.matches("received 30").count(), 1, "{out}");
+        assert!(out.contains("3/3 assertions failed"));
+    }
+
+    #[test]
+    fn normal_shows_mixed_pass_fail() {
+        let mut r = reporter();
         r.on_test_complete(&TestResult {
             test: TestItem {
                 name: "test_mixed".into(),
@@ -1243,11 +1427,11 @@ mod tests {
     }
 
     #[test]
-    fn verbose_hides_unexecuted_expectations_and_shows_traceback() {
+    fn normal_hides_unexecuted_expectations_and_shows_traceback() {
         // Reproduces the bug where a `raise` before any expect() call
         // would render all expected assertions as ✓ (because nothing
         // failed) and suppress the exception traceback entirely.
-        let mut r = TextReporter::with_writer_and_verbosity(Vec::new(), Verbosity::Verbose);
+        let mut r = reporter();
         r.on_test_complete(&TestResult {
             test: TestItem {
                 name: "test_raise".into(),
@@ -1274,7 +1458,7 @@ mod tests {
             },
             outcome: TestOutcome::Failed {
                 message: "Exception: ".into(),
-                traceback: Some("Traceback (most recent call last):\n  File \"x.py\", line 2\n    raise Exception\nException".into()),
+                traceback: Some("Traceback (most recent call last):\n  File \"outer.py\", line 10, in caller\n    run_test()\n  File \"x.py\", line 2\n    raise Exception\nException".into()),
                 assertions: vec![],
                 executed_lines: vec![],
             },
@@ -1288,8 +1472,8 @@ mod tests {
             "unexecuted expectations must not render as passing: {out}"
         );
         assert!(
-            out.contains("Exception") && out.contains("raise Exception"),
-            "exception traceback should be shown after the per-assertion list: {out}"
+            out.contains("outer.py") && out.contains("raise Exception"),
+            "full exception traceback should be shown after the per-assertion list: {out}"
         );
     }
 

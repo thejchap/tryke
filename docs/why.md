@@ -40,7 +40,7 @@ def create_user():
 
 ### Built-in watch mode
 
-`tryke test --watch` reruns tests on file changes — no plugins or extra tools needed.
+`tryke` starts watch mode and reruns tests on file changes — no plugins or extra tools needed.
 
 ### Client/server mode
 

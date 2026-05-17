@@ -51,6 +51,19 @@ pub(crate) async fn apply_change(
         let modules = guard.affected_modules(paths);
         guard.rediscover_changed(paths);
         let tests = guard.tests_for_changed(paths);
+        // Set `dirty` *inside* the disc.lock critical section. Paired
+        // with `execute_run`'s drain (which also happens inside its
+        // disc.lock guard), this serialises the "discovery is updated
+        // AND workers need restart" transition: a concurrent run can't
+        // read tests refreshed by this apply_change while observing
+        // dirty=false. Without this ordering, a run could acquire
+        // disc.lock between our release and the dirty.store, snapshot
+        // the new tests, and dispatch on workers whose `sys.modules`
+        // still reflect the *previous* discovery — exactly the race
+        // the in-band `did_change` is here to close.
+        if !modules.is_empty() {
+            dirty.store(true, Ordering::Release);
+        }
         (modules, tests)
     };
 
@@ -62,10 +75,6 @@ pub(crate) async fn apply_change(
             modules.len(),
             modules.join(", ")
         );
-        // Release on the store pairs with the AcqRel swap in
-        // execute_run: any per-connection `run` whose handler reads
-        // `dirty` after this point is guaranteed to observe `true`.
-        dirty.store(true, Ordering::Release);
     }
 
     debug!("apply_change: {} affected tests", tests.len());

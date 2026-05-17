@@ -1,5 +1,6 @@
 use std::{
     collections::HashSet,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -41,9 +42,22 @@ pub struct ConnectionHandler {
     /// debounce window and would otherwise hit a worker whose cached
     /// `sys.modules` predates the latest save.
     dirty: Arc<AtomicBool>,
+    /// Project root, captured at server start. The `did_change` handler
+    /// filters incoming paths against this so a local process that
+    /// reaches the server's 127.0.0.1 socket can't trigger reads or
+    /// import-graph pollution for files outside the workspace.
+    root: Arc<PathBuf>,
 }
 
 impl ConnectionHandler {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Each Arc is a piece of per-server shared state \
+                  (discovery, broadcast tx/rx, worker pool, run-lock, \
+                  dirty flag, project root) that the connection needs \
+                  read access to — bundling them into a struct just \
+                  adds an indirection layer with no clarity win."
+    )]
     pub fn new(
         stream: TcpStream,
         disc: Arc<tokio::sync::Mutex<tryke_discovery::Discoverer>>,
@@ -52,6 +66,7 @@ impl ConnectionHandler {
         pool: Arc<WorkerPool>,
         run_lock: Arc<Mutex<()>>,
         dirty: Arc<AtomicBool>,
+        root: Arc<PathBuf>,
     ) -> Self {
         Self {
             stream,
@@ -61,6 +76,7 @@ impl ConnectionHandler {
             pool,
             run_lock,
             dirty,
+            root,
         }
     }
 
@@ -97,10 +113,18 @@ impl ConnectionHandler {
                     let pool = Arc::clone(&self.pool);
                     let run_lock = Arc::clone(&self.run_lock);
                     let dirty = Arc::clone(&self.dirty);
+                    let root = Arc::clone(&self.root);
                     let line_owned = line.clone();
-                    let response =
-                        handle_request(&line_owned, &disc, &bcast_tx, &pool, &run_lock, &dirty)
-                            .await;
+                    let response = handle_request(
+                        &line_owned,
+                        &disc,
+                        &bcast_tx,
+                        &pool,
+                        &run_lock,
+                        &dirty,
+                        &root,
+                    )
+                    .await;
                     if let Some(bytes) = response {
                         let mut w = writer.lock().await;
                         if w.write_all(&bytes).await.is_err() || w.flush().await.is_err() {
@@ -167,29 +191,38 @@ async fn execute_run(
     // notification ordering) is not interleaved across clients.
     let _run_guard = run_lock.lock().await;
 
-    // Drain the dirty flag before dispatching. The flag is set by:
-    //   - the FS watcher task (server.rs) on an accepted file-change batch,
-    //     for clients that don't proactively notify; and
+    // Snapshot tests AND drain the dirty flag in the SAME disc.lock
+    // critical section. This pairs with `apply_change`'s
+    // `dirty.store(true)` (also done inside its disc.lock guard): the
+    // two operations cannot interleave, so a concurrent watcher /
+    // `did_change` task can't update discovery between our dirty check
+    // and our tests snapshot. Without this serialisation, a watcher
+    // mid-flight could (a) acquire disc.lock first, (b) update
+    // discovery, (c) release the lock, while we grab the *new* tests
+    // but observe stale `dirty=false` because the store hadn't
+    // happened yet — dispatching on workers whose `sys.modules` predates
+    // the change.
+    //
+    // The flag is set by:
+    //   - the FS watcher task (server.rs) on an accepted file-change
+    //     batch, for non-cooperating clients; and
     //   - the `did_change` RPC handler (below), for cooperating clients
     //     (neotest-tryke sends `did_change` on the same TCP connection
     //     immediately before `run`).
-    // Cooperating clients are guaranteed to see `dirty=true` here because
-    // per-connection read+dispatch is serial (handler.rs:72-92): the
-    // `did_change` handler's `dirty.store(true, Release)` completes
-    // before the `run` line is even read off the socket.
-    // For non-cooperating clients, `dirty` may be false if their `run`
-    // raced the watcher's debounce — they'll see the same eventually-
-    // consistent behaviour as today's FS-only design.
-    if dirty.swap(false, Ordering::AcqRel) {
+    // Cooperating clients are also guaranteed to see `dirty=true`
+    // because per-connection reads are serial (handler.rs:72-92): the
+    // `did_change` handler's `apply_change` completes before the `run`
+    // line is even read off the socket.
+    let discovery_start = Instant::now();
+    let (dirty_was_set, all_tests, hooks) = {
+        let guard = disc.lock().await;
+        let was = dirty.swap(false, Ordering::AcqRel);
+        (was, guard.tests(), guard.hooks())
+    };
+    if dirty_was_set {
         debug!("execute_run: dirty drained — restarting worker pool");
         pool.restart_workers().await;
     }
-
-    let discovery_start = Instant::now();
-    let guard = disc.lock().await;
-    let all_tests = guard.tests();
-    let hooks = guard.hooks();
-    drop(guard);
     let mut tests = match &rp.tests {
         Some(ids) => all_tests
             .into_iter()
@@ -281,6 +314,27 @@ async fn execute_run(
     (run_id, summary)
 }
 
+/// Keep only paths whose canonicalised form lies under `root`.
+///
+/// Used by the `did_change` handler to guard against a misbehaving (or
+/// hostile) local client sending paths outside the project tree. We
+/// canonicalise *both* sides so that symlinks, `.` / `..` segments, and
+/// case-insensitive filesystems all compare correctly. Paths that can't
+/// be canonicalised (e.g. the file was just deleted) fall back to the
+/// literal input — they still have to start with the project root to
+/// pass.
+fn filter_paths_in_root(root: &Path, paths: &[PathBuf]) -> Vec<PathBuf> {
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    paths
+        .iter()
+        .filter(|p| {
+            let canon = p.canonicalize().unwrap_or_else(|_| (*p).clone());
+            canon.starts_with(&canonical_root)
+        })
+        .cloned()
+        .collect()
+}
+
 pub async fn handle_request(
     line: &str,
     disc: &tokio::sync::Mutex<tryke_discovery::Discoverer>,
@@ -288,6 +342,7 @@ pub async fn handle_request(
     pool: &WorkerPool,
     run_lock: &Mutex<()>,
     dirty: &AtomicBool,
+    root: &Path,
 ) -> Option<Vec<u8>> {
     let req: Request = serde_json::from_str(line.trim()).ok()?;
     let id = req.id.clone().unwrap_or(Value::Null);
@@ -333,12 +388,51 @@ pub async fn handle_request(
             };
             if dc.paths.is_empty() {
                 // Panic-button form: client doesn't know what changed.
-                // Force a full rediscover and mark dirty.
-                let _ = disc.lock().await.rediscover();
-                dirty.store(true, std::sync::atomic::Ordering::Release);
-                debug!("did_change: empty paths — full rediscover + dirty mark");
+                // Full rediscover; broadcast the resulting test list so
+                // other connected clients see the refresh (matches the
+                // non-empty path through `apply_change`, which also
+                // broadcasts `discover_complete`).
+                let tests = {
+                    let mut guard = disc.lock().await;
+                    let tests = guard.rediscover();
+                    // Set dirty inside the lock — pairs with the
+                    // drain inside `execute_run`'s disc.lock guard so
+                    // no run can read fresh tests without also
+                    // observing dirty=true.
+                    dirty.store(true, Ordering::Release);
+                    tests
+                };
+                debug!(
+                    "did_change: empty paths — full rediscover, {} tests, dirty mark",
+                    tests.len()
+                );
+                broadcast_notification(
+                    bcast_tx,
+                    "discover_complete",
+                    DiscoverCompleteParams { tests },
+                );
             } else {
-                crate::change::apply_change(disc, bcast_tx, dirty, &dc.paths).await;
+                // Filter out paths outside the project root before
+                // mutating discovery — `did_change` accepts arbitrary
+                // client input and the server binds to 127.0.0.1, but
+                // any local process can still reach it. Validating here
+                // prevents accidental (or intentional) pollution of the
+                // import graph with files outside the workspace.
+                let filtered = filter_paths_in_root(root, &dc.paths);
+                if filtered.is_empty() {
+                    debug!(
+                        "did_change: all {} path(s) outside project root — ignored",
+                        dc.paths.len()
+                    );
+                } else {
+                    if filtered.len() != dc.paths.len() {
+                        debug!(
+                            "did_change: filtered {} path(s) outside project root",
+                            dc.paths.len() - filtered.len()
+                        );
+                    }
+                    crate::change::apply_change(disc, bcast_tx, dirty, &filtered).await;
+                }
             }
             serialize_response(id, "ok")
         }
@@ -426,6 +520,7 @@ mod tests {
             &pool,
             &run_lock,
             &dirty,
+            dir.path(),
         )
         .await
         .unwrap();
@@ -450,6 +545,7 @@ mod tests {
             &pool,
             &run_lock,
             &dirty,
+            dir.path(),
         )
         .await
         .unwrap();
@@ -472,6 +568,7 @@ mod tests {
             &pool,
             &run_lock,
             &dirty,
+            dir.path(),
         )
         .await;
 
@@ -501,6 +598,7 @@ mod tests {
             &pool,
             &run_lock,
             &dirty,
+            dir.path(),
         )
         .await
         .unwrap();
@@ -523,6 +621,7 @@ mod tests {
             &pool,
             &run_lock,
             &dirty,
+            dir.path(),
         )
         .await
         .unwrap();
@@ -560,6 +659,7 @@ mod tests {
             &pool,
             &run_lock,
             &dirty,
+            dir.path(),
         )
         .await;
 
@@ -576,6 +676,7 @@ mod tests {
             &pool,
             &run_lock,
             &dirty,
+            dir.path(),
         )
         .await;
 
@@ -625,7 +726,7 @@ mod tests {
             "params": { "paths": [test_file] },
         }))
         .unwrap();
-        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
+        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty, dir.path())
             .await
             .unwrap();
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
@@ -668,6 +769,7 @@ mod tests {
             &pool,
             &run_lock,
             &dirty,
+            dir.path(),
         )
         .await
         .unwrap();
@@ -694,11 +796,135 @@ mod tests {
             &pool,
             &run_lock,
             &dirty,
+            dir.path(),
         )
         .await
         .unwrap();
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(val["error"]["code"], INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn did_change_ignores_paths_outside_root() {
+        // Defence-in-depth: the server binds to 127.0.0.1 but any local
+        // process can still reach it. `did_change` MUST refuse to refresh
+        // discovery for files outside the configured project root —
+        // otherwise a hostile client could pollute the import graph or
+        // trigger arbitrary file parses.
+        //
+        // Setup: two tempdirs, one is the project root and contains a
+        // test file, the other is "outside" and also contains a test
+        // file. did_change sends both paths; only the in-root one
+        // should result in a dirty mark.
+        let dir = make_root();
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let inside_file = dir.path().join("test_inside.py");
+        let outside_file = outside.path().join("test_outside.py");
+        fs::write(&inside_file, "@test\ndef test_inside(): pass\n").expect("write inside");
+        fs::write(&outside_file, "@test\ndef test_outside(): pass\n").expect("write outside");
+
+        let (tx, _rx) = broadcast::channel(16);
+        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        disc.lock().await.rediscover();
+        let pool = make_pool();
+        let run_lock = make_run_lock();
+        let dirty = make_dirty();
+
+        // Both paths in the request; only inside_file should survive.
+        let req = serde_json::to_string(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "did_change",
+            "params": { "paths": [outside_file, inside_file] },
+        }))
+        .unwrap();
+        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty, dir.path())
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(val["result"], "ok");
+        // The inside path is a real module, so dirty MUST be set
+        // (proves the filter didn't drop everything).
+        assert!(
+            dirty.load(std::sync::atomic::Ordering::Acquire),
+            "in-root path should still trigger dirty mark",
+        );
+    }
+
+    #[tokio::test]
+    async fn did_change_all_paths_outside_root_is_noop() {
+        // The opposite of the above: when EVERY path is outside root,
+        // dirty must NOT be set and we must not mutate discovery.
+        let dir = make_root();
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let outside_file = outside.path().join("test_outside.py");
+        fs::write(&outside_file, "@test\ndef test_outside(): pass\n").expect("write outside");
+
+        let (tx, _rx) = broadcast::channel(16);
+        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        let pool = make_pool();
+        let run_lock = make_run_lock();
+        let dirty = make_dirty();
+
+        let req = serde_json::to_string(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "did_change",
+            "params": { "paths": [outside_file] },
+        }))
+        .unwrap();
+        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty, dir.path())
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(val["result"], "ok");
+        assert!(
+            !dirty.load(std::sync::atomic::Ordering::Acquire),
+            "all-outside-root did_change must not mark dirty",
+        );
+    }
+
+    #[tokio::test]
+    async fn did_change_empty_paths_broadcasts_discover_complete() {
+        // P2: empty-paths form does a full rediscover; it MUST also
+        // broadcast `discover_complete` so connected clients see the
+        // refresh. Without this, the empty-paths path leaves clients
+        // permanently stale until the FS watcher fires (which may
+        // never happen if changes are still pending).
+        let dir = make_root();
+        fs::write(dir.path().join("test_x.py"), "@test\ndef test_x(): pass\n")
+            .expect("write test file");
+        let (tx, mut rx) = broadcast::channel(16);
+        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        let pool = make_pool();
+        let run_lock = make_run_lock();
+        let dirty = make_dirty();
+
+        let resp = handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"did_change","params":{"paths":[]}}"#,
+            &disc,
+            &tx,
+            &pool,
+            &run_lock,
+            &dirty,
+            dir.path(),
+        )
+        .await
+        .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(val["result"], "ok");
+
+        let mut saw_discover_complete = false;
+        while let Ok(bytes) = rx.try_recv() {
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if v["method"] == "discover_complete" {
+                saw_discover_complete = true;
+            }
+        }
+        assert!(
+            saw_discover_complete,
+            "empty-paths did_change must broadcast discover_complete",
+        );
     }
 
     #[tokio::test]
@@ -716,6 +942,7 @@ mod tests {
             &pool,
             &run_lock,
             &dirty,
+            dir.path(),
         )
         .await
         .unwrap();
@@ -745,6 +972,8 @@ mod tests {
         let run_lock_clone = Arc::clone(&run_lock);
         let dirty = make_dirty();
         let dirty_clone = Arc::clone(&dirty);
+        let root = Arc::new(dir.path().to_path_buf());
+        let root_clone = Arc::clone(&root);
         tokio::spawn(async move {
             for _ in 0..2u8 {
                 let (stream, _) = listener.accept().await.unwrap();
@@ -754,8 +983,9 @@ mod tests {
                 let p = Arc::clone(&pool_clone);
                 let rl = Arc::clone(&run_lock_clone);
                 let dy = Arc::clone(&dirty_clone);
+                let rt = Arc::clone(&root_clone);
                 tokio::spawn(async move {
-                    ConnectionHandler::new(stream, d, bcast_rx, bcast_tx_conn, p, rl, dy)
+                    ConnectionHandler::new(stream, d, bcast_rx, bcast_tx_conn, p, rl, dy, rt)
                         .run()
                         .await;
                 });
@@ -809,6 +1039,7 @@ mod tests {
             &pool,
             &run_lock,
             &dirty,
+            dir.path(),
         )
         .await;
 
@@ -845,11 +1076,14 @@ mod tests {
         let run_lock = make_run_lock();
         let dirty = make_dirty();
 
+        let root = Arc::new(dir.path().to_path_buf());
+
         let disc_a = Arc::clone(&disc);
         let tx_a = tx.clone();
         let pool_a = Arc::clone(&pool);
         let run_lock_a = Arc::clone(&run_lock);
         let dirty_a = Arc::clone(&dirty);
+        let root_a = Arc::clone(&root);
         let handle_a = tokio::spawn(async move {
             handle_request(
                 r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"run_id":"A","tests":null}}"#,
@@ -858,6 +1092,7 @@ mod tests {
                 &pool_a,
                 &run_lock_a,
                 &dirty_a,
+                &root_a,
             )
             .await;
         });
@@ -869,6 +1104,7 @@ mod tests {
                 &pool,
                 &run_lock,
                 &dirty,
+                &root,
             )
             .await;
         });

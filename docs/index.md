@@ -89,11 +89,13 @@ with t.describe("users"):
 
 ```
 
-Start the watch loop (press `q` or Ctrl-C to exit):
+Run the suite once without installing:
 
 ```bash
-uvx tryke
+uvx tryke test
 ```
+
+After adding Tryke to your project, `tryke` starts the watch loop.
 
 ## Coming from pytest?
 

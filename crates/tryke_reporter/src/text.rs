@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
 
@@ -288,6 +288,7 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                     .file_path
                     .as_ref()
                     .map(|p| p.to_string_lossy().into_owned());
+                let show_full_traceback = !matches!(self.verbosity, Verbosity::Quiet);
                 if !matches!(self.verbosity, Verbosity::Quiet)
                     && !result.test.expected_assertions.is_empty()
                 {
@@ -297,21 +298,8 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                     // entirely if it was never reached (e.g. an earlier
                     // statement raised before we got to it).
                     let assert_indent = "  ".repeat(test_groups.len() + 2);
-                    let mut failed_by_line: HashMap<usize, Vec<&tryke_types::Assertion>> =
-                        HashMap::new();
-                    for assertion in assertions {
-                        failed_by_line
-                            .entry(assertion.line)
-                            .or_default()
-                            .push(assertion);
-                    }
-                    let expected_lines: HashSet<usize> = result
-                        .test
-                        .expected_assertions
-                        .iter()
-                        .map(|a| a.line as usize)
-                        .collect();
-                    let executed: std::collections::HashSet<usize> =
+                    let mut matched_failures = vec![false; assertions.len()];
+                    let executed: HashSet<usize> =
                         executed_lines.iter().map(|l| *l as usize).collect();
                     for ea in &result.test.expected_assertions {
                         let not_part = if ea.negated { "not_." } else { "" };
@@ -322,19 +310,26 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                         );
                         let text = ea.label.as_deref().unwrap_or(&full);
                         let ea_line = ea.line as usize;
-                        if let Some(failed_assertions) = failed_by_line.get(&ea_line) {
+                        let matched_index =
+                            assertions
+                                .iter()
+                                .enumerate()
+                                .find_map(|(index, assertion)| {
+                                    (!matched_failures[index] && assertion.line == ea_line)
+                                        .then_some(index)
+                                });
+                        if let Some(index) = matched_index {
+                            matched_failures[index] = true;
                             let _ = writeln!(
                                 self.writer,
                                 "{assert_indent}{} {}",
                                 "✗".red(),
                                 text.dimmed()
                             );
-                            for assertion in failed_assertions {
-                                let mut buf = String::new();
-                                render_assertion(test_file.as_deref(), assertion, &mut buf);
-                                for line in buf.lines() {
-                                    let _ = writeln!(self.writer, "{group_indent}  {line}");
-                                }
+                            let mut buf = String::new();
+                            render_assertion(test_file.as_deref(), &assertions[index], &mut buf);
+                            for line in buf.lines() {
+                                let _ = writeln!(self.writer, "{group_indent}  {line}");
                             }
                         } else if executed.contains(&ea_line) {
                             let _ = writeln!(
@@ -347,7 +342,10 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                     }
                     let unmatched_failures: Vec<_> = assertions
                         .iter()
-                        .filter(|assertion| !expected_lines.contains(&assertion.line))
+                        .enumerate()
+                        .filter_map(|(index, assertion)| {
+                            (!matched_failures[index]).then_some(assertion)
+                        })
                         .collect();
                     for assertion in &unmatched_failures {
                         let mut buf = String::new();
@@ -373,7 +371,12 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                     // actually aborted the test.
                     if assertions.is_empty() && !message.is_empty() {
                         let mut buf = String::new();
-                        render_failure_message(message, traceback.as_deref(), true, &mut buf);
+                        render_failure_message(
+                            message,
+                            traceback.as_deref(),
+                            show_full_traceback,
+                            &mut buf,
+                        );
                         let _ = write!(self.writer, "{buf}");
                     }
                 } else if !assertions.is_empty() {
@@ -384,7 +387,12 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                     }
                 } else if !message.is_empty() {
                     let mut buf = String::new();
-                    render_failure_message(message, traceback.as_deref(), true, &mut buf);
+                    render_failure_message(
+                        message,
+                        traceback.as_deref(),
+                        show_full_traceback,
+                        &mut buf,
+                    );
                     let _ = write!(self.writer, "{buf}");
                 }
                 if !result.stdout.is_empty() {
@@ -1067,6 +1075,36 @@ mod tests {
     }
 
     #[test]
+    fn quiet_shortens_tracebacks() {
+        let mut r = TextReporter::with_writer_and_verbosity(Vec::new(), Verbosity::Quiet);
+        r.on_test_complete(&TestResult {
+            test: TestItem {
+                name: "test_raise".into(),
+                module_path: "tests.m".into(),
+                ..Default::default()
+            },
+            outcome: TestOutcome::Failed {
+                message: "Exception: boom".into(),
+                traceback: Some("Traceback (most recent call last):\n  File \"outer.py\", line 10, in caller\n    run_test()\n  File \"inner.py\", line 2, in test_raise\n    raise Exception(\"boom\")\nException: boom".into()),
+                assertions: vec![],
+                executed_lines: vec![],
+            },
+            duration: Duration::from_millis(1),
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+        let out = String::from_utf8_lossy(&r.into_writer()).into_owned();
+        assert!(
+            !out.contains("outer.py"),
+            "quiet output should elide earlier frames: {out}"
+        );
+        assert!(
+            out.contains("inner.py"),
+            "quiet output should retain the failing frame: {out}"
+        );
+    }
+
+    #[test]
     fn normal_shows_negated_assertion() {
         let mut r = reporter();
         r.on_test_complete(&make_passed(
@@ -1255,6 +1293,84 @@ mod tests {
         assert!(out.contains("expected 1"));
         assert!(out.contains("received 2"));
         assert!(out.contains("1/2 assertions failed"));
+    }
+
+    #[test]
+    fn normal_pairs_same_line_failures_without_duplication() {
+        let mut r = reporter();
+        r.on_test_complete(&TestResult {
+            test: TestItem {
+                name: "test_same_line".into(),
+                module_path: "tests.m".into(),
+                expected_assertions: vec![
+                    tryke_types::ExpectedAssertion {
+                        subject: "a".into(),
+                        matcher: "to_equal".into(),
+                        negated: false,
+                        args: vec!["1".into()],
+                        line: 5,
+                        label: Some("first check".into()),
+                    },
+                    tryke_types::ExpectedAssertion {
+                        subject: "b".into(),
+                        matcher: "to_equal".into(),
+                        negated: false,
+                        args: vec!["2".into()],
+                        line: 5,
+                        label: Some("second check".into()),
+                    },
+                ],
+                file_path: Some(PathBuf::from("tests/m.py")),
+                ..Default::default()
+            },
+            outcome: TestOutcome::Failed {
+                message: "assertion failed".into(),
+                traceback: None,
+                assertions: vec![
+                    Assertion {
+                        expression: "expect(a).to_equal(1)".into(),
+                        file: None,
+                        line: 5,
+                        span_offset: 7,
+                        span_length: 1,
+                        expected: "1".into(),
+                        received: "10".into(),
+                        expected_arg_span: Some((19, 1)),
+                    },
+                    Assertion {
+                        expression: "expect(b).to_equal(2)".into(),
+                        file: None,
+                        line: 5,
+                        span_offset: 7,
+                        span_length: 1,
+                        expected: "2".into(),
+                        received: "20".into(),
+                        expected_arg_span: Some((19, 1)),
+                    },
+                    Assertion {
+                        expression: "expect(helper()).to_equal(3)".into(),
+                        file: None,
+                        line: 5,
+                        span_offset: 7,
+                        span_length: 8,
+                        expected: "3".into(),
+                        received: "30".into(),
+                        expected_arg_span: Some((26, 1)),
+                    },
+                ],
+                executed_lines: vec![5],
+            },
+            duration: Duration::from_millis(1),
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+        let out = String::from_utf8_lossy(&r.into_writer()).into_owned();
+        assert!(out.contains("first check"));
+        assert!(out.contains("second check"));
+        assert_eq!(out.matches("received 10").count(), 1, "{out}");
+        assert_eq!(out.matches("received 20").count(), 1, "{out}");
+        assert_eq!(out.matches("received 30").count(), 1, "{out}");
+        assert!(out.contains("3/3 assertions failed"));
     }
 
     #[test]

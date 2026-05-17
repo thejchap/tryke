@@ -6,20 +6,21 @@ Tryke requires **Python 3.12 or newer**. Wheels are published for Linux (x86_64)
 
 ## Running without installation
 
-The easiest way to get started with Tryke is with [uvx](https://docs.astral.sh/uv/guides/tools/):
+The easiest way to try Tryke without installing it is with [uvx](https://docs.astral.sh/uv/guides/tools/):
 
 ```bash
-uvx tryke
+uvx tryke test
 ```
 
 Or with [pipx](https://pipx.pypa.io/):
 
 ```bash
-pipx run tryke
+pipx run tryke test
 ```
 
-With no arguments, `tryke` starts watch mode. Press `q` or Ctrl-C to exit.
-For a one-shot run, use `uvx tryke test` or `pipx run tryke test`.
+These commands run the suite once from a temporary tool environment. After
+adding Tryke to your project, run `tryke` or `uv run tryke` to start the
+default watch loop.
 
 ## Installation methods
 

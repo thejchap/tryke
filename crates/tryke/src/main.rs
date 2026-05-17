@@ -51,28 +51,26 @@ fn build_reporter(
     }
 }
 
-enum EffectiveCommand<'a> {
-    Provided(&'a Commands),
-    Default(Box<Commands>),
+struct EffectiveCommand {
+    command: Commands,
+    bare_watch: bool,
 }
 
-impl EffectiveCommand<'_> {
+impl EffectiveCommand {
     fn as_command(&self) -> &Commands {
-        match self {
-            Self::Provided(command) => command,
-            Self::Default(command) => command,
-        }
+        &self.command
     }
 
     fn is_bare_watch(&self) -> bool {
-        matches!(self, Self::Default(command) if matches!(command.as_ref(), Commands::Test { watch: true, .. }))
+        self.bare_watch
     }
 }
 
-fn effective_command(cli: &Cli) -> EffectiveCommand<'_> {
-    match cli.command.as_ref() {
-        Some(command) => EffectiveCommand::Provided(command),
-        None => EffectiveCommand::Default(Box::new(Commands::default_watch())),
+fn effective_command(command: Option<Commands>) -> EffectiveCommand {
+    let bare_watch = command.is_none();
+    EffectiveCommand {
+        command: command.unwrap_or_else(Commands::default_watch),
+        bare_watch,
     }
 }
 
@@ -105,7 +103,7 @@ fn main() -> Result<()> {
     let verbosity = Verbosity::from_level_filter(rust_default);
 
     let rt = tokio::runtime::Runtime::new()?;
-    let effective = effective_command(&cli);
+    let effective = effective_command(cli.command);
     let command = effective.as_command();
     let bare_watch = effective.is_bare_watch();
     match command {
@@ -317,7 +315,7 @@ mod tests {
     fn bare_command_defaults_to_watch_mode() {
         let cli = Cli::try_parse_from(["tryke"]).unwrap();
         assert!(cli.command.is_none());
-        let effective = effective_command(&cli);
+        let effective = effective_command(cli.command);
         assert!(effective.is_bare_watch());
         assert!(matches!(
             effective.as_command(),

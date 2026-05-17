@@ -14,13 +14,11 @@ Run all tests in your project:
 tryke test
 ```
 
-Or start the watch loop without installing:
+Or run once without installing:
 
 ```bash
-uvx tryke
+uvx tryke test
 ```
-
-Use `uvx tryke test` for a one-shot run without installing.
 
 ## Specifying paths
 

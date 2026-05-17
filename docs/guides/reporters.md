@@ -20,9 +20,8 @@ Sample output (with `-v` to surface per-assertion lines):
 <!-- REPORTER:text:START -->
 
 ```ansi
-[1mtryke test[0m [2mv0.0.28[0m
+[1mtryke test[0m [2mv0.0.27[0m
 
-[1m[33mwarning:[39m[0m scheduler: upgrading --dist test → file for 1 module(s) because of per="scope" fixtures (sample). Move the fixture into a describe() to keep finer-grained distribution.
 sample.py:
   users
     get
@@ -63,9 +62,8 @@ Sample output:
 <!-- REPORTER:dot:START -->
 
 ```ansi
-[1mtryke test[0m [2mv0.0.28[0m
+[1mtryke test[0m [2mv0.0.27[0m
 
-[1m[33mwarning:[39m[0m scheduler: upgrading --dist test → file for 1 module(s) because of per="scope" fixtures (sample). Move the fixture into a describe() to keep finer-grained distribution.
 [32m.[39m[32m.[39m
 
  [2mTest Files[0m  [1m[32m1 passed[39m[0m [2m(1)[0m
@@ -152,9 +150,8 @@ Sample output:
 <!-- REPORTER:next:START -->
 
 ```ansi
-[1mtryke test[0m [2mv0.0.28[0m
+[1mtryke test[0m [2mv0.0.27[0m
 
-[1m[33mwarning:[39m[0m scheduler: upgrading --dist test → file for 1 module(s) because of per="scope" fixtures (sample). Move the fixture into a describe() to keep finer-grained distribution.
      [1m[32mPASS [39m[0m [[2m  0.000s[0m] [1m[36msample[39m[0m [2m>[0m [36musers[39m [2m>[0m [36mget[39m [2m::[0m returns a stored user
      [1m[32mPASS [39m[0m [[2m  0.000s[0m] [1m[36msample[39m[0m [2m>[0m [36musers[39m [2m>[0m [36mset[39m [2m::[0m stores a new user
 
@@ -183,9 +180,8 @@ Sample output:
 <!-- REPORTER:sugar:START -->
 
 ```ansi
-[1mtryke test[0m [2mv0.0.28[0m
+[1mtryke test[0m [2mv0.0.27[0m
 
-[1m[33mwarning:[39m[0m scheduler: upgrading --dist test → file for 1 module(s) because of per="scope" fixtures (sample). Move the fixture into a describe() to keep finer-grained distribution.
  [1msample.py[0m [32m✓[39m[32m✓[39m                                                [1m2[0m [1m100%[0m [37m████████████[39m
 
  [2mTest Files[0m  [1m[32m1 passed[39m[0m [2m(1)[0m

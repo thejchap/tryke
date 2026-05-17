@@ -44,7 +44,7 @@ enabled = true
 repo = "fontawesome/brands/github"
 
 [project.theme]
-custom_dir = "overrides"
+custom_dir = "docs/overrides"
 logo = "assets/logo.png"
 favicon = "assets/logo.png"
 features = [
@@ -88,7 +88,7 @@ primary = "teal"
 accent = "teal"
 
 # Absolute URL to the thumbnail rendered when the site is pasted into
-# Slack / LinkedIn / Twitter / Discord. Consumed by overrides/main.html.
+# Slack / LinkedIn / Twitter / Discord. Consumed by docs/overrides/main.html.
 [project.extra]
 social_image = "https://tryke.dev/assets/logo.png"
 

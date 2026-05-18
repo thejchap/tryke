@@ -33,12 +33,14 @@
 Run tryke with [uvx](https://docs.astral.sh/uv/guides/tools/) to get started quickly:
 
 ```bash
-uvx tryke
+uvx tryke test
 ```
 
 Or, check out the [tryke playground](https://playground.tryke.dev) to try it out in your browser.
 
 To learn more about using tryke, see the [documentation](https://tryke.dev/).
+
+Write a test.
 
 ```python
 from typing import Annotated

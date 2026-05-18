@@ -90,14 +90,12 @@ export function Chrome() {
           setTerminalOutput(resultsJson);
         }
         setRunStatus("done");
-        setSecondaryTool((prev) => (prev === "all" ? prev : "output"));
         return;
       }
 
       if (type === "error") {
         setTerminalOutput(`Error: ${e.data.message}`);
         setRunStatus("done");
-        setSecondaryTool((prev) => (prev === "all" ? prev : "output"));
       }
     };
 
@@ -130,20 +128,17 @@ export function Chrome() {
     } catch {
       setTerminalOutput("Discovery failed — check your Python syntax.");
       setRunStatus("done");
-      setSecondaryTool((prev) => (prev === "all" ? prev : "output"));
       return;
     }
 
     if (tests.length === 0) {
       setTerminalOutput("No tests discovered in the current file.");
       setRunStatus("done");
-      setSecondaryTool((prev) => (prev === "all" ? prev : "output"));
       return;
     }
 
     setRunStatus("running");
     setTerminalOutput("");
-    setSecondaryTool((prev) => (prev === "all" ? prev : "output"));
 
     workerRef.current?.postMessage({
       type: "run",

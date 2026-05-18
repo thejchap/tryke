@@ -84,7 +84,6 @@ def multiple_checks():
     test.case("zero", n=0, expected=0),
     test.case("positive", n=3, expected=9),
     test.case("negative", n=-2, expected=4),
-    name="square",
 )
 def square(n, expected):
     expect(n * n, name="squared value").to_equal(expected)
@@ -93,7 +92,6 @@ def square(n, expected):
     test.case("empty", value=""),
     test.case("hello", value="hello"),
     test.case("spaces", value="  hi  "),
-    name="string strip",
 )
 def string_strip(value):
     expect(value.strip(), name="stripped value").to_equal(value.strip())
@@ -200,6 +198,128 @@ def admin_exists(user=Depends(admin_user)):
 def config_is_shared(cfg=Depends(config)):
     expect(cfg["debug"], name="debug flag").to_be_truthy()
     expect(cfg["max_retries"], name="max retries").to_equal(3)
+`,
+      },
+    ],
+  },
+  {
+    label: "Kitchen Sink",
+    files: [
+      {
+        name: "mathlib.py",
+        source: `"""A small math library used by the test file."""
+
+
+def add(a, b):
+    return a + b
+
+
+def multiply(a, b):
+    return a * b
+
+
+def divide(a, b):
+    if b == 0:
+        raise ValueError("division by zero")
+    return a / b
+
+
+def clamp(value, low, high):
+    return max(low, min(value, high))
+`,
+      },
+      {
+        name: "test_kitchen_sink.py",
+        source: `from tryke import test, expect, describe, fixture, Depends
+from mathlib import add, multiply, divide, clamp
+
+
+# --- Fixtures with dependency injection ---
+
+@fixture
+def numbers():
+    """Fresh list of numbers for each test."""
+    return [1, 2, 3, 4, 5]
+
+
+@fixture(per="scope")
+def config():
+    """Shared config — created once across all tests."""
+    return {"precision": 2, "max_value": 100}
+
+
+@fixture
+def clamped_add(cfg=Depends(config)):
+    """A helper that adds and clamps to max_value."""
+    def _add(a, b):
+        return clamp(add(a, b), 0, cfg["max_value"])
+    return _add
+
+
+# --- Describe blocks for grouping ---
+
+with describe("arithmetic"):
+    @test(name="addition")
+    def test_add():
+        expect(add(2, 3), name="2 + 3").to_equal(5)
+        expect(add(-1, 1), name="-1 + 1").to_equal(0)
+
+    @test(name="multiplication")
+    def test_multiply():
+        expect(multiply(3, 4), name="3 * 4").to_equal(12)
+        expect(multiply(0, 99), name="0 * 99").to_equal(0)
+
+    with describe("division"):
+        @test(name="basic division")
+        def test_divide():
+            expect(divide(10, 2), name="10 / 2").to_equal(5.0)
+
+        @test(name="divide by zero raises")
+        def test_divide_zero():
+            try:
+                divide(1, 0)
+                expect(True, name="should have raised").to_be_falsy()
+            except ValueError as e:
+                expect(str(e), name="error message").to_equal("division by zero")
+
+
+# --- Parametrized cases ---
+
+@test.cases(
+    test.case("low", value=-5, expected=0),
+    test.case("in range", value=50, expected=50),
+    test.case("high", value=200, expected=100),
+)
+def test_clamp(value, expected):
+    expect(clamp(value, 0, 100), name="clamped value").to_equal(expected)
+
+
+# --- Fixtures in action ---
+
+@test(name="uses number list fixture")
+def test_numbers(nums=Depends(numbers)):
+    expect(nums, name="numbers list").to_have_length(5)
+    expect(nums, name="contains 3").to_contain(3)
+    nums.append(6)
+    expect(nums, name="after append").to_have_length(6)
+
+
+@test(name="clamped addition via fixture")
+def test_clamped(do_add=Depends(clamped_add)):
+    expect(do_add(50, 30), name="50 + 30 clamped").to_equal(80)
+    expect(do_add(99, 99), name="99 + 99 clamped").to_equal(100)
+
+
+# --- Markers ---
+
+@test.skip("not implemented yet", name="future feature")
+def test_future():
+    pass
+
+
+@test.todo("pending design review", name="new API")
+def test_new_api():
+    pass
 `,
       },
     ],

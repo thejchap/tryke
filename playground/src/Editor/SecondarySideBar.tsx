@@ -10,7 +10,7 @@ const TABS: { id: SecondaryTool; label: string; tooltip: string }[] = [
   {
     id: "discovery",
     label: "Discovery",
-    tooltip: "Discovered tests and hooks from static analysis",
+    tooltip: "Discovered tests and fixtures from static analysis",
   },
   {
     id: "import-graph",

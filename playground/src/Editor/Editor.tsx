@@ -130,26 +130,30 @@ export function Editor({
           <div className="flex-1 overflow-hidden">
             {secondaryTool === "all" ? (
               <div className="h-full flex flex-col">
-                <div className="shrink-0 overflow-auto max-h-[40%] border-b border-border">
-                  <Section title="Discovery">
-                    <DiscoveryPanel discovery={discovery} />
-                  </Section>
-                </div>
-                <div className="shrink-0 overflow-auto max-h-[30%] border-b border-border">
-                  <Section title="Import Graph">
-                    <GraphView
-                      edges={multiDiscovery.edges}
-                      files={multiDiscovery.files}
-                    />
-                  </Section>
-                  <Section title="Fixture Graph">
-                    <FixtureGraphView hooks={discovery?.parsed.hooks ?? []} />
-                  </Section>
-                </div>
-                <div className="flex-1 min-h-0">
+                <div className="h-1/2 min-h-0 border-b border-border">
                   <Section title="Output" fill>
                     <TerminalOutput content={displayOutput} />
                   </Section>
+                </div>
+                <div className="h-1/2 min-h-0 flex flex-col">
+                  <div className="flex-1 min-h-0 overflow-y-auto border-b border-border">
+                    <Section title="Discovery">
+                      <DiscoveryPanel discovery={discovery} />
+                    </Section>
+                  </div>
+                  <div className="flex-1 min-h-0 overflow-y-auto border-b border-border">
+                    <Section title="Import Graph">
+                      <GraphView
+                        edges={multiDiscovery.edges}
+                        files={multiDiscovery.files}
+                      />
+                    </Section>
+                  </div>
+                  <div className="flex-1 min-h-0 overflow-y-auto">
+                    <Section title="Fixture Graph">
+                      <FixtureGraphView hooks={discovery?.parsed.hooks ?? []} />
+                    </Section>
+                  </div>
                 </div>
               </div>
             ) : (

@@ -1,9 +1,5 @@
 import { useDeferredValue, useMemo } from "react";
-import {
-  Panel,
-  PanelGroup,
-  PanelResizeHandle,
-} from "react-resizable-panels";
+import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 
 import type {
   DiscoveredFile,
@@ -21,7 +17,10 @@ import { SecondarySideBar } from "./SecondarySideBar";
 
 interface WasmModule {
   discover: (source: string, filename: string) => DiscoveredFile;
-  discover_multi: (files_json: string) => { files: { path: string; discovered: DiscoveredFile }[]; edges: GraphEdge[] };
+  discover_multi: (files_json: string) => {
+    files: { path: string; discovered: DiscoveredFile }[];
+    edges: GraphEdge[];
+  };
   format_results: (results_json: string, reporter: string) => string;
   format_collect: (tests_json: string, reporter: string) => string;
 }
@@ -62,10 +61,13 @@ export function Editor({
   }, [wasm, deferredSource, activeFile.name]);
 
   const multiDiscovery = useMemo(() => {
-    if (!wasm || files.length < 2) return { edges: [] as GraphEdge[], files: files.map((f) => f.name) };
+    if (!wasm || files.length < 2)
+      return { edges: [] as GraphEdge[], files: files.map((f) => f.name) };
     try {
       const result = wasm.discover_multi(
-        JSON.stringify(files.map((f) => ({ filename: f.name, source: f.source })))
+        JSON.stringify(
+          files.map((f) => ({ filename: f.name, source: f.source })),
+        ),
       );
       return {
         edges: result.edges,
@@ -86,8 +88,7 @@ export function Editor({
     }
   }, [wasm, discovery, reporter]);
 
-  const displayOutput =
-    runStatus !== "idle" ? terminalOutput : collectOutput;
+  const displayOutput = runStatus !== "idle" ? terminalOutput : collectOutput;
 
   return (
     <PanelGroup direction="horizontal" className="h-full">

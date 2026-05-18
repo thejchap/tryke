@@ -33,6 +33,18 @@ repos:
         types: [markdown]
         additional_dependencies: ['markdownlint-cli2@0.17.2']
         exclude: ^docs/cli\.md$
+      - id: eslint
+        name: eslint
+        entry: bash -c 'cd playground && bun run lint'
+        pass_filenames: false
+        types_or: [ts, tsx]
+        language: system
+      - id: prettier
+        name: prettier
+        entry: bash -c 'cd playground && bun run format:check'
+        pass_filenames: false
+        types_or: [ts, tsx]
+        language: system
       - id: ruff-check
         name: ruff check
         entry: uv run ruff check --fix

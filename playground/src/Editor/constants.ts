@@ -212,30 +212,19 @@ def config_is_shared(cfg: Annotated[dict, Depends(config)]):
 from tryke import test, expect, describe, fixture, Depends
 from mathlib import add, multiply, divide, clamp
 
-
-# --- Fixtures with dependency injection ---
-
 @fixture
 def numbers():
-    """Fresh list of numbers for each test."""
     return [1, 2, 3, 4, 5]
-
 
 @fixture(per="scope")
 def config():
-    """Shared config — created once across all tests."""
     return {"precision": 2, "max_value": 100}
-
 
 @fixture
 def clamped_add(cfg: Annotated[dict, Depends(config)]):
-    """A helper that adds and clamps to max_value."""
     def _add(a, b):
         return clamp(add(a, b), 0, cfg["max_value"])
     return _add
-
-
-# --- Describe blocks for grouping ---
 
 with describe("arithmetic"):
     @test
@@ -261,9 +250,6 @@ with describe("arithmetic"):
             except ValueError as e:
                 expect(str(e), name="error message").to_equal("division by zero")
 
-
-# --- Parametrized cases ---
-
 @test.cases(
     test.case("low", value=-5, expected=0),
     test.case("in range", value=50, expected=50),
@@ -272,9 +258,6 @@ with describe("arithmetic"):
 def test_clamp(value, expected):
     expect(clamp(value, 0, 100), name="clamped value").to_equal(expected)
 
-
-# --- Fixtures in action ---
-
 @test
 def uses_number_list(nums: Annotated[list, Depends(numbers)]):
     expect(nums, name="numbers list").to_have_length(5)
@@ -282,19 +265,14 @@ def uses_number_list(nums: Annotated[list, Depends(numbers)]):
     nums.append(6)
     expect(nums, name="after append").to_have_length(6)
 
-
 @test
 def clamped_addition(do_add: Annotated[Callable, Depends(clamped_add)]):
     expect(do_add(50, 30), name="50 + 30 clamped").to_equal(80)
     expect(do_add(99, 99), name="99 + 99 clamped").to_equal(100)
 
-
-# --- Markers ---
-
 @test.skip("not implemented yet")
 def future_feature():
     pass
-
 
 @test.todo("pending design review")
 def new_api():
@@ -303,10 +281,7 @@ def new_api():
       },
       {
         name: "mathlib.py",
-        source: `"""A small math library used by the test file."""
-
-
-def add(a, b):
+        source: `def add(a, b):
     return a + b
 
 

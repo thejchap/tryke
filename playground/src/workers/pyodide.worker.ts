@@ -1,9 +1,5 @@
 /// <reference lib="webworker" />
 
-// prettier-ignore
-// @ts-expect-error pyodide loaded from CDN
-import { loadPyodide, type PyodideInterface } from "https://cdn.jsdelivr.net/pyodide/v0.27.6/full/pyodide.mjs";
-
 import initSource from "../../../python/tryke/__init__.py?raw";
 import expectSource from "../../../python/tryke/expect.py?raw";
 import hooksSource from "../../../python/tryke/hooks.py?raw";
@@ -11,27 +7,42 @@ import runnerSource from "../../../python/tryke/runner.py?raw";
 import playgroundSource from "../../../python/tryke/playground.py?raw";
 import guardSource from "../../../python/tryke_guard.py?raw";
 
+const PYODIDE_CDN = "https://cdn.jsdelivr.net/pyodide/v0.27.6/full/pyodide.mjs";
+
+// Use a dynamic import so Rollup doesn't convert the CDN URL into an
+// unresolvable global variable reference in the production bundle.
+interface PyodideInterface {
+  FS: {
+    mkdirTree(path: string): void;
+    writeFile(path: string, data: string): void;
+  };
+  runPython(code: string): string;
+}
+
 let pyodide: PyodideInterface | null = null;
 
 async function init() {
-  pyodide = await loadPyodide();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { loadPyodide } = (await import(/* @vite-ignore */ PYODIDE_CDN)) as any;
+  const py: PyodideInterface = await loadPyodide();
 
   // Write tryke package to virtual FS
-  pyodide.FS.mkdirTree("/home/pyodide/tryke");
-  pyodide.FS.writeFile("/home/pyodide/tryke/__init__.py", initSource);
-  pyodide.FS.writeFile("/home/pyodide/tryke/expect.py", expectSource);
-  pyodide.FS.writeFile("/home/pyodide/tryke/hooks.py", hooksSource);
-  pyodide.FS.writeFile("/home/pyodide/tryke/runner.py", runnerSource);
-  pyodide.FS.writeFile("/home/pyodide/tryke/playground.py", playgroundSource);
-  pyodide.FS.writeFile("/home/pyodide/tryke_guard.py", guardSource);
+  py.FS.mkdirTree("/home/pyodide/tryke");
+  py.FS.writeFile("/home/pyodide/tryke/__init__.py", initSource);
+  py.FS.writeFile("/home/pyodide/tryke/expect.py", expectSource);
+  py.FS.writeFile("/home/pyodide/tryke/hooks.py", hooksSource);
+  py.FS.writeFile("/home/pyodide/tryke/runner.py", runnerSource);
+  py.FS.writeFile("/home/pyodide/tryke/playground.py", playgroundSource);
+  py.FS.writeFile("/home/pyodide/tryke_guard.py", guardSource);
 
-  pyodide.runPython(`
+  py.runPython(`
 import sys
 if "/home/pyodide" not in sys.path:
     sys.path.insert(0, "/home/pyodide")
 from tryke.playground import run_tests
 `);
 
+  pyodide = py;
   self.postMessage({ type: "ready" });
 }
 

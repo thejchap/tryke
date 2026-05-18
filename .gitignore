@@ -230,3 +230,4 @@ demo/*.webm
 demo/*.mp4
 
 .claude/worktrees
+.wrangler

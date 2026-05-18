@@ -195,11 +195,16 @@ export function Chrome() {
     const name = newFileName.endsWith(".py")
       ? newFileName
       : `${newFileName}.py`;
-    setFiles((prev) => [...prev, { name, source: "" }]);
-    setActiveFileIndex(files.length);
+    const existingIndex = files.findIndex((f) => f.name === name);
+    if (existingIndex !== -1) {
+      setActiveFileIndex(existingIndex);
+    } else {
+      setFiles((prev) => [...prev, { name, source: "" }]);
+      setActiveFileIndex(files.length);
+    }
     setNewFileName("");
     setShowNewFile(false);
-  }, [newFileName, files.length]);
+  }, [newFileName, files]);
 
   const handleRemoveFile = useCallback(
     (index: number) => {

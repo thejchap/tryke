@@ -31,7 +31,7 @@ Repository = "https://github.com/thejchap/tryke"
 # Treat `python/` as a source root so files like `python/tryke_guard.py`
 # are recognised as top-level modules instead of implicit namespace
 # packages (INP001). Mirrors maturin's `python-source = "python"`.
-src = ["python"]
+src = ["python", "playground/examples"]
 
 [tool.ruff.lint]
 select = ["ALL"]
@@ -44,6 +44,7 @@ ignore = ["D", "COM812"]
 [tool.ruff.lint.per-file-ignores]
 "tests/test_hooks.py" = ["B008", "PT028"]
 "python/tryke/hooks.py" = ["B008"]
+"playground/examples/*.py" = ["ANN", "INP001", "T201", "FBT003", "EM101", "TRY003", "S101", "PT"]
 # This test deliberately spawns subprocesses to prove that the in-source
 # testing flag does NOT leak into child processes. The subprocess args are
 # fully controlled (sys.executable, fixed -c script), so S603 is spurious.

@@ -48,6 +48,7 @@ pub struct ExpectedAssertion {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Assertion {
     pub expression: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
     pub line: usize,
     pub span_offset: usize,
@@ -160,6 +161,206 @@ pub struct TestResult {
     pub duration: Duration,
     pub stdout: String,
     pub stderr: String,
+}
+
+/// Flat wire format produced by the Python worker's ``run_test`` function.
+///
+/// This is the JSON shape that comes over the JSON-RPC boundary from the
+/// Python subprocess (and from the Pyodide playground runner). Callers
+/// convert it into a [`TestResult`] via [`convert_wire_result`].
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum RunTestResultWire {
+    Passed {
+        duration_ms: u64,
+        stdout: String,
+        stderr: String,
+    },
+    Failed {
+        duration_ms: u64,
+        message: String,
+        #[serde(default)]
+        traceback: Option<String>,
+        #[serde(default)]
+        assertions: Vec<AssertionWire>,
+        #[serde(default)]
+        executed_lines: Vec<u32>,
+        stdout: String,
+        stderr: String,
+    },
+    Skipped {
+        duration_ms: u64,
+        #[serde(default)]
+        reason: Option<String>,
+        stdout: String,
+        stderr: String,
+    },
+    #[serde(rename = "xfailed")]
+    XFailed {
+        duration_ms: u64,
+        #[serde(default)]
+        reason: Option<String>,
+        stdout: String,
+        stderr: String,
+    },
+    #[serde(rename = "xpassed")]
+    XPassed {
+        duration_ms: u64,
+        stdout: String,
+        stderr: String,
+    },
+    Todo {
+        duration_ms: u64,
+        #[serde(default)]
+        description: Option<String>,
+        stdout: String,
+        stderr: String,
+    },
+}
+
+/// A single assertion result as serialized by the Python worker.
+#[derive(Debug, serde::Deserialize)]
+pub struct AssertionWire {
+    pub expression: String,
+    pub expected: String,
+    pub received: String,
+    pub line: u32,
+    #[serde(default)]
+    pub column: Option<u32>,
+    #[serde(default)]
+    pub file: Option<String>,
+}
+
+/// Convert a [`RunTestResultWire`] (flat Python worker format) into a
+/// [`TestResult`] (the structured format reporters consume).
+///
+/// This is a baseline conversion that populates `span_offset` /
+/// `span_length` from the `expect(...)` expression but does **not**
+/// enrich assertions with `expected_arg_span` (that requires
+/// `ExpectedAssertion` data from discovery and is done separately in
+/// `tryke_runner`).
+#[must_use]
+pub fn convert_wire_result(test: TestItem, wire: RunTestResultWire) -> TestResult {
+    match wire {
+        RunTestResultWire::Passed {
+            duration_ms,
+            stdout,
+            stderr,
+        } => TestResult {
+            test,
+            outcome: TestOutcome::Passed,
+            duration: Duration::from_millis(duration_ms),
+            stdout,
+            stderr,
+        },
+        RunTestResultWire::Failed {
+            duration_ms,
+            message,
+            traceback,
+            assertions,
+            executed_lines,
+            stdout,
+            stderr,
+        } => {
+            let assertions = assertions.into_iter().map(convert_assertion_wire).collect();
+            TestResult {
+                test,
+                outcome: TestOutcome::Failed {
+                    message,
+                    traceback,
+                    assertions,
+                    executed_lines,
+                },
+                duration: Duration::from_millis(duration_ms),
+                stdout,
+                stderr,
+            }
+        }
+        RunTestResultWire::Skipped {
+            duration_ms,
+            reason,
+            stdout,
+            stderr,
+        } => TestResult {
+            test,
+            outcome: TestOutcome::Skipped { reason },
+            duration: Duration::from_millis(duration_ms),
+            stdout,
+            stderr,
+        },
+        RunTestResultWire::XFailed {
+            duration_ms,
+            reason,
+            stdout,
+            stderr,
+        } => TestResult {
+            test,
+            outcome: TestOutcome::XFailed { reason },
+            duration: Duration::from_millis(duration_ms),
+            stdout,
+            stderr,
+        },
+        RunTestResultWire::XPassed {
+            duration_ms,
+            stdout,
+            stderr,
+        } => TestResult {
+            test,
+            outcome: TestOutcome::XPassed,
+            duration: Duration::from_millis(duration_ms),
+            stdout,
+            stderr,
+        },
+        RunTestResultWire::Todo {
+            duration_ms,
+            description,
+            stdout,
+            stderr,
+        } => TestResult {
+            test,
+            outcome: TestOutcome::Todo { description },
+            duration: Duration::from_millis(duration_ms),
+            stdout,
+            stderr,
+        },
+    }
+}
+
+/// Compute the byte span of the first argument to `expect(...)`.
+fn compute_subject_span(expression: &str) -> (usize, usize) {
+    let Some(pos) = expression.find("expect(") else {
+        return (0, expression.len().max(1));
+    };
+    let start = pos + 7; // len("expect(")
+    let mut depth: u32 = 1;
+    for (i, ch) in expression[start..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' if depth == 1 => return (start, i.max(1)),
+            ')' => depth -= 1,
+            ',' if depth == 1 => {
+                let len = expression[start..start + i].trim_end().len();
+                return (start, len.max(1));
+            }
+            _ => {}
+        }
+    }
+    (start, expression.len().saturating_sub(start).max(1))
+}
+
+#[must_use]
+pub fn convert_assertion_wire(wire: AssertionWire) -> Assertion {
+    let (span_offset, span_length) = compute_subject_span(&wire.expression);
+    Assertion {
+        expression: wire.expression,
+        file: wire.file,
+        line: wire.line as usize,
+        span_offset,
+        span_length,
+        expected: wire.expected,
+        received: wire.received,
+        expected_arg_span: None,
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -512,5 +713,80 @@ mod tests {
         let json = serde_json::to_string(&pf).expect("serialize");
         let back: ParsedFile = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(pf, back);
+    }
+
+    #[test]
+    fn compute_subject_span_simple() {
+        let (off, len) = compute_subject_span("expect(x).to_equal(2)");
+        assert_eq!(off, 7);
+        assert_eq!(len, 1);
+    }
+
+    #[test]
+    fn compute_subject_span_nested_parens() {
+        let (off, len) = compute_subject_span("expect(foo(bar(1))).to_be_truthy()");
+        assert_eq!(off, 7);
+        assert_eq!(len, 11);
+    }
+
+    #[test]
+    fn compute_subject_span_no_expect() {
+        let (off, len) = compute_subject_span("assert x == 1");
+        assert_eq!(off, 0);
+        assert_eq!(len, 13);
+    }
+
+    #[test]
+    fn compute_subject_span_stops_at_comma() {
+        let (off, len) = compute_subject_span("expect(val, \"label\")");
+        assert_eq!(off, 7);
+        assert_eq!(len, 3);
+    }
+
+    #[test]
+    fn compute_subject_span_nested_parens_with_label() {
+        let (off, len) = compute_subject_span("expect(foo(a, b), \"label\")");
+        assert_eq!(off, 7);
+        assert_eq!(len, 9);
+    }
+
+    #[test]
+    fn compute_subject_span_whitespace_before_comma() {
+        let (off, len) = compute_subject_span("expect(val  , \"label\")");
+        assert_eq!(off, 7);
+        assert_eq!(len, 3);
+    }
+
+    #[test]
+    fn convert_wire_result_passed() {
+        let test = TestItem {
+            name: "test_add".into(),
+            module_path: "tests.test_math".into(),
+            ..Default::default()
+        };
+        let wire = RunTestResultWire::Passed {
+            duration_ms: 10,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        let result = convert_wire_result(test, wire);
+        assert!(matches!(result.outcome, TestOutcome::Passed));
+        assert_eq!(result.duration, Duration::from_millis(10));
+    }
+
+    #[test]
+    fn convert_assertion_wire_computes_span() {
+        let wire = AssertionWire {
+            expression: "expect(x).to_equal(2)".into(),
+            expected: "2".into(),
+            received: "3".into(),
+            line: 10,
+            column: None,
+            file: Some("tests/test_math.py".into()),
+        };
+        let a = convert_assertion_wire(wire);
+        assert_eq!(a.span_offset, 7);
+        assert_eq!(a.span_length, 1);
+        assert_eq!(a.expected_arg_span, None);
     }
 }

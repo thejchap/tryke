@@ -10,7 +10,7 @@ import type {
 import { EXAMPLES } from "./constants";
 import { Editor } from "./Editor";
 
-const DESCRIBE_EXAMPLE = EXAMPLES[3]!;
+const KITCHEN_SINK = EXAMPLES[6]!;
 
 interface WasmModule {
   discover: (source: string, filename: string) => DiscoveredFile;
@@ -24,7 +24,7 @@ interface WasmModule {
 }
 
 export function Chrome() {
-  const [files, setFiles] = useState<PlaygroundFile[]>(DESCRIBE_EXAMPLE.files);
+  const [files, setFiles] = useState<PlaygroundFile[]>(KITCHEN_SINK.files);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   const [secondaryTool, setSecondaryTool] = useState<SecondaryTool>("all");
   const [reporter, setReporter] = useState<ReporterName>("text");

@@ -7,11 +7,11 @@ use anyhow::{Result, anyhow};
 use log::{debug, trace};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tryke_types::{Assertion, ExpectedAssertion, TestItem, TestOutcome, TestResult};
+use tryke_types::{ExpectedAssertion, TestItem, TestOutcome, TestResult};
 
 use crate::protocol::{
-    AssertionWire, FinalizeHooksParams, RegisterHooksParams, RpcRequest, RpcResponse,
-    RunDoctestParams, RunTestParams, RunTestResultWire,
+    FinalizeHooksParams, RegisterHooksParams, RpcRequest, RpcResponse, RunDoctestParams,
+    RunTestParams, RunTestResultWire,
 };
 
 /// Cap on retained worker-stderr bytes. Beyond this we keep the most recent
@@ -378,32 +378,6 @@ fn build_pythonpath(extra: &[&Path]) -> String {
     parts.join(sep)
 }
 
-fn convert_assertion(wire: AssertionWire, expected_arg_span: Option<(usize, usize)>) -> Assertion {
-    let (span_offset, span_length) = compute_subject_span(&wire.expression);
-    // Make absolute paths relative to cwd so diagnostics show short paths.
-    let file = wire.file.map(|f| {
-        std::env::current_dir()
-            .ok()
-            .and_then(|cwd| {
-                Path::new(&f)
-                    .strip_prefix(&cwd)
-                    .ok()
-                    .map(|p| p.to_string_lossy().into_owned())
-            })
-            .unwrap_or(f)
-    });
-    Assertion {
-        expression: wire.expression,
-        file,
-        line: wire.line as usize,
-        span_offset,
-        span_length,
-        expected: wire.expected,
-        received: wire.received,
-        expected_arg_span,
-    }
-}
-
 /// Find the byte span of the first matcher argument inside `expression`,
 /// guided by AST metadata from `ExpectedAssertion`. Returns `None` for
 /// no-arg matchers like `to_be_falsy()`.
@@ -412,145 +386,61 @@ fn find_arg_span(expression: &str, ea: &ExpectedAssertion) -> Option<(usize, usi
     if arg.is_empty() {
         return None;
     }
-    // Find `matcher(` after the subject portion
     let matcher_pat = format!("{}(", ea.matcher);
     let matcher_pos = expression.find(&matcher_pat)?;
     let content_start = matcher_pos + matcher_pat.len();
-    // Find the arg text right at or after the opening paren
     let remaining = expression.get(content_start..)?;
     let arg_offset_in_remaining = remaining.find(arg.as_str())?;
     let offset = content_start + arg_offset_in_remaining;
     Some((offset, arg.len()))
 }
 
-/// Find the first argument inside `expect(subject, ...)` by matching parens.
-/// Stops at the first top-level comma so that optional arguments like the
-/// label in `expect(val, "label")` are excluded from the span.
-fn compute_subject_span(expression: &str) -> (usize, usize) {
-    let Some(pos) = expression.find("expect(") else {
-        return (0, expression.len().max(1));
-    };
-    let start = pos + 7; // len("expect(")
-    let mut depth: u32 = 1;
-    for (i, ch) in expression[start..].char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' if depth == 1 => return (start, i.max(1)),
-            ')' => depth -= 1,
-            ',' if depth == 1 => {
-                let len = expression[start..start + i].trim_end().len();
-                return (start, len.max(1));
-            }
-            _ => {}
-        }
-    }
-    (start, expression.len().saturating_sub(start).max(1))
-}
-
+/// Convert a wire result into a [`TestResult`], enriching assertions with
+/// `expected_arg_span` from discovery metadata and relativizing file paths.
 fn convert_result(test: TestItem, wire: RunTestResultWire) -> TestResult {
-    match wire {
-        RunTestResultWire::Passed {
-            duration_ms,
-            stdout,
-            stderr,
-        } => TestResult {
-            test,
-            outcome: TestOutcome::Passed,
-            duration: Duration::from_millis(duration_ms),
-            stdout,
-            stderr,
-        },
-        RunTestResultWire::Failed {
-            duration_ms,
-            message,
-            traceback,
-            assertions,
-            executed_lines,
-            stdout,
-            stderr,
-        } => {
-            let expected_by_line: std::collections::HashMap<u32, &ExpectedAssertion> = test
-                .expected_assertions
-                .iter()
-                .map(|ea| (ea.line, ea))
-                .collect();
+    let mut result = tryke_types::convert_wire_result(test, wire);
 
-            let assertions = assertions
-                .into_iter()
-                .map(|wire| {
-                    let expected_arg_span = expected_by_line
-                        .get(&wire.line)
-                        .and_then(|ea| find_arg_span(&wire.expression, ea));
-                    convert_assertion(wire, expected_arg_span)
-                })
-                .collect();
+    if let TestOutcome::Failed { assertions, .. } = &mut result.outcome {
+        let expected_by_line: std::collections::HashMap<u32, &ExpectedAssertion> = result
+            .test
+            .expected_assertions
+            .iter()
+            .map(|ea| (ea.line, ea))
+            .collect();
 
-            TestResult {
-                test,
-                outcome: TestOutcome::Failed {
-                    message,
-                    traceback,
-                    assertions,
-                    executed_lines,
-                },
-                duration: Duration::from_millis(duration_ms),
-                stdout,
-                stderr,
+        for assertion in assertions.iter_mut() {
+            // Enrich with expected_arg_span from discovery AST metadata.
+            #[expect(clippy::cast_possible_truncation)]
+            let line = assertion.line as u32;
+            assertion.expected_arg_span = expected_by_line
+                .get(&line)
+                .and_then(|ea| find_arg_span(&assertion.expression, ea));
+
+            // Make absolute paths relative to cwd for shorter diagnostics.
+            if let Some(ref f) = assertion.file {
+                assertion.file = Some(
+                    std::env::current_dir()
+                        .ok()
+                        .and_then(|cwd| {
+                            Path::new(f)
+                                .strip_prefix(&cwd)
+                                .ok()
+                                .map(|p| p.to_string_lossy().into_owned())
+                        })
+                        .unwrap_or_else(|| f.clone()),
+                );
             }
         }
-        RunTestResultWire::Skipped {
-            duration_ms,
-            reason,
-            stdout,
-            stderr,
-        } => TestResult {
-            test,
-            outcome: TestOutcome::Skipped { reason },
-            duration: Duration::from_millis(duration_ms),
-            stdout,
-            stderr,
-        },
-        RunTestResultWire::XFailed {
-            duration_ms,
-            reason,
-            stdout,
-            stderr,
-        } => TestResult {
-            test,
-            outcome: TestOutcome::XFailed { reason },
-            duration: Duration::from_millis(duration_ms),
-            stdout,
-            stderr,
-        },
-        RunTestResultWire::XPassed {
-            duration_ms,
-            stdout,
-            stderr,
-        } => TestResult {
-            test,
-            outcome: TestOutcome::XPassed,
-            duration: Duration::from_millis(duration_ms),
-            stdout,
-            stderr,
-        },
-        RunTestResultWire::Todo {
-            duration_ms,
-            description,
-            stdout,
-            stderr,
-        } => TestResult {
-            test,
-            outcome: TestOutcome::Todo { description },
-            duration: Duration::from_millis(duration_ms),
-            stdout,
-            stderr,
-        },
     }
+
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+
+    use tryke_types::AssertionWire;
 
     use super::*;
 
@@ -663,58 +553,15 @@ mod tests {
             line: 10,
             file: Some("tests/test_math.py".into()),
         };
-        let a = convert_assertion(wire, Some((19, 1)));
+        let a = tryke_types::convert_assertion_wire(wire);
         assert_eq!(a.expression, "expect(x).to_equal(2)");
         assert_eq!(a.expected, "2");
         assert_eq!(a.received, "3");
         assert_eq!(a.line, 10);
         assert_eq!(a.file.as_deref(), Some("tests/test_math.py"));
-        // "expect(" is 7 chars, subject "x" starts at 7, length 1
         assert_eq!(a.span_offset, 7);
         assert_eq!(a.span_length, 1);
-        assert_eq!(a.expected_arg_span, Some((19, 1)));
-    }
-
-    #[test]
-    fn compute_subject_span_simple() {
-        let (off, len) = compute_subject_span("expect(x).to_equal(2)");
-        assert_eq!(off, 7);
-        assert_eq!(len, 1);
-    }
-
-    #[test]
-    fn compute_subject_span_nested_parens() {
-        let (off, len) = compute_subject_span("expect(foo(bar(1))).to_be_truthy()");
-        assert_eq!(off, 7);
-        assert_eq!(len, 11); // "foo(bar(1))"
-    }
-
-    #[test]
-    fn compute_subject_span_no_expect() {
-        let (off, len) = compute_subject_span("assert x == 1");
-        assert_eq!(off, 0);
-        assert_eq!(len, 13);
-    }
-
-    #[test]
-    fn compute_subject_span_stops_at_comma() {
-        let (off, len) = compute_subject_span("expect(val, \"label\")");
-        assert_eq!(off, 7);
-        assert_eq!(len, 3); // "val"
-    }
-
-    #[test]
-    fn compute_subject_span_nested_parens_with_label() {
-        let (off, len) = compute_subject_span("expect(foo(a, b), \"label\")");
-        assert_eq!(off, 7);
-        assert_eq!(len, 9); // "foo(a, b)"
-    }
-
-    #[test]
-    fn compute_subject_span_whitespace_before_comma() {
-        let (off, len) = compute_subject_span("expect(val  , \"label\")");
-        assert_eq!(off, 7);
-        assert_eq!(len, 3); // "val" (trailing whitespace trimmed)
+        assert_eq!(a.expected_arg_span, None);
     }
 
     fn make_expected(matcher: &str, args: &[&str], line: u32) -> ExpectedAssertion {

@@ -12,13 +12,13 @@ from pathlib import Path
 
 from tryke import describe, expect, test
 from tryke.expect import ExpectationError, SoftFailure
-from tryke.worker import (
+from tryke.runner import (
     _TRYKE_PKG,
-    Worker,
-    _extract_soft_failures,
     _is_user_frame,
     _make_assertion_wire,
+    extract_soft_failures,
 )
+from tryke.worker import Worker
 
 
 def _rpc(method: str, id_: int = 1, **params: object) -> dict:
@@ -559,7 +559,7 @@ with describe("assertion helpers"):
         expect(wire["line"], "wire carries the frame line number").to_equal(42)
         expect(wire["file"], "wire carries the frame filename").to_equal("test.py")
 
-    @test(name="make_assertion_wire without frame omits location")
+    @test(name="make_assertion_wire without frame defaults location")
     def test_wire_no_frame() -> None:
         wire = _make_assertion_wire(
             expression="",
@@ -567,7 +567,7 @@ with describe("assertion helpers"):
             received="b",
         )
         expect(wire["expected"], "wire still carries expected value").to_equal("a")
-        expect("line" in wire, "no line key without a frame").to_be_falsy()
+        expect(wire["line"], "line defaults to 0 without a frame").to_equal(0)
         expect("file" in wire, "no file key without a frame").to_be_falsy()
 
     @test(name="extract_soft_failures with frame")
@@ -584,7 +584,7 @@ with describe("assertion helpers"):
             expected="1",
             received="2",
         )
-        result = _extract_soft_failures(
+        result = extract_soft_failures(
             [SoftFailure(err, frame)],
         )
         expect(result, "one extracted failure").to_have_length(1)
@@ -601,12 +601,12 @@ with describe("assertion helpers"):
             expected="a",
             received="b",
         )
-        result = _extract_soft_failures(
+        result = extract_soft_failures(
             [SoftFailure(err, None)],
         )
         expect(result, "one extracted failure").to_have_length(1)
         expect(result[0]["expression"], "expression empty without a frame").to_equal("")
-        expect("line" in result[0], "no line key without a frame").to_be_falsy()
+        expect(result[0]["line"], "line defaults to 0 without a frame").to_equal(0)
         expect("file" in result[0], "no file key without a frame").to_be_falsy()
 
     @test(name="is_user_frame identifies user frames")

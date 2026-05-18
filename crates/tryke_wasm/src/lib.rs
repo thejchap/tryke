@@ -4,8 +4,18 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use tryke_reporter::Reporter;
-use tryke_types::TestOutcome;
+use tryke_types::{RunTestResultWire, TestOutcome};
 use wasm_bindgen::prelude::*;
+
+/// A single test result as sent by the Python playground runner: the
+/// discovered test item alongside the flat runner output. Deserialized
+/// with `#[serde(flatten)]` so the JSON is `{test: {...}, outcome: "passed", duration_ms: 42, ...}`.
+#[derive(Deserialize)]
+struct PlaygroundResult {
+    test: tryke_types::TestItem,
+    #[serde(flatten)]
+    result: RunTestResultWire,
+}
 
 #[derive(Deserialize)]
 struct PlaygroundFile {
@@ -91,11 +101,20 @@ pub fn discover_multi(files_json: &str) -> Result<JsValue, JsError> {
 /// Pipe test results through a real tryke reporter and return the
 /// rendered output string (with ANSI escape codes for terminal-style
 /// reporters).
+///
+/// Accepts the flat runner format produced by the Python playground
+/// runner: `[{test: {...}, outcome: "passed", duration_ms: 42, ...}]`.
+/// The conversion to `tryke_types::TestResult` happens here so the
+/// Python side doesn't need to know about the reporter's wire format.
 #[expect(clippy::missing_errors_doc)]
 #[wasm_bindgen]
 pub fn format_results(results_json: &str, reporter_name: &str) -> Result<String, JsError> {
-    let results: Vec<tryke_types::TestResult> =
+    let raw: Vec<PlaygroundResult> =
         serde_json::from_str(results_json).map_err(|e| JsError::new(&e.to_string()))?;
+    let results: Vec<tryke_types::TestResult> = raw
+        .into_iter()
+        .map(|r| tryke_types::convert_wire_result(r.test, r.result))
+        .collect();
 
     let tests: Vec<tryke_types::TestItem> = results.iter().map(|r| r.test.clone()).collect();
     let summary = build_summary(&results);

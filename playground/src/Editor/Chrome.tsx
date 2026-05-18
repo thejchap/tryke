@@ -228,7 +228,7 @@ export function Chrome() {
       <div className="flex items-center gap-3 px-4 py-2 border-b border-border bg-surface">
         <a href="/" className="flex items-center gap-2 hover:opacity-80">
           <img src="/logo.png" alt="tryke" className="h-6 w-6 rounded" />
-          <h1 className="text-sm font-bold text-accent">Tryke Playground</h1>
+          <h1 className="text-sm font-bold text-white">Tryke Playground</h1>
         </a>
         {wasmVersion && (
           <span className="text-xs text-text-dim">v{wasmVersion}</span>
@@ -368,6 +368,7 @@ export function Chrome() {
           terminalOutput={terminalOutput}
           runStatus={runStatus}
           wasm={wasm}
+          pyodideReady={pyodideReady}
         />
       </div>
     </div>

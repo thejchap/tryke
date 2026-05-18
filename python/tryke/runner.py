@@ -10,7 +10,6 @@ deserialize.
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import inspect
 import io
@@ -495,6 +494,10 @@ def _run_without_executor(
     Used by the playground (no pre-registered executor). Creates a
     temporary :class:`DependencyResolver`, resolves ``Depends()``
     markers, runs the function, and tears down fixtures afterward.
+    Mirrors :meth:`tryke.hooks.HookExecutor.run_test`: case kwargs may
+    not shadow fixture-injected parameters, and async test bodies run
+    on the resolver's shared loop so any async fixtures and the test
+    body share a single event loop.
     """
     from tryke.hooks import DependencyResolver  # noqa: PLC0415
 
@@ -502,9 +505,17 @@ def _run_without_executor(
     try:
         test_kwargs = resolver.resolve(fn)
         if case_kwargs:
+            conflicts = set(test_kwargs).intersection(case_kwargs)
+            if conflicts:
+                names = ", ".join(sorted(conflicts))
+                msg = (
+                    f"@test.cases argument(s) {{{names}}} collide with "
+                    f"fixture-injected parameter(s) of {fn.__name__}"
+                )
+                raise TypeError(msg)
             test_kwargs = {**test_kwargs, **case_kwargs}
         if inspect.iscoroutinefunction(fn):
-            asyncio.run(fn(*case_args, **test_kwargs))
+            resolver.shared_loop.run_until_complete(fn(*case_args, **test_kwargs))
         else:
             fn(*case_args, **test_kwargs)
     finally:

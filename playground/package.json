@@ -4,6 +4,9 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "wasm": "wasm-pack build ../crates/tryke_wasm --target web --out-dir ../../playground/src/wasm/pkg",
+    "predev": "bun run wasm",
+    "prebuild": "bun run wasm",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",

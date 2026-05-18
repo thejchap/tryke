@@ -34,7 +34,35 @@ def _extract_soft_failures(failures):
     return result
 
 
-def run_tests(filename, source, tests_json):
+def _resolve_fixtures(fn):
+    """Resolve Depends() defaults in a function's signature."""
+    import inspect
+    from tryke.hooks import _Depends
+
+    sig = inspect.signature(fn)
+    kwargs = {}
+    teardowns = []
+
+    for name, param in sig.parameters.items():
+        if not isinstance(param.default, _Depends):
+            continue
+        dep_fn = param.default.dependency
+        # Recursively resolve the fixture's own dependencies
+        dep_kwargs, dep_teardowns = _resolve_fixtures(dep_fn)
+        teardowns.extend(dep_teardowns)
+
+        if inspect.isgeneratorfunction(dep_fn):
+            gen = dep_fn(**dep_kwargs)
+            value = next(gen)
+            teardowns.append(gen)
+        else:
+            value = dep_fn(**dep_kwargs)
+        kwargs[name] = value
+
+    return kwargs, teardowns
+
+
+def run_tests(filename, source, tests_json, all_files_json=None):
     from tryke.expect import (
         SoftContext,
         _set_soft_context,
@@ -44,10 +72,20 @@ def run_tests(filename, source, tests_json):
     tests = json.loads(tests_json)
     results = []
 
-    module_name = filename.replace(".py", "").replace("/", ".")
-    with open(f"/home/pyodide/{filename}", "w") as f:
-        f.write(source)
+    # Write all playground files to the virtual FS
+    if all_files_json:
+        all_files = json.loads(all_files_json)
+        for f in all_files:
+            with open(f"/home/pyodide/{f['name']}", "w") as fh:
+                fh.write(f["source"])
+            mod_name = f["name"].replace(".py", "").replace("/", ".")
+            if mod_name in sys.modules:
+                del sys.modules[mod_name]
+    else:
+        with open(f"/home/pyodide/{filename}", "w") as f:
+            f.write(source)
 
+    module_name = filename.replace(".py", "").replace("/", ".")
     if module_name in sys.modules:
         del sys.modules[module_name]
 
@@ -62,7 +100,7 @@ def run_tests(filename, source, tests_json):
                 "test": t,
                 "outcome": {
                     "status": "error",
-                    "detail": f"{type(exc).__name__}: {exc}"
+                    "detail": {"message": f"{type(exc).__name__}: {exc}"}
                 },
                 "duration": {"secs": 0, "nanos": 0},
                 "stdout": "",
@@ -78,7 +116,7 @@ def run_tests(filename, source, tests_json):
         if fn is None:
             results.append({
                 "test": t,
-                "outcome": {"status": "error", "detail": f"Function '{name}' not found"},
+                "outcome": {"status": "error", "detail": {"message": f"Function '{name}' not found"}},
                 "duration": {"secs": 0, "nanos": 0},
                 "stdout": "",
                 "stderr": "",
@@ -114,17 +152,22 @@ def run_tests(filename, source, tests_json):
         ctx = SoftContext()
         _set_soft_context(ctx)
         start = time.monotonic()
+        teardowns = []
 
         try:
+            # Resolve fixture dependencies
+            fixture_kwargs, teardowns = _resolve_fixtures(fn)
+
             if case_index is not None and hasattr(fn, "__tryke_cases__"):
                 cases = fn.__tryke_cases__
                 if case_index < len(cases):
                     entry = cases[case_index]
-                    fn(*entry.args, **entry.kwargs)
+                    merged = {**fixture_kwargs, **entry.kwargs}
+                    fn(*entry.args, **merged)
                 else:
-                    fn()
+                    fn(**fixture_kwargs)
             else:
-                fn()
+                fn(**fixture_kwargs)
 
             elapsed = time.monotonic() - start
             secs = int(elapsed)
@@ -240,6 +283,11 @@ def run_tests(filename, source, tests_json):
                 })
         finally:
             _set_soft_context(None)
+            for gen in reversed(teardowns):
+                try:
+                    next(gen, None)
+                except StopIteration:
+                    pass
 
     return json.dumps(results)
 `;
@@ -288,10 +336,11 @@ self.onmessage = async (e: MessageEvent) => {
       return;
     }
 
-    const { filename, source, tests } = e.data;
+    const { filename, source, tests, allFiles } = e.data;
     try {
+      const allFilesArg = allFiles ? JSON.stringify(JSON.stringify(allFiles)) : "None";
       const resultsJson = pyodide.runPython(
-        `run_tests(${JSON.stringify(filename)}, ${JSON.stringify(source)}, ${JSON.stringify(JSON.stringify(tests))})`
+        `run_tests(${JSON.stringify(filename)}, ${JSON.stringify(source)}, ${JSON.stringify(JSON.stringify(tests))}, ${allFilesArg})`
       );
       self.postMessage({ type: "result", results: resultsJson });
     } catch (err) {

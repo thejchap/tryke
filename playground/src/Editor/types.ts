@@ -70,5 +70,6 @@ export type SecondaryTool =
   | "discovery"
   | "import-graph"
   | "fixture-graph"
-  | "output";
+  | "output"
+  | "all";
 export type RunStatus = "idle" | "running" | "done";

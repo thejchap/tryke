@@ -56,6 +56,9 @@ ignore = ["D", "COM812"]
 # Without this, `from tryke.worker import ...` in tests/ would not
 # resolve to python/tryke/worker.py in the import graph.
 src = [".", "python"]
+# Playground examples include intentionally-failing tests for the browser
+# demo; exclude them from the project test suite.
+exclude = ["playground/examples"]
 
 [tool.maturin]
 bindings = "bin"

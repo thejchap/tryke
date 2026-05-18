@@ -29,7 +29,13 @@ export function GraphView({ edges, files }: Props) {
 
     const nodes = g.nodes().map((id) => {
       const node = g.node(id);
-      return { id, x: node.x, y: node.y, width: node.width, height: node.height };
+      return {
+        id,
+        x: node.x,
+        y: node.y,
+        width: node.width,
+        height: node.height,
+      };
     });
 
     const edgeLines = g.edges().map((e) => {
@@ -62,11 +68,7 @@ export function GraphView({ edges, files }: Props) {
 
   return (
     <div className="h-full overflow-auto p-2">
-      <svg
-        width={layout.width}
-        height={layout.height}
-        className="mx-auto"
-      >
+      <svg width={layout.width} height={layout.height} className="mx-auto">
         <defs>
           <marker
             id="arrowhead"
@@ -81,9 +83,7 @@ export function GraphView({ edges, files }: Props) {
         </defs>
 
         {layout.edges.map((e, i) => {
-          const points = e.points
-            .map((p) => `${p.x},${p.y}`)
-            .join(" ");
+          const points = e.points.map((p) => `${p.x},${p.y}`).join(" ");
           return (
             <polyline
               key={i}

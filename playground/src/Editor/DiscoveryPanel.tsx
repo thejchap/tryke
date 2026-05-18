@@ -31,9 +31,7 @@ export function DiscoveryPanel({ discovery }: Props) {
       )}
 
       <div className="mb-3">
-        <h3 className="text-text font-bold mb-1">
-          Tests ({tests.length})
-        </h3>
+        <h3 className="text-text font-bold mb-1">Tests ({tests.length})</h3>
         {tests.length === 0 ? (
           <div className="text-text-dim ml-2">No tests found.</div>
         ) : (
@@ -76,17 +74,13 @@ export function DiscoveryPanel({ discovery }: Props) {
 
       {hooks.length > 0 && (
         <div className="mb-3">
-          <h3 className="text-text font-bold mb-1">
-            Hooks ({hooks.length})
-          </h3>
+          <h3 className="text-text font-bold mb-1">Hooks ({hooks.length})</h3>
           <ul className="ml-2 space-y-0.5">
             {hooks.map((h, i) => (
               <li key={i} className="flex items-center gap-2">
                 <span className="text-accent">&#x25cf;</span>
                 <span className="text-text">{h.name}</span>
-                <span className="text-text-dim text-xs">
-                  per:{h.per}
-                </span>
+                <span className="text-text-dim text-xs">per:{h.per}</span>
                 {(h.depends_on?.length ?? 0) > 0 && (
                   <span className="text-text-dim text-xs">
                     deps: {h.depends_on?.join(", ")}

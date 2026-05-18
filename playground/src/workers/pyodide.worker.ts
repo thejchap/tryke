@@ -1,5 +1,6 @@
 /// <reference lib="webworker" />
 
+// prettier-ignore
 // @ts-expect-error pyodide loaded from CDN
 import { loadPyodide, type PyodideInterface } from "https://cdn.jsdelivr.net/pyodide/v0.27.6/full/pyodide.mjs";
 
@@ -338,9 +339,11 @@ self.onmessage = async (e: MessageEvent) => {
 
     const { filename, source, tests, allFiles } = e.data;
     try {
-      const allFilesArg = allFiles ? JSON.stringify(JSON.stringify(allFiles)) : "None";
+      const allFilesArg = allFiles
+        ? JSON.stringify(JSON.stringify(allFiles))
+        : "None";
       const resultsJson = pyodide.runPython(
-        `run_tests(${JSON.stringify(filename)}, ${JSON.stringify(source)}, ${JSON.stringify(JSON.stringify(tests))}, ${allFilesArg})`
+        `run_tests(${JSON.stringify(filename)}, ${JSON.stringify(source)}, ${JSON.stringify(JSON.stringify(tests))}, ${allFilesArg})`,
       );
       self.postMessage({ type: "result", results: resultsJson });
     } catch (err) {

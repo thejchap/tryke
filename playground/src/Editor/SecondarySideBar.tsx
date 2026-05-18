@@ -6,11 +6,27 @@ interface Props {
   hasOutput: boolean;
 }
 
-const TABS: { id: SecondaryTool; label: string }[] = [
-  { id: "discovery", label: "Discovery" },
-  { id: "import-graph", label: "Import Graph" },
-  { id: "fixture-graph", label: "Fixture Graph" },
-  { id: "output", label: "Output" },
+const TABS: { id: SecondaryTool; label: string; tooltip: string }[] = [
+  {
+    id: "discovery",
+    label: "Discovery",
+    tooltip: "Discovered tests and hooks from static analysis",
+  },
+  {
+    id: "import-graph",
+    label: "Import Graph",
+    tooltip: "Dependency graph between files",
+  },
+  {
+    id: "fixture-graph",
+    label: "Fixture Graph",
+    tooltip: "Fixture dependency graph (Depends() relationships)",
+  },
+  {
+    id: "output",
+    label: "Output",
+    tooltip: "Test runner output",
+  },
 ];
 
 export function SecondarySideBar({ active, onChange, hasOutput }: Props) {
@@ -22,6 +38,7 @@ export function SecondarySideBar({ active, onChange, hasOutput }: Props) {
         <button
           key={tab.id}
           onClick={() => onChange(tab.id)}
+          title={tab.tooltip}
           className={`px-3 py-1.5 text-xs font-medium transition-colors ${
             !isAll && active === tab.id
               ? "text-accent border-b-2 border-accent"
@@ -37,7 +54,7 @@ export function SecondarySideBar({ active, onChange, hasOutput }: Props) {
       <div className="flex-1" />
       <button
         onClick={() => onChange(isAll ? "output" : "all")}
-        title={isAll ? "Show single panel" : "Show all panels"}
+        title={isAll ? "Show single panel" : "Show all panels stacked"}
         className={`px-2 py-1.5 text-xs font-medium transition-colors ${
           isAll
             ? "text-accent border-b-2 border-accent"

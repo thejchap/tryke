@@ -16,13 +16,21 @@ import { FixtureGraphView } from "./FixtureGraphView";
 import { TerminalOutput } from "./TerminalOutput";
 import { SecondarySideBar } from "./SecondarySideBar";
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+function Section({
+  title,
+  children,
+  fill,
+}: {
+  title: string;
+  children: ReactNode;
+  fill?: boolean;
+}) {
   return (
-    <div className="border-b border-border">
-      <div className="px-3 py-1.5 text-xs font-bold text-text-dim bg-bg/50 border-b border-border">
+    <div className={fill ? "h-full flex flex-col" : "border-b border-border"}>
+      <div className="shrink-0 px-3 py-1.5 text-xs font-bold text-text-dim bg-bg/50 border-b border-border">
         {title}
       </div>
-      {children}
+      <div className={fill ? "flex-1 min-h-0" : undefined}>{children}</div>
     </div>
   );
 }
@@ -121,24 +129,28 @@ export function Editor({
           />
           <div className="flex-1 overflow-hidden">
             {secondaryTool === "all" ? (
-              <div className="h-full overflow-auto">
-                <Section title="Discovery">
-                  <DiscoveryPanel discovery={discovery} />
-                </Section>
-                <Section title="Import Graph">
-                  <GraphView
-                    edges={multiDiscovery.edges}
-                    files={multiDiscovery.files}
-                  />
-                </Section>
-                <Section title="Fixture Graph">
-                  <FixtureGraphView hooks={discovery?.parsed.hooks ?? []} />
-                </Section>
-                <Section title="Output">
-                  <div className="h-48">
+              <div className="h-full flex flex-col">
+                <div className="shrink-0 overflow-auto max-h-[40%] border-b border-border">
+                  <Section title="Discovery">
+                    <DiscoveryPanel discovery={discovery} />
+                  </Section>
+                </div>
+                <div className="shrink-0 overflow-auto max-h-[30%] border-b border-border">
+                  <Section title="Import Graph">
+                    <GraphView
+                      edges={multiDiscovery.edges}
+                      files={multiDiscovery.files}
+                    />
+                  </Section>
+                  <Section title="Fixture Graph">
+                    <FixtureGraphView hooks={discovery?.parsed.hooks ?? []} />
+                  </Section>
+                </div>
+                <div className="flex-1 min-h-0">
+                  <Section title="Output" fill>
                     <TerminalOutput content={displayOutput} />
-                  </div>
-                </Section>
+                  </Section>
+                </div>
               </div>
             ) : (
               <>

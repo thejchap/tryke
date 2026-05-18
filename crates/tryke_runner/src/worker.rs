@@ -378,8 +378,20 @@ fn build_pythonpath(extra: &[&Path]) -> String {
     parts.join(sep)
 }
 
-fn convert_assertion(wire: AssertionWire, expected_arg_span: Option<(usize, usize)>) -> Assertion {
-    let (span_offset, span_length) = compute_subject_span(&wire.expression);
+fn convert_assertion(
+    wire: AssertionWire,
+    expected_assertion: Option<&ExpectedAssertion>,
+) -> Assertion {
+    let expression = expected_assertion
+        .and_then(|ea| (!ea.expression.is_empty()).then(|| ea.expression.clone()))
+        .unwrap_or(wire.expression);
+    let (span_offset, span_length) = expected_assertion
+        .and_then(|ea| ea.subject_span)
+        .unwrap_or_else(|| compute_subject_span(&expression));
+    let expected_arg_span = expected_assertion
+        .and_then(|ea| ea.expected_arg_span)
+        .or_else(|| expected_assertion.and_then(|ea| find_arg_span(&expression, ea)));
+    let line = expected_assertion.map_or(wire.line as usize, |ea| ea.line as usize);
     // Make absolute paths relative to cwd so diagnostics show short paths.
     let file = wire.file.map(|f| {
         std::env::current_dir()
@@ -393,9 +405,9 @@ fn convert_assertion(wire: AssertionWire, expected_arg_span: Option<(usize, usiz
             .unwrap_or(f)
     });
     Assertion {
-        expression: wire.expression,
+        expression,
         file,
-        line: wire.line as usize,
+        line,
         span_offset,
         span_length,
         expected: wire.expected,
@@ -427,24 +439,210 @@ fn find_arg_span(expression: &str, ea: &ExpectedAssertion) -> Option<(usize, usi
 /// Stops at the first top-level comma so that optional arguments like the
 /// label in `expect(val, "label")` are excluded from the span.
 fn compute_subject_span(expression: &str) -> (usize, usize) {
-    let Some(pos) = expression.find("expect(") else {
+    let Some((start, end)) = find_expect_first_arg_bounds(expression) else {
         return (0, expression.len().max(1));
     };
-    let start = pos + 7; // len("expect(")
-    let mut depth: u32 = 1;
-    for (i, ch) in expression[start..].char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' if depth == 1 => return (start, i.max(1)),
-            ')' => depth -= 1,
-            ',' if depth == 1 => {
-                let len = expression[start..start + i].trim_end().len();
-                return (start, len.max(1));
+    normalize_subject_span(expression, start, end)
+}
+
+fn find_expect_first_arg_bounds(expression: &str) -> Option<(usize, usize)> {
+    let pos = expression.find("expect(")?;
+    let start = pos + "expect(".len();
+    let bytes = expression.as_bytes();
+    let mut closers = vec![b')'];
+    let mut index = start;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' | b'"' => {
+                index = skip_python_string_literal(bytes, index);
+                continue;
+            }
+            b'(' => closers.push(b')'),
+            b'[' => closers.push(b']'),
+            b'{' => closers.push(b'}'),
+            b',' | b')' if closers.len() == 1 => return Some((start, index)),
+            b')' | b']' | b'}' if closers.last().copied() == Some(bytes[index]) => {
+                closers.pop();
             }
             _ => {}
         }
+        index += 1;
     }
-    (start, expression.len().saturating_sub(start).max(1))
+    Some((start, expression.len()))
+}
+
+fn skip_python_string_literal(bytes: &[u8], start: usize) -> usize {
+    let quote = bytes[start];
+    let triple = start + 2 < bytes.len() && bytes[start + 1] == quote && bytes[start + 2] == quote;
+    let mut index = start + if triple { 3 } else { 1 };
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            index = (index + 2).min(bytes.len());
+        } else if triple
+            && index + 2 < bytes.len()
+            && bytes[index] == quote
+            && bytes[index + 1] == quote
+            && bytes[index + 2] == quote
+        {
+            return index + 3;
+        } else if !triple && bytes[index] == quote {
+            return index + 1;
+        } else {
+            index += 1;
+        }
+    }
+    bytes.len()
+}
+
+fn normalize_subject_span(expression: &str, raw_start: usize, raw_end: usize) -> (usize, usize) {
+    let bytes = expression.as_bytes();
+    let mut start = raw_start;
+    while start < raw_end && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+
+    let mut end = raw_end;
+    while end > start && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+
+    (start, end.saturating_sub(start).max(1))
+}
+
+fn expected_end_line(ea: &ExpectedAssertion) -> u32 {
+    ea.end_line.max(ea.line)
+}
+
+fn expected_contains_line(ea: &ExpectedAssertion, line: u32) -> bool {
+    ea.line <= line && line <= expected_end_line(ea)
+}
+
+fn expected_contains_position(ea: &ExpectedAssertion, line: u32, column: Option<u32>) -> bool {
+    if !expected_contains_line(ea, line) {
+        return false;
+    }
+    let Some(column) = column else {
+        return true;
+    };
+    if line == ea.line
+        && let Some(start_column) = ea.start_column
+        && column < start_column
+    {
+        return false;
+    }
+    if line == expected_end_line(ea)
+        && let Some(end_column) = ea.end_column
+        && column > end_column
+    {
+        return false;
+    }
+    true
+}
+
+fn expected_rank(ea: &ExpectedAssertion) -> (u32, usize, u32) {
+    (
+        expected_end_line(ea) - ea.line,
+        ea.expression.len(),
+        ea.start_column.unwrap_or(u32::MAX),
+    )
+}
+
+fn expected_arg_value(ea: &ExpectedAssertion) -> Option<&str> {
+    if let Some(value) = ea.expected_arg_value.as_deref() {
+        return Some(value.trim());
+    }
+    let arg = ea.args.first()?.trim();
+    if let Some((name, value)) = split_keyword_arg_value(arg) {
+        debug_assert!(!name.is_empty());
+        Some(value.trim())
+    } else {
+        Some(arg)
+    }
+}
+
+fn split_keyword_arg_value(arg: &str) -> Option<(&str, &str)> {
+    let (name, value) = arg.split_once('=')?;
+    let name = name.trim();
+    let value = value.trim();
+    if name.is_empty() || value.starts_with('=') || !is_ascii_python_identifier(name) {
+        return None;
+    }
+    Some((name, value))
+}
+
+fn is_ascii_python_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn expected_arg_matches_wire(ea: &ExpectedAssertion, wire: &AssertionWire) -> bool {
+    expected_arg_value(ea).is_some_and(|arg| arg == wire.expected.trim())
+}
+
+fn select_expected_assertion<'a>(
+    expected_assertions: &'a [ExpectedAssertion],
+    wire: &AssertionWire,
+) -> Option<&'a ExpectedAssertion> {
+    let line_matches = expected_assertions
+        .iter()
+        .filter(|ea| expected_contains_line(ea, wire.line))
+        .collect::<Vec<_>>();
+    if wire.column.is_some() {
+        return line_matches
+            .iter()
+            .copied()
+            .filter(|ea| expected_contains_position(ea, wire.line, wire.column))
+            .min_by_key(|ea| expected_rank(ea))
+            .or_else(|| {
+                line_matches
+                    .iter()
+                    .copied()
+                    .min_by_key(|ea| expected_rank(ea))
+            });
+    }
+
+    let expected_matches = line_matches
+        .iter()
+        .copied()
+        .filter(|ea| expected_arg_matches_wire(ea, wire))
+        .collect::<Vec<_>>();
+    if let [ea] = expected_matches.as_slice() {
+        return Some(*ea);
+    }
+
+    let expression_matches = line_matches
+        .iter()
+        .copied()
+        .filter(|ea| !ea.expression.is_empty() && ea.expression == wire.expression)
+        .collect::<Vec<_>>();
+    if let [ea] = expression_matches.as_slice() {
+        return Some(*ea);
+    }
+
+    if let [ea] = line_matches.as_slice() {
+        Some(*ea)
+    } else {
+        None
+    }
+}
+
+fn map_executed_lines(lines: Vec<u32>, expected_assertions: &[ExpectedAssertion]) -> Vec<u32> {
+    lines
+        .into_iter()
+        .map(|line| {
+            let mut matches = expected_assertions
+                .iter()
+                .filter(|ea| expected_contains_line(ea, line));
+            match (matches.next(), matches.next()) {
+                (Some(ea), None) => ea.line,
+                _ => line,
+            }
+        })
+        .collect()
 }
 
 fn convert_result(test: TestItem, wire: RunTestResultWire) -> TestResult {
@@ -469,19 +667,13 @@ fn convert_result(test: TestItem, wire: RunTestResultWire) -> TestResult {
             stdout,
             stderr,
         } => {
-            let expected_by_line: std::collections::HashMap<u32, &ExpectedAssertion> = test
-                .expected_assertions
-                .iter()
-                .map(|ea| (ea.line, ea))
-                .collect();
-
+            let executed_lines = map_executed_lines(executed_lines, &test.expected_assertions);
             let assertions = assertions
                 .into_iter()
                 .map(|wire| {
-                    let expected_arg_span = expected_by_line
-                        .get(&wire.line)
-                        .and_then(|ea| find_arg_span(&wire.expression, ea));
-                    convert_assertion(wire, expected_arg_span)
+                    let expected_assertion =
+                        select_expected_assertion(&test.expected_assertions, &wire);
+                    convert_assertion(wire, expected_assertion)
                 })
                 .collect();
 
@@ -661,9 +853,17 @@ mod tests {
             expected: "2".into(),
             received: "3".into(),
             line: 10,
+            column: None,
             file: Some("tests/test_math.py".into()),
         };
-        let a = convert_assertion(wire, Some((19, 1)));
+        let expected = ExpectedAssertion {
+            subject: "x".into(),
+            matcher: "to_equal".into(),
+            args: vec!["2".into()],
+            line: 10,
+            ..Default::default()
+        };
+        let a = convert_assertion(wire, Some(&expected));
         assert_eq!(a.expression, "expect(x).to_equal(2)");
         assert_eq!(a.expected, "2");
         assert_eq!(a.received, "3");
@@ -673,6 +873,280 @@ mod tests {
         assert_eq!(a.span_offset, 7);
         assert_eq!(a.span_length, 1);
         assert_eq!(a.expected_arg_span, Some((19, 1)));
+    }
+
+    #[test]
+    fn convert_result_uses_discovered_multiline_assertion_source() {
+        let expression =
+            "t.expect(\n    expr=actual,\n    name=\"actual should be one\",\n).to_equal(other=1)";
+        let test = TestItem {
+            expected_assertions: vec![ExpectedAssertion {
+                subject: "actual".into(),
+                matcher: "to_equal".into(),
+                negated: false,
+                args: vec!["other=1".into()],
+                line: 7,
+                label: Some("actual should be one".into()),
+                end_line: 10,
+                start_column: Some(4),
+                end_column: Some(18),
+                expression: expression.into(),
+                subject_span: expression
+                    .find("actual")
+                    .map(|offset| (offset, "actual".len())),
+                expected_arg_span: expression
+                    .find("other=1")
+                    .map(|offset| (offset, "other=1".len())),
+                expected_arg_value: Some("1".into()),
+            }],
+            ..Default::default()
+        };
+        let result = convert_result(
+            test,
+            RunTestResultWire::Failed {
+                duration_ms: 1,
+                message: "assertion failed".into(),
+                traceback: None,
+                assertions: vec![AssertionWire {
+                    expression: ".to_equal(other=1)".into(),
+                    expected: "1".into(),
+                    received: "0".into(),
+                    line: 10,
+                    column: Some(6),
+                    file: Some("tests/test_multiline.py".into()),
+                }],
+                executed_lines: vec![10],
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        let TestOutcome::Failed {
+            assertions,
+            executed_lines,
+            ..
+        } = result.outcome
+        else {
+            panic!("expected failed outcome");
+        };
+        let assertion = &assertions[0];
+        assert_eq!(assertion.expression, expression);
+        assert_eq!(assertion.line, 7);
+        assert_eq!(assertion.span_offset, expression.find("actual").unwrap());
+        assert_eq!(
+            assertion.expected_arg_span,
+            expression.find("other=1").map(|offset| (offset, 7))
+        );
+        assert_eq!(executed_lines, vec![7]);
+    }
+
+    #[test]
+    fn convert_result_selects_inner_assertion_by_column() {
+        let test = TestItem {
+            expected_assertions: vec![
+                ExpectedAssertion {
+                    subject: "expect(0).to_equal(1)".into(),
+                    matcher: "to_be_truthy".into(),
+                    negated: false,
+                    args: vec![],
+                    line: 3,
+                    end_line: 3,
+                    start_column: Some(4),
+                    end_column: Some(45),
+                    expression: "expect(expect(0).to_equal(1)).to_be_truthy()".into(),
+                    subject_span: Some((7, 21)),
+                    expected_arg_span: None,
+                    expected_arg_value: None,
+                    label: None,
+                },
+                ExpectedAssertion {
+                    subject: "0".into(),
+                    matcher: "to_equal".into(),
+                    negated: false,
+                    args: vec!["1".into()],
+                    line: 3,
+                    end_line: 3,
+                    start_column: Some(11),
+                    end_column: Some(32),
+                    expression: "expect(0).to_equal(1)".into(),
+                    subject_span: Some((7, 1)),
+                    expected_arg_span: Some((19, 1)),
+                    expected_arg_value: Some("1".into()),
+                    label: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let result = convert_result(
+            test,
+            RunTestResultWire::Failed {
+                duration_ms: 1,
+                message: "assertion failed".into(),
+                traceback: None,
+                assertions: vec![AssertionWire {
+                    expression: "expect(expect(0).to_equal(1)).to_be_truthy()".into(),
+                    expected: "1".into(),
+                    received: "0".into(),
+                    line: 3,
+                    column: Some(21),
+                    file: None,
+                }],
+                executed_lines: vec![3],
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        let TestOutcome::Failed { assertions, .. } = result.outcome else {
+            panic!("expected failed outcome");
+        };
+        assert_eq!(assertions[0].expression, "expect(0).to_equal(1)");
+        assert_eq!(assertions[0].span_offset, 7);
+        assert_eq!(assertions[0].expected_arg_span, Some((19, 1)));
+    }
+
+    #[test]
+    fn convert_result_matches_same_line_assertion_by_expected_value_without_column() {
+        let second_expression = "expect(b).to_equal(other=2)";
+        let test = TestItem {
+            expected_assertions: vec![
+                ExpectedAssertion {
+                    subject: "a".into(),
+                    matcher: "to_equal".into(),
+                    negated: false,
+                    args: vec!["1".into()],
+                    line: 5,
+                    end_line: 5,
+                    expression: "expect(a).to_equal(1)".into(),
+                    subject_span: Some((7, 1)),
+                    expected_arg_span: Some((19, 1)),
+                    label: None,
+                    ..Default::default()
+                },
+                ExpectedAssertion {
+                    subject: "b".into(),
+                    matcher: "to_equal".into(),
+                    negated: false,
+                    args: vec!["other=2".into()],
+                    line: 5,
+                    end_line: 5,
+                    expression: second_expression.into(),
+                    subject_span: Some((7, 1)),
+                    expected_arg_span: second_expression
+                        .find("other=2")
+                        .map(|offset| (offset, "other=2".len())),
+                    label: None,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let result = convert_result(
+            test,
+            RunTestResultWire::Failed {
+                duration_ms: 1,
+                message: "assertion failed".into(),
+                traceback: None,
+                assertions: vec![AssertionWire {
+                    expression: "expect(a).to_equal(1); expect(b).to_equal(other=2)".into(),
+                    expected: "2".into(),
+                    received: "0".into(),
+                    line: 5,
+                    column: None,
+                    file: None,
+                }],
+                executed_lines: vec![5],
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        let TestOutcome::Failed { assertions, .. } = result.outcome else {
+            panic!("expected failed outcome");
+        };
+        assert_eq!(assertions[0].expression, second_expression);
+        assert_eq!(
+            assertions[0].expected_arg_span,
+            second_expression
+                .find("other=2")
+                .map(|offset| (offset, "other=2".len()))
+        );
+    }
+
+    #[test]
+    fn convert_result_keeps_runtime_expression_for_ambiguous_same_line_without_column() {
+        let runtime_expression = "expect(a).to_equal(1); expect(b).to_equal(1)";
+        let test = TestItem {
+            expected_assertions: vec![
+                ExpectedAssertion {
+                    subject: "a".into(),
+                    matcher: "to_equal".into(),
+                    negated: false,
+                    args: vec!["1".into()],
+                    line: 5,
+                    end_line: 5,
+                    expression: "expect(a).to_equal(1)".into(),
+                    subject_span: Some((7, 1)),
+                    label: None,
+                    ..Default::default()
+                },
+                ExpectedAssertion {
+                    subject: "b".into(),
+                    matcher: "to_equal".into(),
+                    negated: false,
+                    args: vec!["1".into()],
+                    line: 5,
+                    end_line: 5,
+                    expression: "expect(b).to_equal(1)".into(),
+                    subject_span: Some((7, 1)),
+                    label: None,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let result = convert_result(
+            test,
+            RunTestResultWire::Failed {
+                duration_ms: 1,
+                message: "assertion failed".into(),
+                traceback: None,
+                assertions: vec![AssertionWire {
+                    expression: runtime_expression.into(),
+                    expected: "1".into(),
+                    received: "0".into(),
+                    line: 5,
+                    column: None,
+                    file: None,
+                }],
+                executed_lines: vec![5],
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        let TestOutcome::Failed { assertions, .. } = result.outcome else {
+            panic!("expected failed outcome");
+        };
+        assert_eq!(assertions[0].expression, runtime_expression);
+    }
+
+    #[test]
+    fn expected_arg_value_only_splits_keyword_arguments() {
+        let positional = ExpectedAssertion {
+            args: vec!["x == y".into()],
+            ..Default::default()
+        };
+        assert_eq!(expected_arg_value(&positional), Some("x == y"));
+
+        let keyword = ExpectedAssertion {
+            args: vec!["other = 1".into()],
+            ..Default::default()
+        };
+        assert_eq!(expected_arg_value(&keyword), Some("1"));
+
+        let discovered_value = ExpectedAssertion {
+            args: vec!["other=x == y".into()],
+            expected_arg_value: Some("x == y".into()),
+            ..Default::default()
+        };
+        assert_eq!(expected_arg_value(&discovered_value), Some("x == y"));
     }
 
     #[test]
@@ -711,10 +1185,86 @@ mod tests {
     }
 
     #[test]
+    fn compute_subject_span_nested_list_with_label() {
+        let expression = "expect([1, {\"two\": (2, 3)}], \"label\")";
+        let (off, len) = compute_subject_span(expression);
+        let expected = "[1, {\"two\": (2, 3)}]";
+        let expected_off = expression.find(expected).expect("list subject");
+        assert_eq!(off, expected_off);
+        assert_eq!(len, expected.len());
+    }
+
+    #[test]
+    fn compute_subject_span_ignores_commas_inside_strings() {
+        let expression = "expect(\"a, b\", \"label\").to_equal(\"a, b\")";
+        let (off, len) = compute_subject_span(expression);
+        let expected = "\"a, b\"";
+        let expected_off = expression.find(expected).expect("string subject");
+        assert_eq!(off, expected_off);
+        assert_eq!(len, expected.len());
+    }
+
+    #[test]
+    fn compute_subject_span_ignores_parens_inside_triple_quoted_strings() {
+        let expression = "expect('''a) b''', \"label\").to_equal(\"a) b\")";
+        let (off, len) = compute_subject_span(expression);
+        let expected = "'''a) b'''";
+        let expected_off = expression.find(expected).expect("string subject");
+        assert_eq!(off, expected_off);
+        assert_eq!(len, expected.len());
+    }
+
+    #[test]
+    fn compute_subject_span_ignores_commas_inside_raw_strings() {
+        let expression = "expect(r\"a, b\", \"label\").to_equal(r\"a, b\")";
+        let (off, len) = compute_subject_span(expression);
+        let expected = "r\"a, b\"";
+        let expected_off = expression.find(expected).expect("raw string subject");
+        assert_eq!(off, expected_off);
+        assert_eq!(len, expected.len());
+    }
+
+    #[test]
     fn compute_subject_span_whitespace_before_comma() {
         let (off, len) = compute_subject_span("expect(val  , \"label\")");
         assert_eq!(off, 7);
         assert_eq!(len, 3); // "val" (trailing whitespace trimmed)
+    }
+
+    #[test]
+    fn compute_subject_span_multiline_keyword_expr_falls_back_to_keyword_arg() {
+        let expression = "t.expect(\n    expr=ctx.module_lines_call_count,\n    name=\"2nd call\"\n).to_equal(other=1)";
+        let (off, len) = compute_subject_span(expression);
+        let expected_off = expression
+            .find("expr=ctx.module_lines_call_count")
+            .expect("keyword subject in expression");
+        assert_eq!(off, expected_off);
+        assert_eq!(len, "expr=ctx.module_lines_call_count".len());
+    }
+
+    #[test]
+    fn compute_subject_span_uses_expected_subject_for_keyword_expr() {
+        let expression = "t.expect(\n    expr=ctx.module_lines_call_count,\n    name=\"2nd call\"\n).to_equal(other=1)";
+        let expected = ExpectedAssertion {
+            subject: "ctx.module_lines_call_count".into(),
+            matcher: "to_equal".into(),
+            negated: false,
+            args: vec!["other=1".into()],
+            line: 10,
+            label: Some("2nd call".into()),
+            subject_span: expression
+                .find("ctx.module_lines_call_count")
+                .map(|offset| (offset, "ctx.module_lines_call_count".len())),
+            ..Default::default()
+        };
+        let (off, len) = expected
+            .subject_span
+            .unwrap_or_else(|| compute_subject_span(expression));
+        let expected_off = expression
+            .find("ctx.module_lines_call_count")
+            .expect("subject in expression");
+        assert_eq!(off, expected_off);
+        assert_eq!(len, "ctx.module_lines_call_count".len());
     }
 
     fn make_expected(matcher: &str, args: &[&str], line: u32) -> ExpectedAssertion {
@@ -725,6 +1275,7 @@ mod tests {
             args: args.iter().map(|s| (*s).to_string()).collect(),
             line,
             label: None,
+            ..Default::default()
         }
     }
 
@@ -751,6 +1302,7 @@ mod tests {
             args: vec!["42".into()],
             line: 10,
             label: None,
+            ..Default::default()
         };
         let span = find_arg_span("expect(foo(bar(1))).to_equal(42)", &ea);
         assert_eq!(span, Some((29, 2)));
@@ -761,6 +1313,15 @@ mod tests {
         let ea = make_expected("to_equal", &["\"hello\""], 10);
         let span = find_arg_span("expect(x).to_equal(\"hello\")", &ea);
         assert_eq!(span, Some((19, 7)));
+    }
+
+    #[test]
+    fn find_arg_span_keyword_arg() {
+        let ea = make_expected("to_equal", &["other=1"], 10);
+        let expression = "expect(x).to_equal(other=1)";
+        let span = find_arg_span(expression, &ea);
+        let expected_offset = expression.find("other=1").expect("arg in expression");
+        assert_eq!(span, Some((expected_offset, 7)));
     }
 
     #[test]

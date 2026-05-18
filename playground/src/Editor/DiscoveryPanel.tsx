@@ -45,17 +45,26 @@ function TestRow({ t }: { t: TestItem }) {
         <span className="text-text-dim">:{t.line_number}</span>
       )}
       {t.skip != null && (
-        <span className="text-yellow text-xs px-1 rounded bg-yellow/10">
+        <span
+          className="text-yellow text-xs px-1 rounded bg-yellow/10"
+          title={t.skip || "This test is skipped"}
+        >
           skip
         </span>
       )}
       {t.todo != null && (
-        <span className="text-accent text-xs px-1 rounded bg-accent/10">
+        <span
+          className="text-accent text-xs px-1 rounded bg-accent/10"
+          title={t.todo || "This test is not yet implemented"}
+        >
           todo
         </span>
       )}
       {t.xfail != null && (
-        <span className="text-text-dim text-xs px-1 rounded bg-text-dim/10">
+        <span
+          className="text-text-dim text-xs px-1 rounded bg-text-dim/10"
+          title={t.xfail || "This test is expected to fail"}
+        >
           xfail
         </span>
       )}
@@ -175,7 +184,16 @@ export function DiscoveryPanel({ discovery }: Props) {
               <li key={i} className="flex items-center gap-2">
                 <span className="text-accent">&#x25cf;</span>
                 <span className="text-text">{h.name}</span>
-                <span className="text-text-dim text-xs">per:{h.per}</span>
+                <span
+                  className="text-text-dim text-xs"
+                  title={
+                    h.per === "test"
+                      ? "Re-created for each test"
+                      : "Created once, shared across all tests"
+                  }
+                >
+                  per:{h.per}
+                </span>
                 {(h.depends_on?.length ?? 0) > 0 && (
                   <span className="text-text-dim text-xs">
                     deps: {h.depends_on?.join(", ")}

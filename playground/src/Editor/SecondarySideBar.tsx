@@ -8,7 +8,8 @@ interface Props {
 
 const TABS: { id: SecondaryTool; label: string }[] = [
   { id: "discovery", label: "Discovery" },
-  { id: "graph", label: "Graph" },
+  { id: "import-graph", label: "Import Graph" },
+  { id: "fixture-graph", label: "Fixture Graph" },
   { id: "output", label: "Output" },
 ];
 

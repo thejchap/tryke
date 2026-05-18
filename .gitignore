@@ -1,6 +1,9 @@
 /target
 /dist
 .worktrees/
+node_modules/
+playground/src/wasm/pkg/
+*.tsbuildinfo
 __pycache__/
 *.pyc
 

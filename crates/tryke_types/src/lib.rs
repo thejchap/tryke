@@ -259,6 +259,20 @@ pub struct HookItem {
     pub line_number: Option<u32>,
 }
 
+/// Everything derivable from a single parse of a Python source file:
+/// the `ParsedFile` (tests, hooks, guard-else lines, errors), the
+/// candidate import paths this file references, and the dynamic-import
+/// flag. Produced in one AST walk so callers never parse the file
+/// twice. `import_candidates` holds first-wins alternatives that the
+/// discoverer resolves against the project's enumerated file set,
+/// avoiding per-import `stat()` syscalls.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DiscoveredFile {
+    pub parsed: ParsedFile,
+    pub import_candidates: Vec<Vec<PathBuf>>,
+    pub dynamic_imports: bool,
+}
+
 /// The complete result of parsing a single Python source file.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ParsedFile {

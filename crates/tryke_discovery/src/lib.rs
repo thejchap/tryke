@@ -1,25 +1,35 @@
-use std::{
-    env, fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
+#[cfg(feature = "native")]
+use std::{env, fs};
+
+#[cfg(feature = "native")]
+use ignore::WalkBuilder;
+#[cfg(feature = "native")]
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
+#[cfg(feature = "native")]
 use log::trace;
+#[cfg(feature = "native")]
 use rayon::prelude::*;
 
+#[cfg(feature = "native")]
 pub(crate) mod cache;
+#[cfg(feature = "native")]
 pub(crate) mod db;
+#[cfg(feature = "native")]
 mod discoverer;
+#[cfg(feature = "native")]
 pub(crate) mod import_graph;
+#[cfg(feature = "native")]
 pub use discoverer::Discoverer;
 
-use ignore::WalkBuilder;
 use ruff_python_ast::{Expr, Stmt};
 use ruff_python_parser::parse_module;
 use ruff_source_file::LineIndex;
 use ruff_text_size::Ranged;
 use tryke_types::{ExpectedAssertion, FixturePer, HookItem, ParsedFile, TestItem};
 
+#[cfg(feature = "native")]
 pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
     start
         .ancestors()
@@ -27,6 +37,7 @@ pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+#[cfg(feature = "native")]
 #[must_use]
 pub fn configured_excludes(start: &Path, cli_excludes: &[String]) -> Vec<String> {
     if !cli_excludes.is_empty() {
@@ -35,6 +46,7 @@ pub fn configured_excludes(start: &Path, cli_excludes: &[String]) -> Vec<String>
     tryke_config::load_effective_config(start).discovery.exclude
 }
 
+#[cfg(feature = "native")]
 fn build_excludes(root: &Path, excludes: &[String]) -> Gitignore {
     let mut builder = GitignoreBuilder::new(root);
     for exclude in excludes {
@@ -53,6 +65,7 @@ fn build_excludes(root: &Path, excludes: &[String]) -> Gitignore {
 /// than propagating an error, matching the watcher's existing
 /// behaviour: degraded into "let everything through" is preferable to
 /// blocking discovery entirely.
+#[cfg(feature = "native")]
 #[must_use]
 pub fn build_change_set_ignore(root: &Path, excludes: &[String]) -> Gitignore {
     let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
@@ -65,6 +78,7 @@ pub fn build_change_set_ignore(root: &Path, excludes: &[String]) -> Gitignore {
     builder.build().unwrap_or_else(|_| Gitignore::empty())
 }
 
+#[cfg(feature = "native")]
 pub(crate) fn collect_python_files(root: &Path, excludes: &[String]) -> Vec<PathBuf> {
     let exclude_matcher = build_excludes(root, excludes);
     WalkBuilder::new(root)
@@ -81,15 +95,7 @@ pub(crate) fn collect_python_files(root: &Path, excludes: &[String]) -> Vec<Path
         .collect()
 }
 
-/// Like `collect_python_files`, but walks only the supplied `walk_roots`
-/// instead of the whole project. Used by the path-restricted discovery
-/// fast path (`Discoverer::rediscover_restricted`) so a `tryke test
-/// path/to/foo.py` invocation doesn't pay an O(project-files) walk.
-///
-/// `walk_roots` may contain absolute paths to either directories or
-/// individual `.py` files. The exclude matcher is anchored at
-/// `project_root` so `pyproject.toml` exclude patterns evaluate against
-/// project-relative paths exactly as in the full walk.
+#[cfg(feature = "native")]
 pub(crate) fn collect_python_files_restricted(
     project_root: &Path,
     walk_roots: &[PathBuf],
@@ -103,9 +109,6 @@ pub(crate) fn collect_python_files_restricted(
     };
     let mut paths: Vec<PathBuf> = Vec::new();
     for walk_root in walk_roots {
-        // `WalkBuilder::new(p)` works on either a directory or a single
-        // file; routing both through it keeps gitignore / .ignore / hidden
-        // semantics consistent with `collect_python_files`.
         for entry in WalkBuilder::new(walk_root).build().filter_map(Result::ok) {
             if !entry.file_type().is_some_and(|t| t.is_file()) {
                 continue;
@@ -186,15 +189,16 @@ fn candidate_relative_import_paths(root: &Path, base: &Path, module_name: &str) 
 /// is whichever candidate in the group exists first, per Python's
 /// import semantics (plain `.py` before the package `__init__.py`). The
 /// outer caller resolves against a `HashSet` of enumerated project files.
-pub(crate) type ImportCandidateGroup = Vec<PathBuf>;
+pub type ImportCandidateGroup = Vec<PathBuf>;
 
 /// Resolve candidate groups against a `HashSet` of project-local files,
 /// preserving insertion order and deduplicating across groups. Picks the
 /// first existing candidate within each group, matching the old
 /// `resolve_absolute_import` / `resolve_relative_import_path` contract.
-pub(crate) fn resolve_import_candidate_groups(
+#[must_use]
+pub fn resolve_import_candidate_groups<S: ::std::hash::BuildHasher>(
     groups: &[ImportCandidateGroup],
-    project_files: &std::collections::HashSet<PathBuf>,
+    project_files: &std::collections::HashSet<PathBuf, S>,
 ) -> Vec<PathBuf> {
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut out: Vec<PathBuf> = Vec::new();
@@ -1761,19 +1765,22 @@ fn collect_doctests_from_body(
 /// imports this file depends on, and whether it contains dynamic imports.
 /// Folding all three derivations into a single AST walk avoids the prior
 /// cold-start cost of parsing each file twice.
-pub(crate) fn discover_file_from_source(
+#[must_use]
+pub fn discover_file_from_source(
     root: &Path,
     src_roots: &[PathBuf],
     file: &Path,
     source: &str,
-) -> crate::db::DiscoveredFile {
+) -> tryke_types::DiscoveredFile {
+    #[cfg(feature = "native")]
     trace!(
         "parsing {}",
         file.strip_prefix(root).unwrap_or(file).display()
     );
     let Ok(parsed) = parse_module(source) else {
+        #[cfg(feature = "native")]
         trace!("parse error in {}", file.display());
-        return crate::db::DiscoveredFile::default();
+        return tryke_types::DiscoveredFile::default();
     };
     let line_index = LineIndex::from_source_text(source);
     let module = parsed.syntax();
@@ -1799,10 +1806,11 @@ pub(crate) fn discover_file_from_source(
     let testing_guard_else_lines = find_testing_guard_else_lines(body, &line_index);
     let import_candidates = extract_local_import_candidate_groups(root, src_roots, file, body);
     let dynamic_imports = has_dynamic_imports(body);
+    #[cfg(feature = "native")]
     for err in &errors {
         log::error!("tryke discovery: {err}");
     }
-    crate::db::DiscoveredFile {
+    tryke_types::DiscoveredFile {
         parsed: ParsedFile {
             tests,
             hooks,
@@ -1814,7 +1822,8 @@ pub(crate) fn discover_file_from_source(
     }
 }
 
-pub(crate) fn parse_tests_from_source(
+#[must_use]
+pub fn parse_tests_from_source(
     root: &Path,
     src_roots: &[PathBuf],
     file: &Path,
@@ -1823,6 +1832,7 @@ pub(crate) fn parse_tests_from_source(
     discover_file_from_source(root, src_roots, file, source).parsed
 }
 
+#[cfg(feature = "native")]
 fn parse_tests_from_file(root: &Path, src_roots: &[PathBuf], file: &Path) -> ParsedFile {
     let Ok(source) = fs::read_to_string(file) else {
         return ParsedFile::default();
@@ -1830,18 +1840,21 @@ fn parse_tests_from_file(root: &Path, src_roots: &[PathBuf], file: &Path) -> Par
     parse_tests_from_source(root, src_roots, file, &source)
 }
 
+#[cfg(feature = "native")]
 #[must_use]
 pub fn discover_from(start: &Path) -> Vec<TestItem> {
     let config = tryke_config::load_effective_config(start);
     discover_from_with_options(start, &config.discovery.exclude, &config.discovery.src)
 }
 
+#[cfg(feature = "native")]
 #[must_use]
 pub fn discover_from_with_excludes(start: &Path, excludes: &[String]) -> Vec<TestItem> {
     let src = tryke_config::load_effective_config(start).discovery.src;
     discover_from_with_options(start, excludes, &src)
 }
 
+#[cfg(feature = "native")]
 #[must_use]
 pub fn discover_from_with_options(
     start: &Path,
@@ -1875,11 +1888,19 @@ pub fn resolve_src_roots(root: &Path, src: &[String]) -> Vec<PathBuf> {
     src.iter()
         .map(|entry| {
             let joined = root.join(entry);
-            joined.canonicalize().unwrap_or(joined)
+            #[cfg(feature = "native")]
+            {
+                joined.canonicalize().unwrap_or(joined)
+            }
+            #[cfg(not(feature = "native"))]
+            {
+                joined
+            }
         })
         .collect()
 }
 
+#[cfg(feature = "native")]
 /// # Errors
 /// Returns an error if the current directory cannot be determined.
 pub fn discover() -> std::io::Result<Vec<TestItem>> {

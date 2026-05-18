@@ -228,3 +228,5 @@ __marimo__/
 demo/*.gif
 demo/*.webm
 demo/*.mp4
+
+.wrangler

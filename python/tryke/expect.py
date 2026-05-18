@@ -807,7 +807,13 @@ class ExpectationError(AssertionError):
         received: String describing what was actually received.
     """
 
-    def __init__(self, message: str, *, expected: str, received: str) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        expected: str,
+        received: str,
+    ) -> None:
         super().__init__(message)
         self.expected = expected
         self.received = received
@@ -909,7 +915,12 @@ class Expectation[T]:
         ```
     """
 
-    def __init__(self, value: T, *, negated: bool = False) -> None:
+    def __init__(
+        self,
+        value: T,
+        *,
+        negated: bool = False,
+    ) -> None:
         self._value: T = value
         self._negated: bool = negated
 
@@ -927,7 +938,10 @@ class Expectation[T]:
 
             ```
         """
-        return Expectation(self._value, negated=not self._negated)
+        return Expectation(
+            self._value,
+            negated=not self._negated,
+        )
 
     def _assert(
         self,
@@ -939,8 +953,6 @@ class Expectation[T]:
     ) -> MatchResult:
         ok = (not passed) if self._negated else passed
         ctx = _soft_ctx.value
-        # Resolve the caller frame once so we can record the line for the
-        # executed-lines tracker and reuse it in the failure path.
         frame = _caller_frame() if ctx is not None else None
         if ctx is not None and frame is not None and frame.lineno is not None:
             ctx.executed_lines.append(frame.lineno)
@@ -949,7 +961,9 @@ class Expectation[T]:
         prefix = "expected not " if self._negated else "expected "
         actual_expected = ("not " + expected) if self._negated else expected
         err = ExpectationError(
-            prefix + message, expected=actual_expected, received=received
+            prefix + message,
+            expected=actual_expected,
+            received=received,
         )
         if ctx is not None:
             ctx.failures.append(SoftFailure(err, frame))

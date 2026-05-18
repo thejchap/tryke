@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import io
 import json
 import sys
@@ -173,6 +174,96 @@ with describe("run_test outcomes"):
         result = _run_test_fn(fn)
         expect(result["outcome"], "soft failures fail the test").to_equal("failed")
         expect(result["assertions"], "both soft failures collected").to_have_length(2)
+
+    @test(name="multiline soft assertion reports the runtime frame")
+    def test_multiline_soft_failure_expression() -> None:
+        def fn() -> None:
+            actual = 0
+            expect(
+                actual,
+                "actual should be one",
+            ).to_equal(1)
+
+        source_lines, start_line = inspect.getsourcelines(fn)
+        matcher_line = next(
+            start_line + i for i, line in enumerate(source_lines) if ".to_equal" in line
+        )
+        result = _run_test_fn(fn)
+        assertion = result["assertions"][0]
+        expect(
+            assertion["line"], "failure line is the runtime assertion line"
+        ).to_equal(matcher_line)
+        expect(
+            assertion["expression"], "failure expression includes the runtime line"
+        ).to_contain(".to_equal(1)")
+
+    @test(name="keyword multiline assertion reports the runtime frame")
+    def test_keyword_multiline_soft_failure_expression() -> None:
+        def fn() -> None:
+            actual = 0
+            expect(
+                expr=actual,
+                name="actual should be one",
+            ).to_equal(other=1)
+
+        source_lines, start_line = inspect.getsourcelines(fn)
+        matcher_line = next(
+            start_line + i for i, line in enumerate(source_lines) if ".to_equal" in line
+        )
+        result = _run_test_fn(fn)
+        assertion = result["assertions"][0]
+        expect(assertion["line"], "keyword failure line is the runtime line").to_equal(
+            matcher_line
+        )
+        expect(
+            assertion["expression"], "keyword expression includes matcher argument"
+        ).to_contain(".to_equal(other=1)")
+
+    @test(name="stored expectation reports the assertion line")
+    def test_stored_expectation_reports_assertion_line() -> None:
+        def fn() -> None:
+            actual = 0
+            assertion = expect(actual, "stored expectation")
+            assertion.to_equal(1)
+
+        source_lines, start_line = inspect.getsourcelines(fn)
+        assertion_line = next(
+            start_line + i
+            for i, line in enumerate(source_lines)
+            if "assertion.to_equal" in line
+        )
+        result = _run_test_fn(fn)
+        assertion = result["assertions"][0]
+        expect(assertion["line"], "failure line is the assertion line").to_equal(
+            assertion_line
+        )
+        expect(
+            assertion["expression"], "failure expression is the assertion call"
+        ).to_equal("assertion.to_equal(1)")
+
+    @test(name="stored multiline expectation reports assertion line")
+    def test_stored_multiline_expectation_reports_full_assertion() -> None:
+        def fn() -> None:
+            actual = 0
+            assertion = expect(actual, "stored expectation")
+            assertion.to_equal(
+                1,
+            )
+
+        source_lines, start_line = inspect.getsourcelines(fn)
+        assertion_line = next(
+            start_line + i
+            for i, line in enumerate(source_lines)
+            if "assertion.to_equal" in line
+        )
+        result = _run_test_fn(fn)
+        assertion = result["assertions"][0]
+        expect(assertion["line"], "failure line is the assertion line").to_equal(
+            assertion_line
+        )
+        expect(
+            assertion["expression"], "failure expression includes assertion call"
+        ).to_contain("assertion.to_equal(")
 
     @test(name="general exception")
     def test_general_exception() -> None:

@@ -1991,7 +1991,7 @@ dependencies = [
 
 [[package]]
 name = "tryke"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2017,7 +2017,7 @@ dependencies = [
 
 [[package]]
 name = "tryke_config"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "log",
  "serde",
@@ -2027,14 +2027,14 @@ dependencies = [
 
 [[package]]
 name = "tryke_dev"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "tryke",
 ]
 
 [[package]]
 name = "tryke_discovery"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "ignore",
  "log",
@@ -2053,7 +2053,7 @@ dependencies = [
 
 [[package]]
 name = "tryke_reporter"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "clearscreen",
  "console 0.15.11",
@@ -2069,7 +2069,7 @@ dependencies = [
 
 [[package]]
 name = "tryke_runner"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -2086,7 +2086,7 @@ dependencies = [
 
 [[package]]
 name = "tryke_server"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2109,14 +2109,14 @@ dependencies = [
 
 [[package]]
 name = "tryke_testing"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "tryke_config",
 ]
 
 [[package]]
 name = "tryke_types"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "serde",
  "serde_json",
@@ -2124,7 +2124,7 @@ dependencies = [
 
 [[package]]
 name = "tryke_wasm"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "js-sys",
  "serde",

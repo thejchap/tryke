@@ -49,6 +49,7 @@ class AssertionWire(TypedDict):
     expected: str
     received: str
     line: int
+    column: NotRequired[int]
     span_offset: int
     span_length: int
     file: NotRequired[str]
@@ -234,6 +235,8 @@ def _make_assertion_wire(
         "span_length": 0,
     }
     if frame is not None:
+        if frame.colno is not None:
+            wire["column"] = frame.colno
         wire["file"] = frame.filename
     return wire
 

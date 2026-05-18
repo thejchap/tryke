@@ -66,5 +66,9 @@ export interface MultiResult {
 }
 
 export type ReporterName = "text" | "dot" | "json" | "llm";
-export type SecondaryTool = "discovery" | "graph" | "output";
+export type SecondaryTool =
+  | "discovery"
+  | "import-graph"
+  | "fixture-graph"
+  | "output";
 export type RunStatus = "idle" | "running" | "done";

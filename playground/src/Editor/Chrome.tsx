@@ -7,8 +7,10 @@ import type {
   RunStatus,
   SecondaryTool,
 } from "./types";
-import { DEFAULT_FILES, EXAMPLES } from "./constants";
+import { EXAMPLES } from "./constants";
 import { Editor } from "./Editor";
+
+const DESCRIBE_EXAMPLE = EXAMPLES[3]!;
 
 interface WasmModule {
   discover: (source: string, filename: string) => DiscoveredFile;
@@ -22,10 +24,9 @@ interface WasmModule {
 }
 
 export function Chrome() {
-  const [files, setFiles] = useState<PlaygroundFile[]>(DEFAULT_FILES);
+  const [files, setFiles] = useState<PlaygroundFile[]>(DESCRIBE_EXAMPLE.files);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
-  const [secondaryTool, setSecondaryTool] =
-    useState<SecondaryTool>("discovery");
+  const [secondaryTool, setSecondaryTool] = useState<SecondaryTool>("output");
   const [reporter, setReporter] = useState<ReporterName>("text");
   const [pyodideReady, setPyodideReady] = useState(false);
   const [terminalOutput, setTerminalOutput] = useState("");
@@ -39,6 +40,8 @@ export function Chrome() {
   const lastResultsRef = useRef<string>("");
   const wasmRef = useRef<WasmModule | null>(null);
   const reporterRef = useRef<ReporterName>(reporter);
+  const runTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hasAutoRun = useRef(false);
 
   useEffect(() => {
     wasmRef.current = wasm;
@@ -120,7 +123,6 @@ export function Chrome() {
 
     const activeFile = files[activeFileIndex]!;
 
-    // Discover tests first
     let tests;
     try {
       const discovery = wasm.discover(activeFile.source, activeFile.name);
@@ -140,7 +142,7 @@ export function Chrome() {
     }
 
     setRunStatus("running");
-    setTerminalOutput("Running tests...");
+    setTerminalOutput("");
     setSecondaryTool("output");
 
     workerRef.current?.postMessage({
@@ -152,10 +154,30 @@ export function Chrome() {
     });
   }, [pyodideReady, wasm, files, activeFileIndex]);
 
-  // Cmd+R / Ctrl+R shortcut to run tests
+  // Auto-run on initial Pyodide ready
+  useEffect(() => {
+    if (pyodideReady && wasm && !hasAutoRun.current) {
+      hasAutoRun.current = true;
+      handleRun();
+    }
+  }, [pyodideReady, wasm, handleRun]);
+
+  // Re-run on source change (debounced)
+  useEffect(() => {
+    if (!pyodideReady || !wasm) return;
+    if (runTimerRef.current) clearTimeout(runTimerRef.current);
+    runTimerRef.current = setTimeout(() => {
+      handleRun();
+    }, 500);
+    return () => {
+      if (runTimerRef.current) clearTimeout(runTimerRef.current);
+    };
+  }, [files, activeFileIndex, pyodideReady, wasm, handleRun]);
+
+  // Cmd+Enter / Ctrl+Enter shortcut to run tests
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "r") {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
         e.preventDefault();
         handleRun();
       }
@@ -209,11 +231,22 @@ export function Chrome() {
     <div className="h-full flex flex-col bg-bg text-text">
       {/* Toolbar */}
       <div className="flex items-center gap-3 px-4 py-2 border-b border-border bg-surface">
-        <img src="/logo.png" alt="tryke" className="h-6 w-6 rounded" />
-        <h1 className="text-sm font-bold text-accent">Tryke Playground</h1>
+        <a href="/" className="flex items-center gap-2 hover:opacity-80">
+          <img src="/logo.png" alt="tryke" className="h-6 w-6 rounded" />
+          <h1 className="text-sm font-bold text-accent">Tryke Playground</h1>
+        </a>
         {wasmVersion && (
           <span className="text-xs text-text-dim">v{wasmVersion}</span>
         )}
+
+        <a
+          href="https://tryke.dev"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-xs text-text-dim hover:text-accent transition-colors"
+        >
+          Docs
+        </a>
 
         <div className="flex-1" />
 
@@ -260,7 +293,7 @@ export function Chrome() {
           disabled={!pyodideReady || runStatus === "running"}
           className="text-xs font-bold px-3 py-1 rounded bg-green/20 text-green hover:bg-green/30 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
-          {runStatus === "running" ? "Running..." : "Run ⌘R"}
+          {runStatus === "running" ? "Running..." : "Run ⌘⏎"}
         </button>
       </div>
 

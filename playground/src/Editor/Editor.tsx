@@ -12,6 +12,7 @@ import type {
 import { SourceEditor } from "./SourceEditor";
 import { DiscoveryPanel } from "./DiscoveryPanel";
 import { GraphView } from "./GraphView";
+import { FixtureGraphView } from "./FixtureGraphView";
 import { TerminalOutput } from "./TerminalOutput";
 import { SecondarySideBar } from "./SecondarySideBar";
 
@@ -111,11 +112,14 @@ export function Editor({
             {secondaryTool === "discovery" && (
               <DiscoveryPanel discovery={discovery} />
             )}
-            {secondaryTool === "graph" && (
+            {secondaryTool === "import-graph" && (
               <GraphView
                 edges={multiDiscovery.edges}
                 files={multiDiscovery.files}
               />
+            )}
+            {secondaryTool === "fixture-graph" && (
+              <FixtureGraphView hooks={discovery?.parsed.hooks ?? []} />
             )}
             {secondaryTool === "output" && (
               <TerminalOutput content={displayOutput} />

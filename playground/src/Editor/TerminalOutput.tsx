@@ -65,7 +65,7 @@ export function TerminalOutput({ content }: Props) {
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
-    term.clear();
+    term.reset();
     if (content) {
       term.write(content);
     }

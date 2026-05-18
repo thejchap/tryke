@@ -168,7 +168,7 @@ export function Chrome() {
     if (runTimerRef.current) clearTimeout(runTimerRef.current);
     runTimerRef.current = setTimeout(() => {
       handleRun();
-    }, 500);
+    }, 50);
     return () => {
       if (runTimerRef.current) clearTimeout(runTimerRef.current);
     };
@@ -244,6 +244,7 @@ export function Chrome() {
           target="_blank"
           rel="noopener noreferrer"
           className="text-xs text-text-dim hover:text-accent transition-colors"
+          title="Open tryke documentation"
         >
           Docs
         </a>
@@ -255,6 +256,7 @@ export function Chrome() {
           className="text-xs bg-bg border border-border rounded px-2 py-1 text-text"
           value=""
           onChange={(e) => handleLoadExample(Number(e.target.value))}
+          title="Load a pre-built example"
         >
           <option value="" disabled>
             Examples
@@ -271,6 +273,7 @@ export function Chrome() {
           className="text-xs bg-bg border border-border rounded px-2 py-1 text-text"
           value={reporter}
           onChange={(e) => setReporter(e.target.value as ReporterName)}
+          title="Output format (same as --reporter CLI flag)"
         >
           <option value="text">text</option>
           <option value="dot">dot</option>
@@ -283,6 +286,11 @@ export function Chrome() {
           className={`text-xs px-2 py-0.5 rounded ${
             pyodideReady ? "bg-green/10 text-green" : "bg-yellow/10 text-yellow"
           }`}
+          title={
+            pyodideReady
+              ? "Pyodide (CPython in WebAssembly) is loaded and ready to run tests"
+              : "Loading Pyodide — tests will run once it finishes"
+          }
         >
           {pyodideReady ? "Python ready" : "Loading Python..."}
         </span>
@@ -292,6 +300,7 @@ export function Chrome() {
           onClick={handleRun}
           disabled={!pyodideReady || runStatus === "running"}
           className="text-xs font-bold px-3 py-1 rounded bg-green/20 text-green hover:bg-green/30 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          title="Run tests in the active file (⌘Enter)"
         >
           {runStatus === "running" ? "Running..." : "Run ⌘⏎"}
         </button>
@@ -317,6 +326,7 @@ export function Chrome() {
                   handleRemoveFile(i);
                 }}
                 className="ml-1 text-text-dim hover:text-red text-[10px]"
+                title="Remove file"
               >
                 x
               </button>
@@ -344,6 +354,7 @@ export function Chrome() {
           <button
             onClick={() => setShowNewFile(true)}
             className="px-2 py-1.5 text-xs text-text-dim hover:text-text"
+            title="Add a new file"
           >
             +
           </button>

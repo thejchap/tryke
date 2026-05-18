@@ -14,6 +14,8 @@ const TABS: { id: SecondaryTool; label: string }[] = [
 ];
 
 export function SecondarySideBar({ active, onChange, hasOutput }: Props) {
+  const isAll = active === "all";
+
   return (
     <div className="flex border-b border-border">
       {TABS.map((tab) => (
@@ -21,7 +23,7 @@ export function SecondarySideBar({ active, onChange, hasOutput }: Props) {
           key={tab.id}
           onClick={() => onChange(tab.id)}
           className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-            active === tab.id
+            !isAll && active === tab.id
               ? "text-accent border-b-2 border-accent"
               : "text-text-dim hover:text-text"
           }`}
@@ -32,6 +34,18 @@ export function SecondarySideBar({ active, onChange, hasOutput }: Props) {
           )}
         </button>
       ))}
+      <div className="flex-1" />
+      <button
+        onClick={() => onChange(isAll ? "output" : "all")}
+        title={isAll ? "Show single panel" : "Show all panels"}
+        className={`px-2 py-1.5 text-xs font-medium transition-colors ${
+          isAll
+            ? "text-accent border-b-2 border-accent"
+            : "text-text-dim hover:text-text"
+        }`}
+      >
+        ⊞
+      </button>
     </div>
   );
 }

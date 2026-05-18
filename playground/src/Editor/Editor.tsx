@@ -1,4 +1,4 @@
-import { useDeferredValue, useMemo } from "react";
+import { type ReactNode, useDeferredValue, useMemo } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 
 import type {
@@ -15,6 +15,17 @@ import { GraphView } from "./GraphView";
 import { FixtureGraphView } from "./FixtureGraphView";
 import { TerminalOutput } from "./TerminalOutput";
 import { SecondarySideBar } from "./SecondarySideBar";
+
+function Section({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className="border-b border-border">
+      <div className="px-3 py-1.5 text-xs font-bold text-text-dim bg-bg/50 border-b border-border">
+        {title}
+      </div>
+      {children}
+    </div>
+  );
+}
 
 interface WasmModule {
   discover: (source: string, filename: string) => DiscoveredFile;
@@ -109,20 +120,44 @@ export function Editor({
             hasOutput={terminalOutput.length > 0}
           />
           <div className="flex-1 overflow-hidden">
-            {secondaryTool === "discovery" && (
-              <DiscoveryPanel discovery={discovery} />
-            )}
-            {secondaryTool === "import-graph" && (
-              <GraphView
-                edges={multiDiscovery.edges}
-                files={multiDiscovery.files}
-              />
-            )}
-            {secondaryTool === "fixture-graph" && (
-              <FixtureGraphView hooks={discovery?.parsed.hooks ?? []} />
-            )}
-            {secondaryTool === "output" && (
-              <TerminalOutput content={displayOutput} />
+            {secondaryTool === "all" ? (
+              <div className="h-full overflow-auto">
+                <Section title="Discovery">
+                  <DiscoveryPanel discovery={discovery} />
+                </Section>
+                <Section title="Import Graph">
+                  <GraphView
+                    edges={multiDiscovery.edges}
+                    files={multiDiscovery.files}
+                  />
+                </Section>
+                <Section title="Fixture Graph">
+                  <FixtureGraphView hooks={discovery?.parsed.hooks ?? []} />
+                </Section>
+                <Section title="Output">
+                  <div className="h-48">
+                    <TerminalOutput content={displayOutput} />
+                  </div>
+                </Section>
+              </div>
+            ) : (
+              <>
+                {secondaryTool === "discovery" && (
+                  <DiscoveryPanel discovery={discovery} />
+                )}
+                {secondaryTool === "import-graph" && (
+                  <GraphView
+                    edges={multiDiscovery.edges}
+                    files={multiDiscovery.files}
+                  />
+                )}
+                {secondaryTool === "fixture-graph" && (
+                  <FixtureGraphView hooks={discovery?.parsed.hooks ?? []} />
+                )}
+                {secondaryTool === "output" && (
+                  <TerminalOutput content={displayOutput} />
+                )}
+              </>
             )}
           </div>
         </div>

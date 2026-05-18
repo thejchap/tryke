@@ -72,14 +72,27 @@ bun install
 bun run dev
 ```
 
-to deploy manually to Cloudflare Pages:
+to deploy a preview manually to Cloudflare Pages:
 
 ```bash
-bunx wrangler pages deploy playground/dist --project-name=tryke-playground
+cd playground
+bun run build
+bunx wrangler pages deploy dist --project-name=tryke-playground
 ```
 
+this creates a preview deployment at a unique URL (e.g.
+`<hash>.tryke-playground.pages.dev`). to promote a preview to production:
+
+```bash
+bunx wrangler pages deployment create tryke-playground --commit-hash=<hash>
+```
+
+where `<hash>` is the deployment hash from the preview URL. you can also
+promote from the Cloudflare dashboard under Workers & Pages → tryke-playground
+→ Deployments → ⋯ → Retry deployment.
+
 pushes to `main` that touch the playground or WASM crates deploy automatically
-via the `playground` GitHub Actions workflow.
+to production via the `playground` GitHub Actions workflow.
 
 ## manual release
 

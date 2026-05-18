@@ -134,7 +134,7 @@ export function DiscoveryPanel({ discovery }: Props) {
   }
 
   const tests = discovery.parsed.tests ?? [];
-  const hooks = discovery.parsed.hooks ?? [];
+  const fixtures = discovery.parsed.hooks ?? [];
   const errors = discovery.parsed.errors ?? [];
 
   return (
@@ -176,11 +176,13 @@ export function DiscoveryPanel({ discovery }: Props) {
         )}
       </div>
 
-      {hooks.length > 0 && (
+      {fixtures.length > 0 && (
         <div className="mb-3">
-          <h3 className="text-text font-bold mb-1">Hooks ({hooks.length})</h3>
+          <h3 className="text-text font-bold mb-1">
+            Fixtures ({fixtures.length})
+          </h3>
           <ul className="ml-2 space-y-0.5">
-            {hooks.map((h, i) => (
+            {fixtures.map((h, i) => (
               <li key={i} className="flex items-center gap-2">
                 <span className="text-accent">&#x25cf;</span>
                 <span className="text-text">{h.name}</span>

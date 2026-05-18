@@ -36,19 +36,35 @@ def _extract_soft_failures(failures):
 
 
 def _resolve_fixtures(fn):
-    """Resolve Depends() defaults in a function's signature."""
+    """Resolve Depends() in a function's signature.
+
+    Supports both forms:
+      - param=Depends(fixture)           (default-value form)
+      - param: Annotated[T, Depends(f)]  (type-annotation form)
+    """
     import inspect
+    import typing
     from tryke.hooks import _Depends
 
     sig = inspect.signature(fn)
+    hints = typing.get_type_hints(fn, include_extras=True)
     kwargs = {}
     teardowns = []
 
     for name, param in sig.parameters.items():
-        if not isinstance(param.default, _Depends):
+        dep = None
+        if isinstance(param.default, _Depends):
+            dep = param.default
+        elif name in hints:
+            hint = hints[name]
+            if typing.get_origin(hint) is typing.Annotated:
+                for arg in typing.get_args(hint):
+                    if isinstance(arg, _Depends):
+                        dep = arg
+                        break
+        if dep is None:
             continue
-        dep_fn = param.default.dependency
-        # Recursively resolve the fixture's own dependencies
+        dep_fn = dep.dependency
         dep_kwargs, dep_teardowns = _resolve_fixtures(dep_fn)
         teardowns.extend(dep_teardowns)
 

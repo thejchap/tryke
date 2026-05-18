@@ -26,7 +26,7 @@ interface WasmModule {
 export function Chrome() {
   const [files, setFiles] = useState<PlaygroundFile[]>(DESCRIBE_EXAMPLE.files);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
-  const [secondaryTool, setSecondaryTool] = useState<SecondaryTool>("output");
+  const [secondaryTool, setSecondaryTool] = useState<SecondaryTool>("all");
   const [reporter, setReporter] = useState<ReporterName>("text");
   const [pyodideReady, setPyodideReady] = useState(false);
   const [terminalOutput, setTerminalOutput] = useState("");
@@ -90,14 +90,14 @@ export function Chrome() {
           setTerminalOutput(resultsJson);
         }
         setRunStatus("done");
-        setSecondaryTool("output");
+        setSecondaryTool((prev) => (prev === "all" ? prev : "output"));
         return;
       }
 
       if (type === "error") {
         setTerminalOutput(`Error: ${e.data.message}`);
         setRunStatus("done");
-        setSecondaryTool("output");
+        setSecondaryTool((prev) => (prev === "all" ? prev : "output"));
       }
     };
 
@@ -130,20 +130,20 @@ export function Chrome() {
     } catch {
       setTerminalOutput("Discovery failed — check your Python syntax.");
       setRunStatus("done");
-      setSecondaryTool("output");
+      setSecondaryTool((prev) => (prev === "all" ? prev : "output"));
       return;
     }
 
     if (tests.length === 0) {
       setTerminalOutput("No tests discovered in the current file.");
       setRunStatus("done");
-      setSecondaryTool("output");
+      setSecondaryTool((prev) => (prev === "all" ? prev : "output"));
       return;
     }
 
     setRunStatus("running");
     setTerminalOutput("");
-    setSecondaryTool("output");
+    setSecondaryTool((prev) => (prev === "all" ? prev : "output"));
 
     workerRef.current?.postMessage({
       type: "run",

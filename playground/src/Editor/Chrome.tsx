@@ -141,21 +141,29 @@ export function Chrome() {
       filename: activeFile.name,
       source: activeFile.source,
       tests,
+      allFiles: files.map((f) => ({ name: f.name, source: f.source })),
     });
   }, [pyodideReady, wasm, files, activeFileIndex]);
+
+  // Cmd+R / Ctrl+R shortcut to run tests
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "r") {
+        e.preventDefault();
+        handleRun();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [handleRun]);
 
   const handleSourceChange = useCallback(
     (source: string) => {
       setFiles((prev) =>
         prev.map((f, i) => (i === activeFileIndex ? { ...f, source } : f))
       );
-      if (runStatus === "done") {
-        setRunStatus("idle");
-        setTerminalOutput("");
-        lastResultsRef.current = "";
-      }
     },
-    [activeFileIndex, runStatus]
+    [activeFileIndex]
   );
 
   const handleAddFile = useCallback(() => {
@@ -193,6 +201,7 @@ export function Chrome() {
     <div className="h-full flex flex-col bg-bg text-text">
       {/* Toolbar */}
       <div className="flex items-center gap-3 px-4 py-2 border-b border-border bg-surface">
+        <img src="/logo.png" alt="tryke" className="h-6 w-6 rounded" />
         <h1 className="text-sm font-bold text-accent">
           tryke playground
         </h1>
@@ -247,7 +256,7 @@ export function Chrome() {
           disabled={!pyodideReady || runStatus === "running"}
           className="text-xs font-bold px-3 py-1 rounded bg-green/20 text-green hover:bg-green/30 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
-          {runStatus === "running" ? "Running..." : "Run"}
+          {runStatus === "running" ? "Running..." : "Run ⌘R"}
         </button>
       </div>
 

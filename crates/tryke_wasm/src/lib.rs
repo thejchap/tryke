@@ -62,13 +62,14 @@ pub fn discover_multi(files_json: &str) -> Result<JsValue, JsError> {
         all_discovered.push((path, result));
     }
 
-    let file_set: HashSet<PathBuf> = files.iter().map(|f| PathBuf::from(&f.filename)).collect();
+    let file_set: HashSet<PathBuf> = files.iter().map(|f| root.join(&f.filename)).collect();
 
     let mut edges: Vec<GraphEdge> = Vec::new();
     for (path, disc) in &all_discovered {
         let resolved =
             tryke_discovery::resolve_import_candidate_groups(&disc.import_candidates, &file_set);
         for target in resolved {
+            let target = target.strip_prefix(&root).unwrap_or(&target).to_path_buf();
             edges.push(GraphEdge {
                 from: path.clone(),
                 to: target,

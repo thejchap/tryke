@@ -128,6 +128,81 @@ with describe("Calculator"):
     ],
   },
   {
+    label: "Multi-file imports",
+    files: [
+      {
+        name: "helpers.py",
+        source: `def double(n):
+    return n * 2
+
+def greet(name):
+    return f"hello, {name}"
+`,
+      },
+      {
+        name: "test_helpers.py",
+        source: `from tryke import test, expect
+from helpers import double, greet
+
+@test
+def doubles_numbers():
+    expect(double(3)).to_equal(6)
+    expect(double(0)).to_equal(0)
+    expect(double(-1)).to_equal(-2)
+
+@test
+def greets_by_name():
+    expect(greet("world")).to_equal("hello, world")
+    expect(greet("tryke")).to_equal("hello, tryke")
+`,
+      },
+    ],
+  },
+  {
+    label: "Fixtures & Depends",
+    files: [
+      {
+        name: "test_fixtures.py",
+        source: `from tryke import test, expect, fixture, Depends
+
+@fixture
+def database():
+    """Per-test database connection."""
+    db = {"users": [], "connected": True}
+    yield db
+    db["connected"] = False
+
+@fixture
+def admin_user(db=Depends(database)):
+    """Creates an admin in the database fixture."""
+    user = {"name": "admin", "role": "admin"}
+    db["users"].append(user)
+    return user
+
+@fixture(per="scope")
+def config():
+    """Shared config — created once, reused across tests."""
+    return {"debug": True, "max_retries": 3}
+
+@test
+def inserts_user(db=Depends(database)):
+    db["users"].append({"name": "alice"})
+    expect(db["users"]).to_have_length(1)
+    expect(db["connected"]).to_be_truthy()
+
+@test
+def admin_exists(user=Depends(admin_user)):
+    expect(user["role"]).to_equal("admin")
+
+@test
+def config_is_shared(cfg=Depends(config)):
+    expect(cfg["debug"]).to_be_truthy()
+    expect(cfg["max_retries"]).to_equal(3)
+`,
+      },
+    ],
+  },
+  {
     label: "Skip / Todo / XFail",
     files: [
       {

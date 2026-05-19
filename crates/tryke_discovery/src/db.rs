@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use tryke_types::ParsedFile;
+pub use tryke_types::DiscoveredFile;
 
 #[salsa::db]
 pub trait Db: salsa::Database {}
@@ -15,20 +15,6 @@ pub struct SourceFile {
     pub src_roots: Vec<PathBuf>,
     #[returns(ref)]
     pub path: PathBuf,
-}
-
-/// Everything derivable from a single parse of a Python source file:
-/// the `ParsedFile` (tests, hooks, guard-else lines, errors), the
-/// candidate import paths this file references, and the dynamic-import
-/// flag. Produced in one AST walk so callers never parse the file
-/// twice. `import_candidates` holds first-wins alternatives that the
-/// discoverer resolves against the project's enumerated file set,
-/// avoiding per-import `stat()` syscalls.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct DiscoveredFile {
-    pub parsed: ParsedFile,
-    pub import_candidates: Vec<Vec<PathBuf>>,
-    pub dynamic_imports: bool,
 }
 
 #[salsa::tracked]

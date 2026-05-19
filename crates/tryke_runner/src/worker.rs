@@ -424,11 +424,9 @@ fn find_arg_span(expression: &str, ea: &ExpectedAssertion) -> Option<(usize, usi
     if arg.is_empty() {
         return None;
     }
-    // Find `matcher(` after the subject portion
     let matcher_pat = format!("{}(", ea.matcher);
     let matcher_pos = expression.find(&matcher_pat)?;
     let content_start = matcher_pos + matcher_pat.len();
-    // Find the arg text right at or after the opening paren
     let remaining = expression.get(content_start..)?;
     let arg_offset_in_remaining = remaining.find(arg.as_str())?;
     let offset = content_start + arg_offset_in_remaining;
@@ -676,7 +674,6 @@ fn convert_result(test: TestItem, wire: RunTestResultWire) -> TestResult {
                     convert_assertion(wire, expected_assertion)
                 })
                 .collect();
-
             TestResult {
                 test,
                 outcome: TestOutcome::Failed {
@@ -743,6 +740,8 @@ fn convert_result(test: TestItem, wire: RunTestResultWire) -> TestResult {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+
+    use tryke_types::AssertionWire;
 
     use super::*;
 
@@ -869,7 +868,6 @@ mod tests {
         assert_eq!(a.received, "3");
         assert_eq!(a.line, 10);
         assert_eq!(a.file.as_deref(), Some("tests/test_math.py"));
-        // "expect(" is 7 chars, subject "x" starts at 7, length 1
         assert_eq!(a.span_offset, 7);
         assert_eq!(a.span_length, 1);
         assert_eq!(a.expected_arg_span, Some((19, 1)));

@@ -62,6 +62,36 @@ out of sync with the Rust code.
 `cargo insta accept`
 3. commit the `.snap` files alongside code changes
 
+## playground
+
+the browser playground lives in `playground/`. to run it locally:
+
+```bash
+cd playground
+bun install
+bun run dev
+```
+
+to deploy manually to Cloudflare Pages:
+
+```bash
+cd playground
+bun run build
+bunx wrangler pages deploy dist --project-name=tryke-playground
+```
+
+this creates a preview deployment at a unique URL (e.g.
+`<hash>.tryke-playground.pages.dev`). to deploy straight to production, add
+`--branch main` — this is just metadata passed to Cloudflare and works from
+any local branch:
+
+```bash
+bunx wrangler pages deploy dist --project-name=tryke-playground --branch main
+```
+
+pushes to `main` that touch the playground or WASM crates deploy automatically
+to production via the `playground` GitHub Actions workflow.
+
 ## manual release
 
 1. bump version in both `crates/tryke/Cargo.toml` and `pyproject.toml`

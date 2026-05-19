@@ -1,0 +1,52 @@
+name: playground
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "playground/**"
+      - "crates/tryke_wasm/**"
+      - "crates/tryke_discovery/**"
+      - "crates/tryke_reporter/**"
+      - "crates/tryke_types/**"
+      - "python/tryke/**"
+      - "python/tryke_guard.py"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/playground.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  deployments: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: playground
+    steps:
+      - uses: actions/checkout@v6
+
+      - run: rustup show
+      - run: rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2.8.2
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        working-directory: playground
+        run: bun install --frozen-lockfile
+
+      - name: Build
+        working-directory: playground
+        run: bun run build
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy playground/dist --project-name=tryke-playground

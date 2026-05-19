@@ -1,6 +1,9 @@
 /target
 /dist
 .worktrees/
+node_modules/
+playground/src/wasm/pkg/
+*.tsbuildinfo
 __pycache__/
 *.pyc
 
@@ -225,3 +228,5 @@ __marimo__/
 demo/*.gif
 demo/*.webm
 demo/*.mp4
+
+.wrangler

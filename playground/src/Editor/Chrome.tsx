@@ -42,6 +42,7 @@ export function Chrome() {
   const reporterRef = useRef<ReporterName>(reporter);
   const runTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasAutoRun = useRef(false);
+  const runIdRef = useRef(0);
 
   useEffect(() => {
     wasmRef.current = wasm;
@@ -76,6 +77,8 @@ export function Chrome() {
       }
 
       if (type === "result") {
+        // Ignore stale results from a previous run.
+        if (e.data.runId !== runIdRef.current) return;
         const resultsJson: string = e.data.results;
         lastResultsRef.current = resultsJson;
         const w = wasmRef.current;
@@ -94,6 +97,8 @@ export function Chrome() {
       }
 
       if (type === "error") {
+        if (e.data.runId !== undefined && e.data.runId !== runIdRef.current)
+          return;
         setTerminalOutput(`Error: ${e.data.message}`);
         setRunStatus("done");
       }
@@ -142,8 +147,10 @@ export function Chrome() {
     setRunStatus("running");
     setTerminalOutput("");
 
+    const runId = ++runIdRef.current;
     workerRef.current?.postMessage({
       type: "run",
+      runId,
       filename: activeFile.name,
       source: activeFile.source,
       tests,
@@ -310,10 +317,15 @@ export function Chrome() {
       </div>
 
       {/* File tabs */}
-      <div className="flex items-center border-b border-border bg-surface">
+      <div
+        className="flex items-center border-b border-border bg-surface"
+        role="tablist"
+      >
         {files.map((file, i) => (
-          <div
+          <button
             key={file.name}
+            role="tab"
+            aria-selected={i === activeFileIndex}
             className={`flex items-center gap-1 px-3 py-1.5 text-xs cursor-pointer border-r border-border ${
               i === activeFileIndex
                 ? "bg-bg text-text"
@@ -334,7 +346,7 @@ export function Chrome() {
                 x
               </button>
             )}
-          </div>
+          </button>
         ))}
         {showNewFile ? (
           <form

@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -47,9 +47,13 @@ struct FileResult {
 #[expect(clippy::missing_errors_doc)]
 #[wasm_bindgen]
 pub fn discover(source: &str, filename: &str) -> Result<JsValue, JsError> {
-    let path = PathBuf::from(filename);
-    let root = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-    let result = tryke_discovery::discover_file_from_source(&root, &[], &path, source);
+    // Use a stable root so nested files like "pkg/test_api.py" keep their
+    // full module_path ("pkg.test_api") instead of being relative to their
+    // parent directory.
+    let root = PathBuf::from(".");
+    let path = root.join(filename);
+    let src_roots = vec![root.clone()];
+    let result = tryke_discovery::discover_file_from_source(&root, &src_roots, &path, source);
     serde_wasm_bindgen::to_value(&result).map_err(|e| JsError::new(&e.to_string()))
 }
 

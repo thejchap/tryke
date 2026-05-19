@@ -55,6 +55,7 @@ export function SecondarySideBar({ active, onChange, hasOutput }: Props) {
       <button
         onClick={() => onChange(isAll ? "output" : "all")}
         title={isAll ? "Show single panel" : "Show all panels stacked"}
+        aria-label={isAll ? "Show single panel" : "Show all panels stacked"}
         className={`px-2 py-1.5 text-xs font-medium transition-colors ${
           isAll
             ? "text-accent border-b-2 border-accent"

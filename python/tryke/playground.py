@@ -30,10 +30,21 @@ if TYPE_CHECKING:
 
 _PYODIDE_ROOT = Path("/home/pyodide")
 
+# Prefix reserved for the bundled tryke package — user files must not
+# shadow framework modules or escape the sandbox.
+_RESERVED_PREFIXES = ("tryke/", "tryke_guard")
+
 # Files written by previous run_tests() calls, relative to _PYODIDE_ROOT.
 # Tracked so we can unlink and purge sys.modules entries for files the user
 # removed from the playground between runs.
 _WRITTEN_FILES: set[str] = set()
+
+
+def _is_safe_filename(name: str) -> bool:
+    """Reject filenames that could shadow tryke internals or escape the sandbox."""
+    if ".." in name or name.startswith("/"):
+        return False
+    return not any(name.startswith(p) for p in _RESERVED_PREFIXES)
 
 
 def _module_name(filename: str) -> str:
@@ -79,12 +90,18 @@ def _write_files(
 
         _WRITTEN_FILES.clear()
         for f in all_files:
-            file_path = _PYODIDE_ROOT / f["name"]
+            name = f["name"]
+            if not _is_safe_filename(name):
+                continue
+            file_path = _PYODIDE_ROOT / name
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_text(f["source"])
-            _WRITTEN_FILES.add(f["name"])
-            _purge_module(_module_name(f["name"]))
+            _WRITTEN_FILES.add(name)
+            _purge_module(_module_name(name))
     else:
+        if not _is_safe_filename(filename):
+            msg = f"unsafe filename: {filename!r}"
+            raise ValueError(msg)
         file_path = _PYODIDE_ROOT / filename
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(source)

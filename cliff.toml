@@ -6,10 +6,18 @@ body = """{% if version %}## [{{ version | trim_start_matches(pat="v") }}] - {{ 
 
 {% for group, commits in commits | group_by(attribute="group") %}### {{ group | striptags | trim | upper_first }}
 
-{% for commit in commits %}- {% if commit.scope %}*({{ commit.scope }})* {% endif %}{% if commit.breaking %}[**breaking**] {% endif %}{{ commit.message | upper_first }}
+{% for commit in commits %}- {{ commit.message | upper_first }}
 {% endfor %}{% if not loop.last %}
 {% endif %}{% endfor %}
+{% if contributors %}### Contributors
+
+{% for contributor in contributors %}- @{{ contributor.username }}
+{% endfor %}{% endif %}
 """
+
+[remote.github]
+owner = "thejchap"
+repo = "tryke"
 
 [git]
 conventional_commits = false
@@ -19,13 +27,14 @@ filter_unconventional = false
 commit_preprocessors = [
     { pattern = "\\n[\\s\\S]*", replace = "" },
 ]
+# Groups are driven by PR labels, not commit message prefixes.
+# Commits without a recognised label are skipped.
 commit_parsers = [
-    { message = "^feat", group = "Features" },
-    { message = "^fix", group = "Bug Fixes" },
-    { message = "^docs", group = "Documentation" },
-    { message = "^refactor", group = "Refactoring" },
-    { message = "^perf", group = "Performance" },
-    { message = "^test", group = "Testing" },
-    { message = "^ci", group = "CI" },
-    { message = "^chore", skip = true },
+    { label = "^enhancement$", group = "Features" },
+    { label = "^bug$", group = "Bug Fixes" },
+    { label = "^breaking$", group = "Breaking Changes" },
+    { label = "^documentation$", group = "Documentation" },
+    { label = "^performance$", group = "Performance" },
+    { label = "^internal$", skip = true },
+    { skip = true },
 ]

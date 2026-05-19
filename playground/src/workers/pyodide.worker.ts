@@ -39,6 +39,12 @@ async function init() {
 import sys
 if "/home/pyodide" not in sys.path:
     sys.path.insert(0, "/home/pyodide")
+
+# Flip the guard so code inside "if __TRYKE_TESTING__:" blocks executes
+# when user modules are imported — matches what the native worker does.
+import tryke_guard
+tryke_guard.__TRYKE_TESTING__ = True
+
 from tryke.playground import run_tests
 `);
 
@@ -67,13 +73,14 @@ self.onmessage = async (e: MessageEvent) => {
       return;
     }
 
-    const { filename, source, tests, allFiles } = e.data;
+    const { filename, source, tests, hooks, allFiles } = e.data;
     try {
       const allFilesArg = allFiles
         ? JSON.stringify(JSON.stringify(allFiles))
         : "None";
+      const hooksArg = hooks ? JSON.stringify(JSON.stringify(hooks)) : "None";
       const resultsJson = pyodide.runPython(
-        `run_tests(${JSON.stringify(filename)}, ${JSON.stringify(source)}, ${JSON.stringify(JSON.stringify(tests))}, ${allFilesArg})`,
+        `run_tests(${JSON.stringify(filename)}, ${JSON.stringify(source)}, ${JSON.stringify(JSON.stringify(tests))}, ${allFilesArg}, ${hooksArg})`,
       );
       self.postMessage({ type: "result", results: resultsJson });
     } catch (err) {

@@ -122,9 +122,11 @@ export function Chrome() {
     const activeFile = files[activeFileIndex]!;
 
     let tests;
+    let hooks;
     try {
       const discovery = wasm.discover(activeFile.source, activeFile.name);
       tests = discovery.parsed.tests;
+      hooks = discovery.parsed.hooks;
     } catch {
       setTerminalOutput("Discovery failed — check your Python syntax.");
       setRunStatus("done");
@@ -145,6 +147,7 @@ export function Chrome() {
       filename: activeFile.name,
       source: activeFile.source,
       tests,
+      hooks,
       allFiles: files.map((f) => ({ name: f.name, source: f.source })),
     });
   }, [pyodideReady, wasm, files, activeFileIndex]);

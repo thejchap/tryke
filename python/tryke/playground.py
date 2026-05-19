@@ -18,11 +18,14 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
+from tryke.hooks import _FIXTURE_ATTR, HookExecutor
 from tryke.runner import TestResult, failed, passed, run_test
 
 if TYPE_CHECKING:
+    from types import ModuleType
+
     from tryke.expect import CasesMarked
 
 _PYODIDE_ROOT = Path("/home/pyodide")
@@ -151,14 +154,50 @@ def _run_doctest(mod: object, object_path: str) -> TestResult:
     return passed(ms, out, err)
 
 
+class _HookInfo(TypedDict):
+    """Shape of a hook item from WASM discovery (HookItem in TS)."""
+
+    name: str
+    per: str
+    groups: list[str]
+    line_number: int | None
+
+
+def _build_executor(
+    mod: ModuleType,
+    hooks: list[_HookInfo],
+) -> HookExecutor | None:
+    """Create a :class:`HookExecutor` from WASM-discovered hook metadata.
+
+    Returns ``None`` when no fixtures are found, so the runner falls back
+    to the per-test ``DependencyResolver`` path (still correct for tests
+    that only use ``Depends()`` without registered fixtures).
+    """
+    executor = HookExecutor()
+    registered = False
+    for hook in hooks:
+        fn = getattr(mod, hook["name"], None)
+        if fn is None or not hasattr(fn, _FIXTURE_ATTR):
+            continue
+        executor.register_fixture(
+            fn,
+            groups=hook["groups"],
+            line_number=hook.get("line_number") or 0,
+        )
+        registered = True
+    return executor if registered else None
+
+
 def run_tests(
     filename: str,
     source: str,
     tests_json: str,
     all_files_json: str | None = None,
+    hooks_json: str | None = None,
 ) -> str:
     """Execute discovered tests and return JSON results for the WASM reporter."""
     tests: list[dict[str, Any]] = json.loads(tests_json)
+    hooks: list[_HookInfo] = json.loads(hooks_json) if hooks_json else []
     results: list[dict[str, Any]] = []
 
     module_name = _write_files(filename, source, all_files_json)
@@ -173,30 +212,44 @@ def run_tests(
         results.extend(_test_result(t, error) for t in tests)
         return json.dumps(results)
 
-    for t in tests:
-        doctest_object = t.get("doctest_object")
-        if doctest_object is not None:
-            results.append(_test_result(t, _run_doctest(mod, doctest_object)))
-            continue
+    # Build a shared executor so per-scope fixtures are resolved once and
+    # reused across all tests (matching the native worker's lifecycle).
+    executor = _build_executor(mod, hooks)
 
-        name: str = t["name"]
-        fn = getattr(mod, name, None)
+    try:
+        for t in tests:
+            doctest_object = t.get("doctest_object")
+            if doctest_object is not None:
+                results.append(_test_result(t, _run_doctest(mod, doctest_object)))
+                continue
 
-        if fn is None:
-            error = failed(0, f"function '{name}' not found", None, [], "", "")
-            results.append(_test_result(t, error))
-            continue
+            name: str = t["name"]
+            fn = getattr(mod, name, None)
 
-        case_label: str | None = None
-        case_index = t.get("case_index")
-        if case_index is not None:
-            cases_marked: CasesMarked = fn
-            if hasattr(cases_marked, "__tryke_cases__"):
-                cases = cases_marked.__tryke_cases__
-                if case_index < len(cases):
-                    case_label = cases[case_index].label
+            if fn is None:
+                error = failed(0, f"function '{name}' not found", None, [], "", "")
+                results.append(_test_result(t, error))
+                continue
 
-        result = run_test(fn, xfail=t.get("xfail"), case_label=case_label)
-        results.append(_test_result(t, result))
+            case_label: str | None = None
+            case_index = t.get("case_index")
+            if case_index is not None:
+                cases_marked: CasesMarked = fn
+                if hasattr(cases_marked, "__tryke_cases__"):
+                    cases = cases_marked.__tryke_cases__
+                    if case_index < len(cases):
+                        case_label = cases[case_index].label
+
+            result = run_test(
+                fn,
+                executor=executor,
+                xfail=t.get("xfail"),
+                groups=t.get("groups"),
+                case_label=case_label,
+            )
+            results.append(_test_result(t, result))
+    finally:
+        if executor is not None:
+            executor.finalize()
 
     return json.dumps(results)

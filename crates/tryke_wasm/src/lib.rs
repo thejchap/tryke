@@ -63,10 +63,12 @@ pub fn discover_multi(files_json: &str) -> Result<JsValue, JsError> {
     let root = PathBuf::from(".");
 
     let mut all_discovered: Vec<(PathBuf, tryke_types::DiscoveredFile)> = Vec::new();
+    let src_roots = vec![root.clone()];
 
     for file in &files {
-        let path = PathBuf::from(&file.filename);
-        let src_roots = vec![root.clone()];
+        // Join with root so relative-import candidate paths (built from
+        // file.parent()) share the "./" prefix with file_set entries.
+        let path = root.join(&file.filename);
         let result =
             tryke_discovery::discover_file_from_source(&root, &src_roots, &path, &file.source);
         all_discovered.push((path, result));
@@ -80,17 +82,18 @@ pub fn discover_multi(files_json: &str) -> Result<JsValue, JsError> {
             tryke_discovery::resolve_import_candidate_groups(&disc.import_candidates, &file_set);
         for target in resolved {
             let target = target.strip_prefix(&root).unwrap_or(&target).to_path_buf();
-            edges.push(GraphEdge {
-                from: path.clone(),
-                to: target,
-            });
+            let from = path.strip_prefix(&root).unwrap_or(path).to_path_buf();
+            edges.push(GraphEdge { from, to: target });
         }
     }
 
     let result = MultiResult {
         files: all_discovered
             .into_iter()
-            .map(|(path, discovered)| FileResult { path, discovered })
+            .map(|(path, discovered)| FileResult {
+                path: path.strip_prefix(&root).unwrap_or(&path).to_path_buf(),
+                discovered,
+            })
             .collect(),
         edges,
     };

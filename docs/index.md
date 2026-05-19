@@ -118,4 +118,4 @@ This repository is licensed under the [MIT License](https://github.com/thejchap/
 
 ## Installation
 
-See the [installation](guides/installation.md) documentation.
+See the [installation](./guides/installation.md) documentation.

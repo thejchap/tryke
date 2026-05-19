@@ -322,9 +322,10 @@ export function Chrome() {
         role="tablist"
       >
         {files.map((file, i) => (
-          <button
+          <div
             key={file.name}
             role="tab"
+            tabIndex={0}
             aria-selected={i === activeFileIndex}
             className={`flex items-center gap-1 px-3 py-1.5 text-xs cursor-pointer border-r border-border ${
               i === activeFileIndex
@@ -332,6 +333,12 @@ export function Chrome() {
                 : "text-text-dim hover:text-text hover:bg-surface-hover"
             }`}
             onClick={() => setActiveFileIndex(i)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                setActiveFileIndex(i);
+              }
+            }}
           >
             <span>{file.name}</span>
             {files.length > 1 && (
@@ -346,7 +353,7 @@ export function Chrome() {
                 x
               </button>
             )}
-          </button>
+          </div>
         ))}
         {showNewFile ? (
           <form

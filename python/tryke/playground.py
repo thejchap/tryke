@@ -30,9 +30,9 @@ if TYPE_CHECKING:
 
 _PYODIDE_ROOT = Path("/home/pyodide")
 
-# Prefix reserved for the bundled tryke package — user files must not
-# shadow framework modules or escape the sandbox.
-_RESERVED_PREFIXES = ("tryke/", "tryke_guard")
+# Names that would shadow the bundled tryke package or escape the sandbox.
+_RESERVED_NAMES = frozenset({"tryke.py", "tryke_guard.py"})
+_RESERVED_PREFIXES = ("tryke/", "tryke_guard/")
 
 # Files written by previous run_tests() calls, relative to _PYODIDE_ROOT.
 # Tracked so we can unlink and purge sys.modules entries for files the user
@@ -43,6 +43,8 @@ _WRITTEN_FILES: set[str] = set()
 def _is_safe_filename(name: str) -> bool:
     """Reject filenames that could shadow tryke internals or escape the sandbox."""
     if ".." in name or name.startswith("/"):
+        return False
+    if name in _RESERVED_NAMES:
         return False
     return not any(name.startswith(p) for p in _RESERVED_PREFIXES)
 

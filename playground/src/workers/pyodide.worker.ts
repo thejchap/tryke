@@ -73,7 +73,7 @@ self.onmessage = async (e: MessageEvent) => {
       return;
     }
 
-    const { filename, source, tests, hooks, allFiles } = e.data;
+    const { runId, filename, source, tests, hooks, allFiles } = e.data;
     try {
       const allFilesArg = allFiles
         ? JSON.stringify(JSON.stringify(allFiles))
@@ -82,10 +82,11 @@ self.onmessage = async (e: MessageEvent) => {
       const resultsJson = pyodide.runPython(
         `run_tests(${JSON.stringify(filename)}, ${JSON.stringify(source)}, ${JSON.stringify(JSON.stringify(tests))}, ${allFilesArg}, ${hooksArg})`,
       );
-      self.postMessage({ type: "result", results: resultsJson });
+      self.postMessage({ type: "result", runId, results: resultsJson });
     } catch (err) {
       self.postMessage({
         type: "error",
+        runId,
         message: `Test execution failed: ${err}`,
       });
     }

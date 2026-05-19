@@ -10,6 +10,9 @@ on:
       - "crates/tryke_reporter/**"
       - "crates/tryke_types/**"
       - "python/tryke/**"
+      - "python/tryke_guard.py"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/playground.yml"
   workflow_dispatch:
 

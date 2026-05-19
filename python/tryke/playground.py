@@ -18,7 +18,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, Required, TypedDict
 
 from tryke.hooks import _FIXTURE_ATTR, HookExecutor
 from tryke.runner import TestResult, failed, passed, run_test
@@ -154,10 +154,14 @@ def _run_doctest(mod: object, object_path: str) -> TestResult:
     return passed(ms, out, err)
 
 
-class _HookInfo(TypedDict):
-    """Shape of a hook item from WASM discovery (HookItem in TS)."""
+class _HookInfo(TypedDict, total=False):
+    """Shape of a hook item from WASM discovery (HookItem in TS).
 
-    name: str
+    Fields with serde ``skip_serializing_if`` on the Rust side may be
+    absent in the JSON, so everything except ``name`` is optional.
+    """
+
+    name: Required[str]
     per: str
     groups: list[str]
     line_number: int | None
@@ -181,7 +185,7 @@ def _build_executor(
             continue
         executor.register_fixture(
             fn,
-            groups=hook["groups"],
+            groups=hook.get("groups", []),
             line_number=hook.get("line_number") or 0,
         )
         registered = True

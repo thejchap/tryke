@@ -17,6 +17,21 @@ pub struct DiscoverParams {
     pub root: PathBuf,
 }
 
+/// Params for the `did_change` RPC. Clients (notably neotest-tryke) call
+/// this on their `BufWritePost` autocmd, *before* sending the next `run`,
+/// so the server can refresh discovery and mark the worker pool dirty in
+/// the same TCP connection as the run — closing the race window that
+/// exists between an editor save and the FS watcher's debounce.
+///
+/// `paths` is the list of absolute file paths just modified by the
+/// client. An empty list is treated as "I don't know which files
+/// changed — please rediscover everything." Use that sparingly, it's a
+/// full tree walk.
+#[derive(Debug, Deserialize)]
+pub struct DidChangeParams {
+    pub paths: Vec<PathBuf>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RunParams {
     pub tests: Option<Vec<String>>,

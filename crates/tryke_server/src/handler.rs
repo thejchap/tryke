@@ -1,6 +1,14 @@
-use std::{collections::HashSet, sync::Arc, time::Instant};
+use std::{
+    collections::HashSet,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Instant,
+};
 
 use bytes::Bytes;
+use log::debug;
 use serde_json::Value;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
@@ -13,9 +21,9 @@ use tryke_types::filter::TestFilter;
 use tryke_types::{RunSummary, TestOutcome};
 
 use crate::protocol::{
-    DiscoverCompleteParams, DiscoverParams, ErrorResponse, INVALID_PARAMS, METHOD_NOT_FOUND,
-    Notification, Request, Response, RpcError, RunCompleteParams, RunParams, RunResponse,
-    RunStartParams, TestCompleteParams,
+    DidChangeParams, DiscoverCompleteParams, DiscoverParams, ErrorResponse, INVALID_PARAMS,
+    METHOD_NOT_FOUND, Notification, Request, Response, RpcError, RunCompleteParams, RunParams,
+    RunResponse, RunStartParams, TestCompleteParams,
 };
 
 pub struct ConnectionHandler {
@@ -25,6 +33,14 @@ pub struct ConnectionHandler {
     broadcast_tx: broadcast::Sender<Bytes>,
     pool: Arc<WorkerPool>,
     run_lock: Arc<Mutex<()>>,
+    /// Set to `true` by the watcher whenever an accepted file-change
+    /// batch affects at least one module. `execute_run` swaps this to
+    /// `false` while holding `run_lock` and, if it was `true`, calls
+    /// `pool.restart_workers().await` before dispatching units. This
+    /// closes the race where a `run` request lands inside the watcher's
+    /// debounce window and would otherwise hit a worker whose cached
+    /// `sys.modules` predates the latest save.
+    dirty: Arc<AtomicBool>,
 }
 
 impl ConnectionHandler {
@@ -35,6 +51,7 @@ impl ConnectionHandler {
         broadcast_tx: broadcast::Sender<Bytes>,
         pool: Arc<WorkerPool>,
         run_lock: Arc<Mutex<()>>,
+        dirty: Arc<AtomicBool>,
     ) -> Self {
         Self {
             stream,
@@ -43,6 +60,7 @@ impl ConnectionHandler {
             broadcast_tx,
             pool,
             run_lock,
+            dirty,
         }
     }
 
@@ -78,9 +96,11 @@ impl ConnectionHandler {
                     let bcast_tx = self.broadcast_tx.clone();
                     let pool = Arc::clone(&self.pool);
                     let run_lock = Arc::clone(&self.run_lock);
+                    let dirty = Arc::clone(&self.dirty);
                     let line_owned = line.clone();
                     let response =
-                        handle_request(&line_owned, &disc, &bcast_tx, &pool, &run_lock).await;
+                        handle_request(&line_owned, &disc, &bcast_tx, &pool, &run_lock, &dirty)
+                            .await;
                     if let Some(bytes) = response {
                         let mut w = writer.lock().await;
                         if w.write_all(&bytes).await.is_err() || w.flush().await.is_err() {
@@ -139,6 +159,7 @@ async fn execute_run(
     bcast_tx: &broadcast::Sender<Bytes>,
     pool: &WorkerPool,
     run_lock: &Mutex<()>,
+    dirty: &AtomicBool,
 ) -> (String, RunSummary) {
     let run_id = rp.run_id.clone();
     // Serialize concurrent runs: only one run at a time may dispatch units
@@ -146,11 +167,38 @@ async fn execute_run(
     // notification ordering) is not interleaved across clients.
     let _run_guard = run_lock.lock().await;
 
+    // Snapshot tests AND drain the dirty flag in the SAME disc.lock
+    // critical section. This pairs with `apply_change`'s
+    // `dirty.store(true)` (also done inside its disc.lock guard): the
+    // two operations cannot interleave, so a concurrent watcher /
+    // `did_change` task can't update discovery between our dirty check
+    // and our tests snapshot. Without this serialisation, a watcher
+    // mid-flight could (a) acquire disc.lock first, (b) update
+    // discovery, (c) release the lock, while we grab the *new* tests
+    // but observe stale `dirty=false` because the store hadn't
+    // happened yet — dispatching on workers whose `sys.modules` predates
+    // the change.
+    //
+    // The flag is set by:
+    //   - the FS watcher task (server.rs) on an accepted file-change
+    //     batch, for non-cooperating clients; and
+    //   - the `did_change` RPC handler (below), for cooperating clients
+    //     (neotest-tryke sends `did_change` on the same TCP connection
+    //     immediately before `run`).
+    // Cooperating clients are also guaranteed to see `dirty=true`
+    // because per-connection reads are serial (handler.rs:72-92): the
+    // `did_change` handler's `apply_change` completes before the `run`
+    // line is even read off the socket.
     let discovery_start = Instant::now();
-    let guard = disc.lock().await;
-    let all_tests = guard.tests();
-    let hooks = guard.hooks();
-    drop(guard);
+    let (dirty_was_set, all_tests, hooks) = {
+        let guard = disc.lock().await;
+        let was = dirty.swap(false, Ordering::AcqRel);
+        (was, guard.tests(), guard.hooks())
+    };
+    if dirty_was_set {
+        debug!("execute_run: dirty drained — restarting worker pool");
+        pool.restart_workers().await;
+    }
     let mut tests = match &rp.tests {
         Some(ids) => all_tests
             .into_iter()
@@ -248,6 +296,7 @@ pub async fn handle_request(
     bcast_tx: &broadcast::Sender<Bytes>,
     pool: &WorkerPool,
     run_lock: &Mutex<()>,
+    dirty: &AtomicBool,
 ) -> Option<Vec<u8>> {
     let req: Request = serde_json::from_str(line.trim()).ok()?;
     let id = req.id.clone().unwrap_or(Value::Null);
@@ -265,6 +314,69 @@ pub async fn handle_request(
                 },
             );
             serialize_response(id, serde_json::json!({ "tests": tests }))
+        }
+        "did_change" => {
+            // In-band signal from a cooperating client (e.g. neotest-tryke's
+            // BufWritePost autocmd) that the listed paths just changed on
+            // disk. Refresh discovery and mark `dirty` synchronously, so a
+            // subsequent `run` on the *same TCP connection* is guaranteed
+            // to drain a `true` flag and restart the worker pool before
+            // dispatch. See `crate::change::apply_change` for the shared
+            // body (also called by the FS watcher task).
+            let Some(params) = req.params else {
+                return serialize_error(
+                    req.id,
+                    INVALID_PARAMS,
+                    "method 'did_change' requires params with paths".to_string(),
+                );
+            };
+            let dc = match serde_json::from_value::<DidChangeParams>(params) {
+                Ok(dc) => dc,
+                Err(e) => {
+                    return serialize_error(
+                        req.id,
+                        INVALID_PARAMS,
+                        format!("invalid params for 'did_change': {e}"),
+                    );
+                }
+            };
+            if dc.paths.is_empty() {
+                // Panic-button form: client doesn't know what changed.
+                // Full rediscover; broadcast the resulting test list so
+                // other connected clients see the refresh (matches the
+                // non-empty path through `apply_change`, which also
+                // broadcasts `discover_complete`).
+                let tests = {
+                    let mut guard = disc.lock().await;
+                    let tests = guard.rediscover();
+                    // Set dirty inside the lock — pairs with the
+                    // drain inside `execute_run`'s disc.lock guard so
+                    // no run can read fresh tests without also
+                    // observing dirty=true.
+                    dirty.store(true, Ordering::Release);
+                    tests
+                };
+                debug!(
+                    "did_change: empty paths — full rediscover, {} tests, dirty mark",
+                    tests.len()
+                );
+                broadcast_notification(
+                    bcast_tx,
+                    "discover_complete",
+                    DiscoverCompleteParams { tests },
+                );
+            } else {
+                // `Discoverer::rediscover_changed` (inside apply_change)
+                // already canonicalises and drops anything outside its
+                // project root, so we can pass client-supplied paths
+                // through without an extra filter. The server binds to
+                // 127.0.0.1 but any local process can still reach it;
+                // pushing the root check into discovery keeps the
+                // guarantee in the single place that owns the project
+                // tree.
+                crate::change::apply_change(disc, bcast_tx, dirty, &dc.paths).await;
+            }
+            serialize_response(id, "ok")
         }
         "run" => {
             let Some(params) = req.params else {
@@ -284,7 +396,7 @@ pub async fn handle_request(
                     );
                 }
             };
-            let (run_id, summary) = execute_run(rp, disc, bcast_tx, pool, run_lock).await;
+            let (run_id, summary) = execute_run(rp, disc, bcast_tx, pool, run_lock, dirty).await;
             serialize_response(id, RunResponse { run_id, summary })
         }
         _ => serialize_error(
@@ -331,6 +443,10 @@ mod tests {
         Arc::new(Mutex::new(()))
     }
 
+    fn make_dirty() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
+
     #[tokio::test]
     async fn ping_returns_pong() {
         let dir = make_root();
@@ -338,12 +454,14 @@ mod tests {
         let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
         let pool = make_pool();
         let run_lock = make_run_lock();
+        let dirty = make_dirty();
         let resp = handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#,
             &disc,
             &tx,
             &pool,
             &run_lock,
+            &dirty,
         )
         .await
         .unwrap();
@@ -360,12 +478,14 @@ mod tests {
         let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
         let pool = make_pool();
         let run_lock = make_run_lock();
+        let dirty = make_dirty();
         let resp = handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"discover","params":{"root":"/ignored"}}"#,
             &disc,
             &tx,
             &pool,
             &run_lock,
+            &dirty,
         )
         .await
         .unwrap();
@@ -380,12 +500,14 @@ mod tests {
         let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
         let pool = make_pool();
         let run_lock = make_run_lock();
+        let dirty = make_dirty();
         handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"root":"/ignored","tests":null,"run_id":"r1"}}"#,
             &disc,
             &tx,
             &pool,
             &run_lock,
+            &dirty,
         )
         .await;
 
@@ -407,12 +529,14 @@ mod tests {
         let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
         let pool = make_pool();
         let run_lock = make_run_lock();
+        let dirty = make_dirty();
         let resp = handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"tests":null}}"#,
             &disc,
             &tx,
             &pool,
             &run_lock,
+            &dirty,
         )
         .await
         .unwrap();
@@ -427,12 +551,14 @@ mod tests {
         let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
         let pool = make_pool();
         let run_lock = make_run_lock();
+        let dirty = make_dirty();
         let resp = handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"run_id":"test-run-xyz","tests":null}}"#,
             &disc,
             &tx,
             &pool,
             &run_lock,
+            &dirty,
         )
         .await
         .unwrap();
@@ -462,12 +588,14 @@ mod tests {
         let (tx, _rx) = broadcast::channel(64);
         let pool = make_pool();
         let run_lock = make_run_lock();
+        let dirty = make_dirty();
         handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"discover","params":{"root":"/ignored"}}"#,
             &disc,
             &tx,
             &pool,
             &run_lock,
+            &dirty,
         )
         .await;
 
@@ -483,6 +611,7 @@ mod tests {
             &tx2,
             &pool,
             &run_lock,
+            &dirty,
         )
         .await;
 
@@ -501,18 +630,382 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn did_change_sets_dirty_and_broadcasts() {
+        // `did_change` is the in-band signal that makes server mode
+        // race-free for cooperating clients. Verify the three observable
+        // side-effects:
+        //   1. It returns "ok"
+        //   2. It flips `dirty` to true (which the subsequent `run`'s
+        //      `execute_run` will drain into a `restart_workers`)
+        //   3. It broadcasts a `discover_complete` so other clients
+        //      refresh their UI
+        let dir = make_root();
+        let test_file = dir.path().join("test_x.py");
+        fs::write(&test_file, "@test\ndef test_x(): pass\n").expect("write test file");
+        let (tx, mut rx) = broadcast::channel(16);
+        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        // Populate discovery so `affected_modules` returns non-empty.
+        disc.lock().await.rediscover();
+
+        let pool = make_pool();
+        let run_lock = make_run_lock();
+        let dirty = make_dirty();
+
+        // Build the request via serde so the path is JSON-escaped
+        // (Windows backslashes are escape characters in JSON strings —
+        // raw `r#"..."#` interpolation produces invalid input on CI).
+        let req = serde_json::to_string(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "did_change",
+            "params": { "paths": [test_file] },
+        }))
+        .unwrap();
+        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(val["result"], "ok");
+        assert!(
+            dirty.load(std::sync::atomic::Ordering::Acquire),
+            "did_change must set dirty=true for an affected module",
+        );
+
+        let mut saw_discover_complete = false;
+        while let Ok(bytes) = rx.try_recv() {
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if v["method"] == "discover_complete" {
+                saw_discover_complete = true;
+            }
+        }
+        assert!(
+            saw_discover_complete,
+            "did_change must broadcast a discover_complete notification",
+        );
+    }
+
+    #[tokio::test]
+    async fn did_change_empty_paths_triggers_full_rediscover() {
+        // Panic-button form: client doesn't know which files changed.
+        // Server should re-scan everything and mark dirty.
+        let dir = make_root();
+        fs::write(dir.path().join("test_y.py"), "@test\ndef test_y(): pass\n")
+            .expect("write test file");
+        let (tx, _rx) = broadcast::channel(16);
+        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        let pool = make_pool();
+        let run_lock = make_run_lock();
+        let dirty = make_dirty();
+
+        let resp = handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"did_change","params":{"paths":[]}}"#,
+            &disc,
+            &tx,
+            &pool,
+            &run_lock,
+            &dirty,
+        )
+        .await
+        .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(val["result"], "ok");
+        assert!(
+            dirty.load(std::sync::atomic::Ordering::Acquire),
+            "did_change with empty paths must still mark dirty",
+        );
+    }
+
+    #[tokio::test]
+    async fn did_change_without_params_returns_invalid_params() {
+        let dir = make_root();
+        let (tx, _rx) = broadcast::channel(16);
+        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        let pool = make_pool();
+        let run_lock = make_run_lock();
+        let dirty = make_dirty();
+        let resp = handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"did_change"}"#,
+            &disc,
+            &tx,
+            &pool,
+            &run_lock,
+            &dirty,
+        )
+        .await
+        .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(val["error"]["code"], INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn did_change_ignores_paths_outside_root() {
+        // Defence-in-depth: the server binds to 127.0.0.1 but any local
+        // process can still reach it. `did_change` MUST refuse to refresh
+        // discovery for files outside the configured project root —
+        // otherwise a hostile client could pollute the import graph or
+        // trigger arbitrary file parses.
+        //
+        // Setup: two tempdirs, one is the project root and contains a
+        // test file, the other is "outside" and also contains a test
+        // file. did_change sends both paths; only the in-root one
+        // should result in a dirty mark.
+        let dir = make_root();
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let inside_file = dir.path().join("test_inside.py");
+        let outside_file = outside.path().join("test_outside.py");
+        fs::write(&inside_file, "@test\ndef test_inside(): pass\n").expect("write inside");
+        fs::write(&outside_file, "@test\ndef test_outside(): pass\n").expect("write outside");
+
+        let (tx, _rx) = broadcast::channel(16);
+        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        disc.lock().await.rediscover();
+        let pool = make_pool();
+        let run_lock = make_run_lock();
+        let dirty = make_dirty();
+
+        // Both paths in the request; only inside_file should survive.
+        let req = serde_json::to_string(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "did_change",
+            "params": { "paths": [outside_file, inside_file] },
+        }))
+        .unwrap();
+        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(val["result"], "ok");
+        // The inside path is a real module, so dirty MUST be set
+        // (proves the filter didn't drop everything).
+        assert!(
+            dirty.load(std::sync::atomic::Ordering::Acquire),
+            "in-root path should still trigger dirty mark",
+        );
+    }
+
+    #[tokio::test]
+    async fn did_change_excluded_paths_do_not_reach_discovery() {
+        // The FS watcher applies `.gitignore` + `[tool.tryke] exclude`
+        // before calling apply_change. Without parity in the
+        // `did_change` path, a cooperating-but-misconfigured (or
+        // malicious-local) client could ingest a `.venv/whatever.py`
+        // into the import graph — and a subsequent `run` would try
+        // to import + execute it.
+        let dir = make_root();
+        // Discoverer constructed with an explicit exclude (mirroring
+        // `[tool.tryke] exclude = ["vendored/**"]`). The path we send
+        // lives under that excluded prefix.
+        let excluded_dir = dir.path().join("vendored");
+        fs::create_dir(&excluded_dir).expect("mkdir");
+        let excluded_file = excluded_dir.join("test_vendored.py");
+        fs::write(&excluded_file, "@test\ndef test_v(): pass\n").expect("write");
+
+        let (tx, _rx) = broadcast::channel(16);
+        let disc = Arc::new(Mutex::new(Discoverer::new_with_excludes(
+            dir.path(),
+            &["vendored/**".to_string()],
+        )));
+        disc.lock().await.rediscover();
+        let pool = make_pool();
+        let run_lock = make_run_lock();
+        let dirty = make_dirty();
+
+        let req = serde_json::to_string(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "did_change",
+            "params": { "paths": [excluded_file] },
+        }))
+        .unwrap();
+        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(val["result"], "ok");
+        assert!(
+            !dirty.load(std::sync::atomic::Ordering::Acquire),
+            "excluded path must not mark the pool dirty",
+        );
+    }
+
+    #[tokio::test]
+    async fn did_change_non_py_paths_do_not_mark_dirty() {
+        // A `did_change` for non-Python files (README.md, pyproject.toml,
+        // config dotfiles) must NOT mark the pool dirty — those changes
+        // can't affect any imported module, so triggering a worker
+        // restart on the next run is pure waste. Pre-fix:
+        // `affected_modules` happily turned `README.md` into a "README"
+        // module name (the wrapper at lib.rs:106-108 unwraps None to
+        // empty), making `modules.is_empty()` false and setting dirty.
+        let dir = make_root();
+        let readme = dir.path().join("README.md");
+        let pyproject = dir.path().join("pyproject.toml"); // already exists from make_root
+        fs::write(&readme, "# project\n").expect("write readme");
+
+        let (tx, _rx) = broadcast::channel(16);
+        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        disc.lock().await.rediscover();
+        let pool = make_pool();
+        let run_lock = make_run_lock();
+        let dirty = make_dirty();
+
+        let req = serde_json::to_string(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "did_change",
+            "params": { "paths": [readme, pyproject] },
+        }))
+        .unwrap();
+        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(val["result"], "ok");
+        assert!(
+            !dirty.load(std::sync::atomic::Ordering::Acquire),
+            "non-.py did_change must not mark dirty (would force a needless worker restart)",
+        );
+    }
+
+    #[tokio::test]
+    async fn did_change_all_paths_outside_root_is_noop() {
+        // The opposite of the above: when EVERY path is outside root,
+        // dirty must NOT be set and we must not mutate discovery.
+        let dir = make_root();
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let outside_file = outside.path().join("test_outside.py");
+        fs::write(&outside_file, "@test\ndef test_outside(): pass\n").expect("write outside");
+
+        let (tx, _rx) = broadcast::channel(16);
+        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        let pool = make_pool();
+        let run_lock = make_run_lock();
+        let dirty = make_dirty();
+
+        let req = serde_json::to_string(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "did_change",
+            "params": { "paths": [outside_file] },
+        }))
+        .unwrap();
+        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(val["result"], "ok");
+        assert!(
+            !dirty.load(std::sync::atomic::Ordering::Acquire),
+            "all-outside-root did_change must not mark dirty",
+        );
+    }
+
+    #[tokio::test]
+    async fn did_change_accepts_just_deleted_file_under_root() {
+        // Regression: when a `did_change` arrives for a file the user
+        // just deleted, `p.canonicalize()` fails (no inode to resolve).
+        // The old fallback compared the literal input path against a
+        // canonical root, which silently dropped legitimate deletions
+        // when the workspace was under a symlinked prefix (macOS's
+        // `/var → /private/var` is the common trigger). New behaviour:
+        // canonicalise the parent and join the file name, so the
+        // workspace prefix is normalised even when the leaf is gone.
+        let dir = make_root();
+        // Create then delete a file so canonicalize(file) will fail
+        // but canonicalize(parent) succeeds. Discovery doesn't need
+        // to know about it — we're testing the filter, not discovery.
+        let test_file = dir.path().join("test_gone.py");
+        fs::write(&test_file, "x = 1\n").expect("write");
+        fs::remove_file(&test_file).expect("rm");
+
+        let (tx, _rx) = broadcast::channel(16);
+        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        disc.lock().await.rediscover();
+        let pool = make_pool();
+        let run_lock = make_run_lock();
+        let dirty = make_dirty();
+
+        let req = serde_json::to_string(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "did_change",
+            "params": { "paths": [test_file] },
+        }))
+        .unwrap();
+        // Pass the *non-canonical* dir.path() as root to simulate the
+        // symlinked-prefix case — the handler will canonicalise it via
+        // `filter_paths_in_root`'s caller (we pass canonicalised root
+        // in production via the server). But here we want to verify the
+        // filter survives a non-existent leaf, which is the bug the
+        // P2 review feedback was about.
+        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(
+            val["result"], "ok",
+            "deleted-file did_change must not be rejected by the filter"
+        );
+    }
+
+    #[tokio::test]
+    async fn did_change_empty_paths_broadcasts_discover_complete() {
+        // P2: empty-paths form does a full rediscover; it MUST also
+        // broadcast `discover_complete` so connected clients see the
+        // refresh. Without this, the empty-paths path leaves clients
+        // permanently stale until the FS watcher fires (which may
+        // never happen if changes are still pending).
+        let dir = make_root();
+        fs::write(dir.path().join("test_x.py"), "@test\ndef test_x(): pass\n")
+            .expect("write test file");
+        let (tx, mut rx) = broadcast::channel(16);
+        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        let pool = make_pool();
+        let run_lock = make_run_lock();
+        let dirty = make_dirty();
+
+        let resp = handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"did_change","params":{"paths":[]}}"#,
+            &disc,
+            &tx,
+            &pool,
+            &run_lock,
+            &dirty,
+        )
+        .await
+        .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(val["result"], "ok");
+
+        let mut saw_discover_complete = false;
+        while let Ok(bytes) = rx.try_recv() {
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if v["method"] == "discover_complete" {
+                saw_discover_complete = true;
+            }
+        }
+        assert!(
+            saw_discover_complete,
+            "empty-paths did_change must broadcast discover_complete",
+        );
+    }
+
+    #[tokio::test]
     async fn unknown_method_returns_error() {
         let dir = make_root();
         let (tx, _rx) = broadcast::channel(16);
         let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
         let pool = make_pool();
         let run_lock = make_run_lock();
+        let dirty = make_dirty();
         let resp = handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"unknown_method"}"#,
             &disc,
             &tx,
             &pool,
             &run_lock,
+            &dirty,
         )
         .await
         .unwrap();
@@ -540,6 +1033,8 @@ mod tests {
 
         let run_lock = make_run_lock();
         let run_lock_clone = Arc::clone(&run_lock);
+        let dirty = make_dirty();
+        let dirty_clone = Arc::clone(&dirty);
         tokio::spawn(async move {
             for _ in 0..2u8 {
                 let (stream, _) = listener.accept().await.unwrap();
@@ -548,8 +1043,9 @@ mod tests {
                 let d = Arc::clone(&disc_clone);
                 let p = Arc::clone(&pool_clone);
                 let rl = Arc::clone(&run_lock_clone);
+                let dy = Arc::clone(&dirty_clone);
                 tokio::spawn(async move {
-                    ConnectionHandler::new(stream, d, bcast_rx, bcast_tx_conn, p, rl)
+                    ConnectionHandler::new(stream, d, bcast_rx, bcast_tx_conn, p, rl, dy)
                         .run()
                         .await;
                 });
@@ -595,12 +1091,14 @@ mod tests {
         disc.lock().await.rediscover();
         let pool = make_pool();
         let run_lock = make_run_lock();
+        let dirty = make_dirty();
         handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"filter":"alpha","run_id":"r1"}}"#,
             &disc,
             &tx,
             &pool,
             &run_lock,
+            &dirty,
         )
         .await;
 
@@ -635,11 +1133,13 @@ mod tests {
         disc.lock().await.rediscover();
         let pool = make_pool();
         let run_lock = make_run_lock();
+        let dirty = make_dirty();
 
         let disc_a = Arc::clone(&disc);
         let tx_a = tx.clone();
         let pool_a = Arc::clone(&pool);
         let run_lock_a = Arc::clone(&run_lock);
+        let dirty_a = Arc::clone(&dirty);
         let handle_a = tokio::spawn(async move {
             handle_request(
                 r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"run_id":"A","tests":null}}"#,
@@ -647,6 +1147,7 @@ mod tests {
                 &tx_a,
                 &pool_a,
                 &run_lock_a,
+                &dirty_a,
             )
             .await;
         });
@@ -657,6 +1158,7 @@ mod tests {
                 &tx,
                 &pool,
                 &run_lock,
+                &dirty,
             )
             .await;
         });

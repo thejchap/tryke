@@ -1,3 +1,4 @@
+pub mod change;
 pub mod client;
 pub mod handler;
 pub mod protocol;

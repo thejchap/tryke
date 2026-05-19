@@ -4,6 +4,7 @@ use tryke_types::{DiscoveryError, RunSummary, TestItem, TestOutcome, TestResult}
 
 use crate::Reporter;
 use crate::diagnostic::render_assertions_plain;
+use crate::duration::format_duration;
 
 pub struct LlmReporter<W: io::Write = io::Stdout> {
     writer: W,
@@ -31,15 +32,6 @@ impl<W: io::Write> LlmReporter<W> {
 
     pub fn into_writer(self) -> W {
         self.writer
-    }
-}
-
-fn format_duration(d: std::time::Duration) -> String {
-    let ms = d.as_secs_f64() * 1000.0;
-    if ms < 1000.0 {
-        format!("{ms:.2}ms")
-    } else {
-        format!("{:.2}s", d.as_secs_f64())
     }
 }
 
@@ -371,6 +363,27 @@ mod tests {
         });
         let out = output(&r);
         assert_eq!(out.trim(), "47 passed [35.00ms]");
+    }
+
+    #[test]
+    fn summary_duration_minutes_seconds() {
+        let mut r = reporter();
+        r.on_run_complete(&RunSummary {
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            errors: 0,
+            xfailed: 0,
+            todo: 0,
+            duration: Duration::from_millis(65_500),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
+            changed_selection: None,
+        });
+        let out = output(&r);
+        assert_eq!(out.trim(), "1 passed [1:05.50]");
     }
 
     #[test]

@@ -17,7 +17,7 @@ use ignore::WalkBuilder;
 use ruff_python_ast::{Expr, Stmt};
 use ruff_python_parser::parse_module;
 use ruff_source_file::LineIndex;
-use ruff_text_size::Ranged;
+use ruff_text_size::{Ranged, TextRange, TextSize};
 use tryke_types::{ExpectedAssertion, FixturePer, HookItem, ParsedFile, TestItem};
 
 pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
@@ -37,6 +37,28 @@ pub fn configured_excludes(start: &Path, cli_excludes: &[String]) -> Vec<String>
 
 fn build_excludes(root: &Path, excludes: &[String]) -> Gitignore {
     let mut builder = GitignoreBuilder::new(root);
+    for exclude in excludes {
+        let _ = builder.add_line(None, exclude);
+    }
+    builder.build().unwrap_or_else(|_| Gitignore::empty())
+}
+
+/// Build the full ignore matcher used to decide whether an incoming
+/// path (from the FS watcher or a `did_change` RPC) should reach
+/// discovery. Layers `.gitignore`, `.ignore`, and the project's
+/// `[tool.tryke] exclude` list — same composition the FS watcher uses,
+/// extracted so the `did_change` path stays consistent.
+///
+/// Returns an empty matcher (matches nothing) on build failure rather
+/// than propagating an error, matching the watcher's existing
+/// behaviour: degraded into "let everything through" is preferable to
+/// blocking discovery entirely.
+#[must_use]
+pub fn build_change_set_ignore(root: &Path, excludes: &[String]) -> Gitignore {
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut builder = GitignoreBuilder::new(&canonical);
+    let _ = builder.add(canonical.join(".gitignore"));
+    let _ = builder.add(canonical.join(".ignore"));
     for exclude in excludes {
         let _ = builder.add_line(None, exclude);
     }
@@ -1034,20 +1056,60 @@ fn src_text(source: &str, range: ruff_text_size::TextRange) -> String {
     source[start..end].to_owned()
 }
 
+fn source_line(line_index: &LineIndex, offset: TextSize) -> u32 {
+    u32::try_from(line_index.line_index(offset).get()).unwrap_or(0)
+}
+
+fn source_column(line_index: &LineIndex, source: &str, offset: TextSize) -> Option<u32> {
+    u32::try_from(
+        line_index
+            .line_column(offset, source)
+            .column
+            .to_zero_indexed(),
+    )
+    .ok()
+}
+
+fn relative_span(outer: TextRange, inner: TextRange) -> Option<(usize, usize)> {
+    let outer_start: usize = outer.start().into();
+    let inner_start: usize = inner.start().into();
+    let inner_end: usize = inner.end().into();
+    Some((
+        inner_start.checked_sub(outer_start)?,
+        inner_end.checked_sub(inner_start)?,
+    ))
+}
+
 fn extract_expect_call_info(
     call: &ruff_python_ast::ExprCall,
     source: &str,
-) -> Option<(String, Option<String>)> {
+) -> Option<(String, TextRange, Option<String>)> {
     let is_expect = match call.func.as_ref() {
         Expr::Name(n) => n.id.as_str() == "expect",
         Expr::Attribute(a) => a.attr.id.as_str() == "expect",
         _ => return None,
     };
     let nargs = call.arguments.args.len();
-    if !is_expect || nargs == 0 || nargs > 2 {
+    let expr_keywords: Vec<_> = call
+        .arguments
+        .keywords
+        .iter()
+        .filter(|kw| kw.arg.as_ref().is_some_and(|k| k.id.as_str() == "expr"))
+        .collect();
+    if !is_expect
+        || nargs > 2
+        || expr_keywords.len() > 1
+        || (nargs > 0 && !expr_keywords.is_empty())
+    {
         return None;
     }
-    let subject = src_text(source, call.arguments.args[0].range());
+    let subject_range = if let Some(arg) = call.arguments.args.first() {
+        arg.range()
+    } else {
+        let kw = expr_keywords.first()?;
+        kw.value.range()
+    };
+    let subject = src_text(source, subject_range);
     let label = call
         .arguments
         .keywords
@@ -1067,7 +1129,18 @@ fn extract_expect_call_info(
                 None
             }
         });
-    Some((subject, label))
+    Some((subject, subject_range, label))
+}
+
+fn src_keyword_text(source: &str, keyword: &ruff_python_ast::Keyword) -> String {
+    src_text(source, keyword.range())
+}
+
+struct MatcherArg {
+    start: TextSize,
+    range: TextRange,
+    text: String,
+    value: String,
 }
 
 fn try_extract_assertion(
@@ -1087,27 +1160,48 @@ fn try_extract_assertion(
         return None;
     };
     let matcher = outer_attr.attr.id.as_str().to_owned();
-    let (subject, negated, label) = match outer_attr.value.as_ref() {
+    let (subject, subject_range, negated, label) = match outer_attr.value.as_ref() {
         Expr::Call(inner_call) => {
-            let (subject, label) = extract_expect_call_info(inner_call, source)?;
-            (subject, false, label)
+            let (subject, subject_range, label) = extract_expect_call_info(inner_call, source)?;
+            (subject, subject_range, false, label)
         }
         Expr::Attribute(inner_attr) if inner_attr.attr.id.as_str() == "not_" => {
             let Expr::Call(inner_call) = inner_attr.value.as_ref() else {
                 return None;
             };
-            let (subject, label) = extract_expect_call_info(inner_call, source)?;
-            (subject, true, label)
+            let (subject, subject_range, label) = extract_expect_call_info(inner_call, source)?;
+            (subject, subject_range, true, label)
         }
         _ => return None,
     };
-    let args = call
+    if call.arguments.keywords.iter().any(|kw| kw.arg.is_none()) {
+        return None;
+    }
+    let call_range = call.range();
+    let mut args = call
         .arguments
         .args
         .iter()
-        .map(|a| src_text(source, a.range()))
-        .collect();
-    let line = u32::try_from(line_index.line_index(call.range.start()).get()).unwrap_or(0);
+        .map(|a| MatcherArg {
+            start: a.range().start(),
+            range: a.range(),
+            text: src_text(source, a.range()),
+            value: src_text(source, a.range()),
+        })
+        .collect::<Vec<_>>();
+    args.extend(call.arguments.keywords.iter().map(|kw| MatcherArg {
+        start: kw.range().start(),
+        range: kw.range(),
+        text: src_keyword_text(source, kw),
+        value: src_text(source, kw.value.range()),
+    }));
+    args.sort_by_key(|arg| arg.start);
+    let expected_arg_span = args
+        .first()
+        .and_then(|arg| relative_span(call_range, arg.range));
+    let expected_arg_value = args.first().map(|arg| arg.value.clone());
+    let args = args.into_iter().map(|arg| arg.text).collect();
+    let line = source_line(line_index, call_range.start());
     Some(ExpectedAssertion {
         subject,
         matcher,
@@ -1115,6 +1209,13 @@ fn try_extract_assertion(
         args,
         line,
         label,
+        end_line: source_line(line_index, call_range.end()),
+        start_column: source_column(line_index, source, call_range.start()),
+        end_column: source_column(line_index, source, call_range.end()),
+        expression: src_text(source, call_range),
+        subject_span: relative_span(call_range, subject_range),
+        expected_arg_span,
+        expected_arg_value,
     })
 }
 
@@ -1929,7 +2030,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         fs::write(
             dir.path().join("pyproject.toml"),
-            "[tool.tryke]\nexclude = [\"benchmarks/suites\"]\n",
+            "[tool.tryke]\nexclude = [\"generated/suites\"]\n",
         )
         .expect("write pyproject");
         let excludes = configured_excludes(dir.path(), &["tmp".into(), "cache".into()]);
@@ -1938,8 +2039,8 @@ mod tests {
 
     #[test]
     fn collect_python_files_respects_custom_excludes() {
-        let dir = make_tree(&["a.py", "benchmarks/suites/test_bench.py"]);
-        let mut files = collect_python_files(dir.path(), &["benchmarks/suites".into()]);
+        let dir = make_tree(&["a.py", "generated/suites/test_generated.py"]);
+        let mut files = collect_python_files(dir.path(), &["generated/suites".into()]);
         files.sort();
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("a.py"));
@@ -2423,6 +2524,18 @@ def test_fn():
         assert_eq!(assertions[0].matcher, "to_equal");
         assert!(!assertions[0].negated);
         assert_eq!(assertions[0].args, vec!["2"]);
+        assert_eq!(assertions[0].line, 3);
+        assert_eq!(assertions[0].end_line, 3);
+        assert_eq!(assertions[0].expression, "expect(add(1, 1)).to_equal(2)");
+        assert_eq!(assertions[0].subject_span, Some((7, "add(1, 1)".len())));
+        assert_eq!(
+            assertions[0].expected_arg_span,
+            assertions[0]
+                .expression
+                .rfind('2')
+                .map(|offset| (offset, 1))
+        );
+        assert_eq!(assertions[0].expected_arg_value.as_deref(), Some("2"));
     }
 
     #[test]
@@ -2476,6 +2589,90 @@ def test_fn():
         let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
         assert_eq!(items[0].expected_assertions.len(), 1);
         assert_eq!(items[0].expected_assertions[0].line, 4);
+    }
+
+    #[test]
+    fn extracts_multiline_keyword_assertion() {
+        let source = "@test
+def test_fn():
+    expect(
+        expr=x,
+        name=\"label\",
+    ).to_equal(other=1)
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
+        assert_eq!(items[0].expected_assertions.len(), 1);
+        let a = &items[0].expected_assertions[0];
+        assert_eq!(a.subject, "x");
+        assert_eq!(a.matcher, "to_equal");
+        assert_eq!(a.args, vec!["other=1"]);
+        assert_eq!(a.label.as_deref(), Some("label"));
+        assert_eq!(a.line, 3);
+        assert_eq!(a.end_line, 6);
+        assert_eq!(
+            a.expression,
+            "expect(\n        expr=x,\n        name=\"label\",\n    ).to_equal(other=1)"
+        );
+        assert_eq!(
+            a.subject_span,
+            a.expression
+                .find("expr=x")
+                .map(|offset| (offset + "expr=".len(), 1))
+        );
+        assert_eq!(
+            a.expected_arg_span,
+            a.expression
+                .find("other=1")
+                .map(|offset| (offset, "other=1".len()))
+        );
+        assert_eq!(a.expected_arg_value.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn rejects_expect_call_mixing_positional_and_expr_keyword() {
+        let source = "@test
+def test_fn():
+    expect(x, expr=y).to_equal(1)
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
+        assert_eq!(items[0].expected_assertions.len(), 0);
+    }
+
+    #[test]
+    fn rejects_expect_call_with_duplicate_expr_keywords() {
+        let source = "@test
+def test_fn():
+    expect(expr=x, expr=y).to_equal(1)
+";
+        let (dir, file) = write_source(source);
+        let parsed = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file);
+        assert_eq!(parsed.tests.len(), 0);
+        assert!(parsed.errors.is_empty());
+    }
+
+    #[test]
+    fn preserves_matcher_keyword_arg_source_order() {
+        let source = "@test
+def test_fn():
+    expect(x).to_equal(second=2, first=1)
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
+        let args = &items[0].expected_assertions[0].args;
+        assert_eq!(args, &vec!["second=2".to_owned(), "first=1".to_owned()]);
+    }
+
+    #[test]
+    fn rejects_matcher_with_kwargs_expansion() {
+        let source = "@test
+def test_fn():
+    expect(x).to_equal(**expected)
+";
+        let (dir, file) = write_source(source);
+        let items = parse_tests_from_file(dir.path(), &[dir.path().to_path_buf()], &file).tests;
+        assert_eq!(items[0].expected_assertions.len(), 0);
     }
 
     #[test]

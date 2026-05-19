@@ -339,6 +339,10 @@ impl<W: Write> Reporter for SugarReporter<W> {
         self.refresh_bar();
     }
 
+    fn on_collect_complete(&mut self, tests: &[TestItem]) {
+        summary::write_collect_list(&mut self.writer, self.subcommand_label, tests);
+    }
+
     fn on_run_complete(&mut self, run_summary: &RunSummary) {
         self.flush_pending_header();
         self.commit_current_file();
@@ -380,6 +384,19 @@ impl<W: Write> Reporter for SugarReporter<W> {
         self.header_pending = false;
         self.write_header();
         summary::write_idle_summary(&mut self.writer, info);
+    }
+
+    fn on_watch_results_cleared(&mut self, info: &crate::reporter::WatchIdleInfo<'_>) {
+        self.live.finish_and_clear();
+        self.clear_armed = true;
+        self.flush_pending_clear();
+        self.header_pending = false;
+        self.started = false;
+        self.current_file = None;
+        self.current_marks.clear();
+        self.failures.clear();
+        self.write_header();
+        summary::write_cleared_summary(&mut self.writer, info);
     }
 }
 
@@ -486,6 +503,32 @@ mod tests {
         r.on_run_start(&[]);
         let out = output(r);
         assert!(out.contains("tryke test"));
+    }
+
+    #[test]
+    fn collect_only_lists_tests_with_header_and_count() {
+        let mut r = reporter();
+        let tests = vec![
+            TestItem {
+                name: "test_add".into(),
+                module_path: "tests.math".into(),
+                file_path: Some(PathBuf::from("tests/math.py")),
+                ..Default::default()
+            },
+            TestItem {
+                name: "test_sub".into(),
+                module_path: "tests.math".into(),
+                file_path: Some(PathBuf::from("tests/math.py")),
+                ..Default::default()
+            },
+        ];
+        r.on_collect_complete(&tests);
+        let out = output(r);
+        assert!(out.contains("tryke test"));
+        assert!(out.contains("tests/math.py:"));
+        assert!(out.contains("test_add"));
+        assert!(out.contains("test_sub"));
+        assert!(out.contains("2 tests collected."));
     }
 
     #[test]

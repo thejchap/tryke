@@ -8,12 +8,12 @@ A Rust-based Python test runner with a Jest-style API.
 
 Tryke discovers tests by walking the project's import graph, runs them across a pool of pre-warmed worker processes, and streams results through a pluggable reporter. It can also run as a long-lived server that keeps workers warm between file changes for sub-second feedback in editors.
 
-Run `tryke <command> --help` to see detailed help for a subcommand.
+Running `tryke` with no subcommand starts watch mode. Run `tryke <command> --help` to see detailed help for a subcommand.
 
 **Usage:**
 
 ```text
-tryke [OPTIONS] <COMMAND>
+tryke [OPTIONS] [COMMAND]
 ```
 
 **Commands:**
@@ -319,7 +319,7 @@ tryke test [OPTIONS] [PATHS]...
 
   Watch the project and rerun affected tests on each change.
 
-  Enters an interactive loop: tryke watches all `.py` files (respecting `.gitignore`), and on each save it walks the import graph from the modified file forward to find affected tests, restarts the worker pool, and reruns just those tests. Press `q` to quit.
+  Enters an interactive loop: tryke watches all `.py` files (respecting `.gitignore`), and on each save it walks the import graph from the modified file forward to find affected tests, restarts the worker pool, and reruns just those tests. Press `q` to quit, `enter` to run all tests, or `c` to clear results.
 
 - `-j`, `--workers` `<WORKERS>`
 

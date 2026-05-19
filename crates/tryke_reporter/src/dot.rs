@@ -112,6 +112,10 @@ impl<W: io::Write> Reporter for DotReporter<W> {
         );
     }
 
+    fn on_collect_complete(&mut self, tests: &[TestItem]) {
+        crate::summary::write_collect_list(&mut self.writer, "tryke test", tests);
+    }
+
     fn set_watch_hint(&mut self, hint: Option<String>) {
         self.watch_hint = hint;
     }
@@ -130,6 +134,14 @@ impl<W: io::Write> Reporter for DotReporter<W> {
         self.header_pending = false;
         self.write_header();
         crate::summary::write_idle_summary(&mut self.writer, info);
+    }
+
+    fn on_watch_results_cleared(&mut self, info: &crate::reporter::WatchIdleInfo<'_>) {
+        self.clear_armed = true;
+        self.flush_pending_clear();
+        self.header_pending = false;
+        self.write_header();
+        crate::summary::write_cleared_summary(&mut self.writer, info);
     }
 }
 
@@ -224,6 +236,32 @@ mod tests {
         assert!(out.contains("3 passed"));
         assert!(out.contains("2 skipped"));
         assert!(out.contains("(6)"));
+    }
+
+    #[test]
+    fn collect_only_lists_tests_with_header_and_count() {
+        let mut r = reporter();
+        let tests = vec![
+            TestItem {
+                name: "test_add".into(),
+                module_path: "tests.math".into(),
+                file_path: Some(std::path::PathBuf::from("tests/math.py")),
+                ..Default::default()
+            },
+            TestItem {
+                name: "test_sub".into(),
+                module_path: "tests.math".into(),
+                file_path: Some(std::path::PathBuf::from("tests/math.py")),
+                ..Default::default()
+            },
+        ];
+        r.on_collect_complete(&tests);
+        let out = output(&r);
+        assert!(out.contains("tryke test"));
+        assert!(out.contains("tests/math.py:"));
+        assert!(out.contains("test_add"));
+        assert!(out.contains("test_sub"));
+        assert!(out.contains("2 tests collected."));
     }
 
     #[test]

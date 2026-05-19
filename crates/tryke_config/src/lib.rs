@@ -191,13 +191,13 @@ mod tests {
     #[test]
     fn parses_tryke_tool_section() {
         let config = TrykeConfig::from_toml_str(
-            "[tool.tryke]\nexclude = [\"benchmarks/suites\", \"generated\"]\n",
+            "[tool.tryke]\nexclude = [\"generated/suites\", \"generated\"]\n",
         );
         assert_eq!(
             config,
             Some(TrykeConfig {
                 discovery: DiscoveryConfig {
-                    exclude: vec!["benchmarks/suites".into(), "generated".into()],
+                    exclude: vec!["generated/suites".into(), "generated".into()],
                     src: vec![".".into()],
                 },
                 python: None,
@@ -272,7 +272,7 @@ mod tests {
         let dir = tempdir();
         fs::write(
             dir.path().join("pyproject.toml"),
-            "[tool.tryke]\nexclude = [\"benchmarks/suites\"]\n",
+            "[tool.tryke]\nexclude = [\"generated/suites\"]\n",
         )
         .expect("write root pyproject");
         let nested = dir.path().join("packages/app/src");
@@ -284,7 +284,7 @@ mod tests {
         .expect("write nested pyproject");
 
         let config = load_effective_config(&nested);
-        assert_eq!(config.discovery.exclude, vec!["benchmarks/suites"]);
+        assert_eq!(config.discovery.exclude, vec!["generated/suites"]);
     }
 
     #[test]
@@ -292,7 +292,7 @@ mod tests {
         let dir = tempdir();
         fs::write(
             dir.path().join("pyproject.toml"),
-            "[tool.tryke]\nexclude = [\"benchmarks/suites\"]\n",
+            "[tool.tryke]\nexclude = [\"generated/suites\"]\n",
         )
         .expect("write root pyproject");
         let nested = dir.path().join("packages/app/src");

@@ -437,6 +437,41 @@ impl Discoverer {
             .collect()
     }
 
+    /// Drop paths that don't fall under the project root.
+    ///
+    /// Used by callers that take untrusted input (notably the server's
+    /// `did_change` RPC handler, where a local process could otherwise
+    /// pass `/etc/passwd` and pollute the import graph by getting
+    /// `path_to_module` to return an empty string and `rediscover_changed`
+    /// to slurp arbitrary disk content). Canonicalises both sides so
+    /// macOS's `/var → /private/var` symlink and similar cases compare
+    /// correctly.
+    pub fn filter_in_root(&self, paths: &[PathBuf]) -> Vec<PathBuf> {
+        let canonical_root = Self::canonicalize_path(&self.root);
+        Self::canonicalize_paths(paths)
+            .into_iter()
+            .filter(|p| p.starts_with(&canonical_root))
+            .collect()
+    }
+
+    /// `true` if `path` is excluded from discovery by the project's
+    /// `.gitignore`, `.ignore`, or `[tool.tryke] exclude` rules — the
+    /// same layered matcher the FS watcher uses to decide which file
+    /// changes to act on.
+    ///
+    /// Builds the matcher per call. That's intentional: discovery
+    /// callers invoke this at most a handful of times per save
+    /// (`apply_change` calls it once per change set), so the per-call
+    /// build is negligible and keeps construction free of `OnceCell`
+    /// / `Arc` machinery. If a hot path ever needs many calls, cache
+    /// at the caller.
+    #[must_use]
+    pub fn is_excluded(&self, path: &Path) -> bool {
+        crate::build_change_set_ignore(&self.root, &self.excludes)
+            .matched_path_or_any_parents(path, false)
+            .is_ignore()
+    }
+
     pub fn rediscover_changed(&mut self, changed: &[PathBuf]) -> Vec<TestItem> {
         let changed = Self::canonicalize_paths(changed);
         debug!(

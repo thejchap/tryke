@@ -176,7 +176,10 @@ pub struct AssertionWire {
     pub expression: String,
     pub expected: String,
     pub received: String,
+    #[serde(default)]
     pub line: u32,
+    #[serde(default)]
+    pub column: Option<u32>,
     #[serde(default)]
     pub file: Option<String>,
 }

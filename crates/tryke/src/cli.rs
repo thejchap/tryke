@@ -32,12 +32,13 @@ impl From<Dist> for tryke_runner::DistMode {
 /// a pluggable reporter. It can also run as a long-lived server that keeps
 /// workers warm between file changes for sub-second feedback in editors.
 ///
-/// Run `tryke <command> --help` to see detailed help for a subcommand.
+/// Running `tryke` with no subcommand starts watch mode. Run `tryke
+/// <command> --help` to see detailed help for a subcommand.
 #[derive(Debug, Parser)]
 #[command(version, about)]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 
     #[command(flatten)]
     pub verbose: LogVerbosity<WarnLevel>,
@@ -215,8 +216,8 @@ pub enum Commands {
         /// Enters an interactive loop: tryke watches all `.py` files
         /// (respecting `.gitignore`), and on each save it walks the import
         /// graph from the modified file forward to find affected tests,
-        /// restarts the worker pool, and reruns just those tests. Press
-        /// `q` to quit.
+        /// restarts the worker pool, and reruns just those tests. Press `q`
+        /// to quit, `enter` to run all tests, or `c` to clear results.
         #[arg(short = 'w', long = "watch")]
         watch: bool,
 
@@ -337,4 +338,32 @@ pub enum Commands {
         #[arg(long, conflicts_with_all = ["connected_only", "changed", "base_branch"])]
         fixtures: bool,
     },
+}
+
+impl Commands {
+    #[must_use]
+    pub fn default_watch() -> Self {
+        Self::Test {
+            paths: Vec::new(),
+            exclude: Vec::new(),
+            include: Vec::new(),
+            collect_only: false,
+            filter: None,
+            markers: None,
+            reporter: ReporterFormat::Text,
+            root: None,
+            port: None,
+            changed: false,
+            changed_first: false,
+            base_branch: None,
+            fail_fast: false,
+            maxfail: None,
+            workers: None,
+            dist: Dist::Test,
+            watch: true,
+            all: false,
+            now: false,
+            python: None,
+        }
+    }
 }

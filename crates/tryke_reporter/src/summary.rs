@@ -1,16 +1,20 @@
 use std::io;
-use std::time::Duration;
 
 use owo_colors::OwoColorize;
-use tryke_types::RunSummary;
+use tryke_types::{RunSummary, TestItem};
 
+use crate::duration::format_duration;
 use crate::reporter::WatchIdleInfo;
 
 /// Keyboard shortcuts shown beneath the summary/idle badge in watch
 /// mode. Stacked vertically with keys right-aligned in the same
 /// column as the `Tests` / `Discovery` labels so the footer reads as
 /// a continuation of the summary block.
-const WATCH_KEYBINDINGS: &[(&str, &str)] = &[("q / esc", "Quit"), ("enter", "Run all tests")];
+const WATCH_KEYBINDINGS: &[(&str, &str)] = &[
+    ("q / esc", "Quit"),
+    ("enter", "Run all tests"),
+    ("c", "Clear results"),
+];
 
 /// Width of the right-aligned label column shared by `Tests`,
 /// `Start at`, `Duration`, and the watch keybinding keys.
@@ -21,15 +25,6 @@ fn write_watch_keybindings<W: io::Write>(writer: &mut W) {
     for (key, label) in WATCH_KEYBINDINGS {
         let pad = " ".repeat(LABEL_COLUMN_WIDTH.saturating_sub(key.len()));
         let _ = writeln!(writer, "{pad}{}  {}", (*key).bold(), (*label).dimmed());
-    }
-}
-
-fn format_duration(d: Duration) -> String {
-    let ms = d.as_secs_f64() * 1000.0;
-    if ms < 1000.0 {
-        format!("{ms:.2}ms")
-    } else {
-        format!("{:.2}s", d.as_secs_f64())
     }
 }
 
@@ -218,6 +213,87 @@ pub fn write_idle_summary<W: io::Write>(writer: &mut W, info: &WatchIdleInfo<'_>
     write_watch_keybindings(writer);
 }
 
+/// Render the watch frame shown after the user clears prior run
+/// results. It uses the same badge/keybinding footer as the startup
+/// idle frame, but avoids saying "No tests run yet" after a run has
+/// already completed.
+pub fn write_cleared_summary<W: io::Write>(writer: &mut W, info: &WatchIdleInfo<'_>) {
+    let badge = format!("{}", " IDLE ".on_blue().black().bold());
+
+    let _ = writeln!(writer);
+    let _ = writeln!(
+        writer,
+        "      {}  {}",
+        "Tests".dimmed(),
+        "Results cleared".dimmed()
+    );
+
+    if let Some(t) = info.start_time {
+        let _ = writeln!(writer, "   {}  {}", "Start at".dimmed(), t);
+    }
+
+    if let Some(d) = info.discovery_duration {
+        let _ = writeln!(writer, "  {}  {}", "Discovery".dimmed(), format_duration(d));
+    }
+
+    let _ = writeln!(writer);
+    let _ = writeln!(writer, " {badge} {}", info.hint.dimmed());
+    write_watch_keybindings(writer);
+}
+
+/// Render the canonical `--collect-only` view: a banner with the
+/// subcommand label, then tests grouped by file with `describe()`
+/// nesting indented, and a `N tests collected.` footer. Reporters
+/// share this implementation so the `--collect-only` output is
+/// identical regardless of `--reporter`, with the sole exception of
+/// machine-readable formats (json, junit) that have their own
+/// representation.
+pub fn write_collect_list<W: io::Write>(
+    writer: &mut W,
+    subcommand_label: &str,
+    tests: &[TestItem],
+) {
+    let _ = writeln!(
+        writer,
+        "{} {}",
+        subcommand_label.bold(),
+        format!("v{}", env!("CARGO_PKG_VERSION")).dimmed()
+    );
+    let _ = writeln!(writer);
+    let mut current_file: Option<&std::path::Path> = None;
+    let mut current_groups: Vec<String> = Vec::new();
+    for test in tests {
+        let file = test.file_path.as_deref();
+        if file != current_file {
+            if current_file.is_some() {
+                let _ = writeln!(writer);
+            }
+            if let Some(path) = file {
+                let _ = writeln!(writer, "{}:", path.display());
+            }
+            current_file = file;
+            current_groups.clear();
+        }
+        if test.groups != current_groups {
+            let common = current_groups
+                .iter()
+                .zip(test.groups.iter())
+                .take_while(|(a, b)| a == b)
+                .count();
+            for (depth, group) in test.groups.iter().enumerate().skip(common) {
+                let indent = "  ".repeat(depth + 1);
+                let _ = writeln!(writer, "{indent}{group}");
+            }
+            current_groups.clone_from(&test.groups);
+        }
+        let group_indent = "  ".repeat(test.groups.len());
+        let display = test.display_label();
+        let _ = writeln!(writer, "  {group_indent}{}", display.dimmed());
+    }
+    let _ = writeln!(writer);
+    let _ = writeln!(writer, "{} tests collected.", tests.len());
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -383,6 +459,87 @@ mod tests {
             changed_selection: None,
         });
         assert!(out.contains("1.50s"));
+    }
+
+    #[test]
+    fn duration_minutes_seconds() {
+        let out = render(&RunSummary {
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            errors: 0,
+            xfailed: 0,
+            todo: 0,
+            duration: Duration::from_millis(65_500),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
+            changed_selection: None,
+        });
+        assert!(out.contains("1:05.50"), "expected M:SS.SS, got: {out}");
+        assert!(!out.contains("65.50s"));
+    }
+
+    #[test]
+    fn duration_exactly_one_minute() {
+        let out = render(&RunSummary {
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            errors: 0,
+            xfailed: 0,
+            todo: 0,
+            duration: Duration::from_secs(60),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
+            changed_selection: None,
+        });
+        assert!(out.contains("1:00.00"));
+    }
+
+    #[test]
+    fn duration_rounds_centiseconds_with_carry() {
+        // 119.999s should round up to 2:00.00, not truncate to 1:59.99.
+        let out = render(&RunSummary {
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            errors: 0,
+            xfailed: 0,
+            todo: 0,
+            duration: Duration::from_millis(119_999),
+            discovery_duration: None,
+            test_duration: None,
+            file_count: 0,
+            start_time: None,
+            changed_selection: None,
+        });
+        assert!(out.contains("2:00.00"), "expected carry, got: {out}");
+        assert!(!out.contains("1:59.99"));
+    }
+
+    #[test]
+    fn duration_breakdown_uses_minutes_seconds() {
+        let out = render(&RunSummary {
+            passed: 5,
+            failed: 0,
+            skipped: 0,
+            errors: 0,
+            xfailed: 0,
+            todo: 0,
+            duration: Duration::from_secs(125),
+            discovery_duration: Some(Duration::from_millis(30)),
+            test_duration: Some(Duration::from_secs(95)),
+            file_count: 0,
+            start_time: None,
+            changed_selection: None,
+        });
+        assert!(out.contains("2:05.00"));
+        assert!(out.contains("tests 1:35.00"));
+        assert!(out.contains("discover 30.00ms"));
     }
 
     #[test]
@@ -636,6 +793,25 @@ mod tests {
         // Keybindings render on a separate line below the badge.
         assert!(out.contains("Quit"));
         assert!(out.contains("Run all tests"));
+        assert!(out.contains("Clear results"));
+    }
+
+    #[test]
+    fn cleared_summary_shows_results_cleared_state() {
+        let mut buf = Vec::new();
+        write_cleared_summary(
+            &mut buf,
+            &WatchIdleInfo {
+                hint: "Results cleared. Waiting for file changes...",
+                start_time: None,
+                discovery_duration: None,
+            },
+        );
+        let out = String::from_utf8(buf).expect("utf-8");
+        assert!(out.contains("IDLE"));
+        assert!(out.contains("Results cleared"));
+        assert!(out.contains("Waiting for file changes"));
+        assert!(!out.contains("No tests run yet"));
     }
 
     #[test]

@@ -14,9 +14,21 @@ pub fn run_graph(
     changed: bool,
     base_branch: Option<&str>,
 ) -> Result<()> {
+    run_graph_with_cache_dir(root, excludes, connected_only, changed, base_branch, None)
+}
+
+pub fn run_graph_with_cache_dir(
+    root: Option<&Path>,
+    excludes: &[String],
+    connected_only: bool,
+    changed: bool,
+    base_branch: Option<&str>,
+    cache_dir: Option<&Path>,
+) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let root_path = root.unwrap_or(&cwd);
-    let mut discoverer = Discoverer::new_with_excludes(root_path, excludes);
+    let mut discoverer =
+        Discoverer::new_with_excludes_and_cache_dir(root_path, excludes, cache_dir);
     discoverer.rediscover();
 
     let changed_files = if changed {
@@ -102,9 +114,18 @@ pub fn run_graph(
 /// discovered module) are printed with a `?` suffix so users can spot
 /// typos or missing fixtures without reading through test output.
 pub fn run_fixture_graph(root: Option<&Path>, excludes: &[String]) -> Result<()> {
+    run_fixture_graph_with_cache_dir(root, excludes, None)
+}
+
+pub fn run_fixture_graph_with_cache_dir(
+    root: Option<&Path>,
+    excludes: &[String],
+    cache_dir: Option<&Path>,
+) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let root_path = root.unwrap_or(&cwd);
-    let mut discoverer = Discoverer::new_with_excludes(root_path, excludes);
+    let mut discoverer =
+        Discoverer::new_with_excludes_and_cache_dir(root_path, excludes, cache_dir);
     discoverer.rediscover();
 
     let hooks = discoverer.hooks();

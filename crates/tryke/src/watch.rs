@@ -199,10 +199,11 @@ pub async fn run_watch(
     dist: DistMode,
     all_tests: bool,
     run_now: bool,
+    cache_dir: Option<&Path>,
 ) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let root = root.unwrap_or(&cwd);
-    let mut discoverer = Discoverer::new_with_excludes(root, excludes);
+    let mut discoverer = Discoverer::new_with_excludes_and_cache_dir(root, excludes, cache_dir);
 
     let pool_size = workers.unwrap_or_else(worker_pool_size);
     let pool = WorkerPool::new(pool_size, python, root, log_level);

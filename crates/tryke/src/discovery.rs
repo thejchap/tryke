@@ -88,7 +88,18 @@ pub fn discover_tests(
     base_branch: Option<&str>,
     excludes: &[String],
 ) -> DiscoverySelection {
-    let mut discoverer = Discoverer::new_with_excludes(root, excludes);
+    discover_tests_with_cache_dir(root, changed, base_branch, excludes, None)
+}
+
+/// Discover tests using an optional cache directory override.
+pub fn discover_tests_with_cache_dir(
+    root: &Path,
+    changed: bool,
+    base_branch: Option<&str>,
+    excludes: &[String],
+    cache_dir: Option<&Path>,
+) -> DiscoverySelection {
+    let mut discoverer = Discoverer::new_with_excludes_and_cache_dir(root, excludes, cache_dir);
     discoverer.rediscover();
     let warnings = all_discovery_warnings(&discoverer);
     let hooks = discoverer.hooks();
@@ -148,15 +159,25 @@ pub fn discover_tests_for_paths(
     path_specs: &[PathSpec],
     excludes: &[String],
 ) -> DiscoverySelection {
+    discover_tests_for_paths_with_cache_dir(root, path_specs, excludes, None)
+}
+
+/// Discover tests for explicit paths using an optional cache directory override.
+pub fn discover_tests_for_paths_with_cache_dir(
+    root: &Path,
+    path_specs: &[PathSpec],
+    excludes: &[String],
+    cache_dir: Option<&Path>,
+) -> DiscoverySelection {
     let walk_roots = match resolve_walk_roots(root, path_specs) {
         Some(roots) => roots,
         None => {
             debug!("discover_tests_for_paths: falling back to full discovery");
-            return discover_tests(root, false, None, excludes);
+            return discover_tests_with_cache_dir(root, false, None, excludes, cache_dir);
         }
     };
 
-    let mut discoverer = Discoverer::new_with_excludes(root, excludes);
+    let mut discoverer = Discoverer::new_with_excludes_and_cache_dir(root, excludes, cache_dir);
     let tests = discoverer.rediscover_restricted(&walk_roots);
     let warnings = all_discovery_warnings(&discoverer);
     let hooks = discoverer.hooks();
@@ -223,7 +244,17 @@ pub fn discover_tests_changed_first(
     base_branch: Option<&str>,
     excludes: &[String],
 ) -> DiscoverySelection {
-    let mut discoverer = Discoverer::new_with_excludes(root, excludes);
+    discover_tests_changed_first_with_cache_dir(root, base_branch, excludes, None)
+}
+
+/// Discover all tests with changed tests first using an optional cache directory override.
+pub fn discover_tests_changed_first_with_cache_dir(
+    root: &Path,
+    base_branch: Option<&str>,
+    excludes: &[String],
+    cache_dir: Option<&Path>,
+) -> DiscoverySelection {
+    let mut discoverer = Discoverer::new_with_excludes_and_cache_dir(root, excludes, cache_dir);
     discoverer.rediscover();
     let warnings = all_discovery_warnings(&discoverer);
     let hooks = discoverer.hooks();

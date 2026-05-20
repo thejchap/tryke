@@ -77,12 +77,48 @@ pub struct DiskCache {
     /// The path we loaded from / will save to. `None` disables I/O
     /// (used by tests that don't want a filesystem footprint).
     path: Option<PathBuf>,
+    /// Best-effort `.gitignore` to create if one does not exist.
+    gitignore: Option<GitignoreConfig>,
+}
+
+#[derive(Debug)]
+struct GitignoreConfig {
+    dir: PathBuf,
+    contents: &'static str,
 }
 
 impl DiskCache {
     /// Load a cache from `path`. Returns an empty cache if the file is
     /// missing, corrupted, or has a mismatched `CACHE_VERSION`.
     pub fn load(path: PathBuf) -> Self {
+        let gitignore = path
+            .parent()
+            .and_then(Path::parent)
+            .map(|dir| GitignoreConfig {
+                dir: dir.to_path_buf(),
+                contents: "# created by tryke\n*\n",
+            });
+        Self::load_with_gitignore(path, gitignore)
+    }
+
+    /// Load the standard discovery cache file inside `cache_dir`.
+    ///
+    /// `cache_dir` is also the directory that receives the best-effort
+    /// `.gitignore`, matching user intent for a custom cache location. Unlike
+    /// the default `.tryke` state directory, this writes narrow patterns only:
+    /// a user-provided cache directory may be an existing project directory.
+    pub fn load_in_dir(cache_dir: PathBuf) -> Self {
+        let path = cache_dir.join("discovery-v1.bin");
+        Self::load_with_gitignore(
+            path,
+            Some(GitignoreConfig {
+                dir: cache_dir,
+                contents: "# created by tryke\n/discovery-v1.bin\n/discovery-v1.tmp\n",
+            }),
+        )
+    }
+
+    fn load_with_gitignore(path: PathBuf, gitignore: Option<GitignoreConfig>) -> Self {
         let entries = match Self::try_load(&path) {
             Ok(entries) => entries,
             Err(err) => {
@@ -98,6 +134,7 @@ impl DiskCache {
         Self {
             entries,
             path: Some(path),
+            gitignore,
         }
     }
 
@@ -147,16 +184,15 @@ impl DiskCache {
         };
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
-            // Drop a `.gitignore` at the top of the tryke state dir
-            // (parent-of-parent of the cache file, since the layout is
-            // `.tryke/cache/discovery-v1.bin`) so users don't have to
-            // remember to gitignore tryke's internal cache. Best-effort
-            // — a write failure here shouldn't abort the save.
-            if let Some(state_dir) = parent.parent() {
-                let gitignore = state_dir.join(".gitignore");
-                if !gitignore.exists() {
-                    let _ = fs::write(&gitignore, "# created by tryke\n*\n");
-                }
+        }
+        // Drop a `.gitignore` at the tryke state/cache directory so users
+        // don't have to remember to ignore tryke's internal cache. Best-effort
+        // — a write failure here shouldn't abort the save.
+        if let Some(config) = self.gitignore.as_ref() {
+            let _ = fs::create_dir_all(&config.dir);
+            let gitignore = config.dir.join(".gitignore");
+            if !gitignore.exists() {
+                let _ = fs::write(&gitignore, config.contents);
             }
         }
         let file = CacheFile {
@@ -194,6 +230,39 @@ mod tests {
         cache.save().expect("save");
         let reloaded = DiskCache::load(path);
         assert_eq!(reloaded.entries.len(), 0);
+    }
+
+    #[test]
+    fn default_cache_writes_broad_gitignore_in_state_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir
+            .path()
+            .join(".tryke")
+            .join("cache")
+            .join("discovery-v1.bin");
+        let cache = DiskCache::load(path);
+
+        cache.save().expect("save");
+
+        let gitignore =
+            fs::read_to_string(dir.path().join(".tryke/.gitignore")).expect("read gitignore");
+        assert_eq!(gitignore, "# created by tryke\n*\n");
+    }
+
+    #[test]
+    fn custom_cache_dir_writes_narrow_gitignore() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache_dir = dir.path().join("custom-cache");
+        let cache = DiskCache::load_in_dir(cache_dir.clone());
+
+        cache.save().expect("save");
+
+        let gitignore = fs::read_to_string(cache_dir.join(".gitignore")).expect("read gitignore");
+        assert_eq!(
+            gitignore,
+            "# created by tryke\n/discovery-v1.bin\n/discovery-v1.tmp\n"
+        );
+        assert!(!gitignore.lines().any(|line| line.trim() == "*"));
     }
 
     #[test]

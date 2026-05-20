@@ -24,6 +24,12 @@ tryke [OPTIONS] [COMMAND]
 
 **Options:**
 
+- `--cache-dir` `<CACHE_DIR>`
+
+  Directory for tryke's persistent discovery cache.
+
+  Overrides `[tool.tryke] cache_dir` in `pyproject.toml`. Defaults to `<project-root>/.tryke/cache`.
+
 - `--no-progress`
 
   Disable the terminal's native graphical progress bar.
@@ -55,6 +61,12 @@ tryke graph [OPTIONS]
 - `--base-branch` `<BASE_BRANCH>`
 
   Base branch for `--changed`. Uses `git merge-base` diff
+
+- `--cache-dir` `<CACHE_DIR>`
+
+  Directory for tryke's persistent discovery cache.
+
+  Overrides `[tool.tryke] cache_dir` in `pyproject.toml`. Defaults to `<project-root>/.tryke/cache`.
 
 - `--changed`
 
@@ -111,6 +123,12 @@ tryke server [OPTIONS]
 ```
 
 **Options:**
+
+- `--cache-dir` `<CACHE_DIR>`
+
+  Directory for tryke's persistent discovery cache.
+
+  Overrides `[tool.tryke] cache_dir` in `pyproject.toml`. Defaults to `<project-root>/.tryke/cache`.
 
 - `-e`, `--exclude` `<EXCLUDE>`
 
@@ -198,6 +216,12 @@ tryke test [OPTIONS] [PATHS]...
   Base branch for `--changed` / `--changed-first` diff.
 
   Compares against `git merge-base <base> HEAD` instead of the working tree. Typical CI usage: `--changed --base-branch origin/main`.
+
+- `--cache-dir` `<CACHE_DIR>`
+
+  Directory for tryke's persistent discovery cache.
+
+  Overrides `[tool.tryke] cache_dir` in `pyproject.toml`. Defaults to `<project-root>/.tryke/cache`.
 
 - `--changed`
 

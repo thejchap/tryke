@@ -284,6 +284,26 @@ fn main() -> Result<()> {
             );
             rt.block_on(server.run())
         }
+        Commands::Clean { root } => {
+            let cwd = env::current_dir()?;
+            let root_path = root.as_deref().unwrap_or(&cwd);
+            let config = tryke_config::load_effective_config(root_path);
+            let resolved_cache_dir = tryke_config::resolve_cache_dir(cache_dir.as_deref(), &config);
+            let report =
+                tryke_discovery::clean_project_cache(root_path, resolved_cache_dir.as_deref())?;
+            if report.removed_entries == 0 {
+                println!(
+                    "No tryke discovery cache found at {}",
+                    report.cache_dir.display()
+                );
+            } else {
+                println!(
+                    "Cleaned tryke discovery cache at {}",
+                    report.cache_dir.display()
+                );
+            }
+            Ok(())
+        }
         Commands::Graph {
             root,
             exclude,
@@ -926,6 +946,21 @@ mod tests {
     fn now_requires_watch() {
         let result = Cli::try_parse_from(["tryke", "test", "--now"]);
         assert!(result.is_err(), "--now without --watch should error");
+    }
+
+    #[test]
+    fn clean_subcommand_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "clean"]).unwrap();
+        assert!(matches!(command(&cli), Commands::Clean { root: None }));
+    }
+
+    #[test]
+    fn clean_root_flag_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "clean", "--root", "/tmp/project"]).unwrap();
+        assert!(matches!(
+            command(&cli),
+            Commands::Clean { root: Some(p) } if p == &PathBuf::from("/tmp/project")
+        ));
     }
 
     #[test]

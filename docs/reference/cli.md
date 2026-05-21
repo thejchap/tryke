@@ -18,6 +18,7 @@ tryke [OPTIONS] [COMMAND]
 
 **Commands:**
 
+- [`tryke clean`](#tryke-clean) — Remove tryke's persistent discovery cache
 - [`tryke graph`](#tryke-graph) — Print the import dependency graph for the project
 - [`tryke server`](#tryke-server) — Start a persistent worker server
 - [`tryke test`](#tryke-test) — Collect and run tests.
@@ -39,6 +40,44 @@ tryke [OPTIONS] [COMMAND]
 - `-q`, `--quiet`
 
   Decrease logging verbosity
+
+- `-v`, `--verbose`
+
+  Increase logging verbosity
+
+### `tryke clean`
+
+Remove tryke's persistent discovery cache.
+
+Deletes the default `<project-root>/.tryke/cache` directory. When `--cache-dir` or `[tool.tryke] cache_dir` points at a custom directory, only tryke-owned cache files inside that directory are removed.
+
+**Usage:**
+
+```text
+tryke clean [OPTIONS]
+```
+
+**Options:**
+
+- `--cache-dir` `<CACHE_DIR>`
+
+  Directory for tryke's persistent discovery cache.
+
+  Overrides `[tool.tryke] cache_dir` in `pyproject.toml`. Defaults to `<project-root>/.tryke/cache`.
+
+- `--no-progress`
+
+  Disable the terminal's native graphical progress bar.
+
+  By default tryke emits OSC 9;4 progress sequences, which terminals like Ghostty, WezTerm, iTerm2, Windows Terminal, and ConEmu render as a native progress indicator (taskbar badge, tab badge, etc.). Pass this flag in CI or in terminals that mis-render the sequence.
+
+- `-q`, `--quiet`
+
+  Decrease logging verbosity
+
+- `--root` `<ROOT>`
+
+  Project root used to resolve the default cache directory
 
 - `-v`, `--verbose`
 

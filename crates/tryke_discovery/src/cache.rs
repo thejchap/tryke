@@ -107,13 +107,15 @@ impl DiskCache {
     /// `.gitignore`, matching user intent for a custom cache location. Unlike
     /// the default `.tryke` state directory, this writes narrow patterns only:
     /// a user-provided cache directory may be an existing project directory.
+    /// The `.gitignore` ignores itself too, so it doesn't surface as an
+    /// untracked file when the cache dir lives inside a git repo.
     pub fn load_in_dir(cache_dir: PathBuf) -> Self {
         let path = cache_dir.join("discovery-v1.bin");
         Self::load_with_gitignore(
             path,
             Some(GitignoreConfig {
                 dir: cache_dir,
-                contents: "# created by tryke\n/discovery-v1.bin\n/discovery-v1.tmp\n",
+                contents: "# created by tryke\n/.gitignore\n/discovery-v1.bin\n/discovery-v1.tmp\n",
             }),
         )
     }
@@ -260,9 +262,11 @@ mod tests {
         let gitignore = fs::read_to_string(cache_dir.join(".gitignore")).expect("read gitignore");
         assert_eq!(
             gitignore,
-            "# created by tryke\n/discovery-v1.bin\n/discovery-v1.tmp\n"
+            "# created by tryke\n/.gitignore\n/discovery-v1.bin\n/discovery-v1.tmp\n"
         );
         assert!(!gitignore.lines().any(|line| line.trim() == "*"));
+        // The `.gitignore` ignores itself so it doesn't show up as untracked.
+        assert!(gitignore.lines().any(|line| line.trim() == "/.gitignore"));
     }
 
     #[test]

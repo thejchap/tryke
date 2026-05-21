@@ -82,17 +82,9 @@ pub fn resolved_excludes(
 }
 
 /// Discover tests, optionally restricting to changed files.
+///
+/// `cache_dir` optionally overrides the discovery cache directory.
 pub fn discover_tests(
-    root: &Path,
-    changed: bool,
-    base_branch: Option<&str>,
-    excludes: &[String],
-) -> DiscoverySelection {
-    discover_tests_with_cache_dir(root, changed, base_branch, excludes, None)
-}
-
-/// Discover tests using an optional cache directory override.
-pub fn discover_tests_with_cache_dir(
     root: &Path,
     changed: bool,
     base_branch: Option<&str>,
@@ -154,16 +146,9 @@ pub fn discover_tests_with_cache_dir(
 /// if any spec resolves to a nonexistent file or escapes the project
 /// root — the existing post-filter (`TestFilter::apply`) still runs in
 /// `main` and handles suffix-match semantics in that case.
+///
+/// `cache_dir` optionally overrides the discovery cache directory.
 pub fn discover_tests_for_paths(
-    root: &Path,
-    path_specs: &[PathSpec],
-    excludes: &[String],
-) -> DiscoverySelection {
-    discover_tests_for_paths_with_cache_dir(root, path_specs, excludes, None)
-}
-
-/// Discover tests for explicit paths using an optional cache directory override.
-pub fn discover_tests_for_paths_with_cache_dir(
     root: &Path,
     path_specs: &[PathSpec],
     excludes: &[String],
@@ -173,7 +158,7 @@ pub fn discover_tests_for_paths_with_cache_dir(
         Some(roots) => roots,
         None => {
             debug!("discover_tests_for_paths: falling back to full discovery");
-            return discover_tests_with_cache_dir(root, false, None, excludes, cache_dir);
+            return discover_tests(root, false, None, excludes, cache_dir);
         }
     };
 
@@ -239,16 +224,9 @@ fn resolve_walk_roots(root: &Path, path_specs: &[PathSpec]) -> Option<Vec<PathBu
 }
 
 /// Discover all tests but place changed tests first in the returned list.
+///
+/// `cache_dir` optionally overrides the discovery cache directory.
 pub fn discover_tests_changed_first(
-    root: &Path,
-    base_branch: Option<&str>,
-    excludes: &[String],
-) -> DiscoverySelection {
-    discover_tests_changed_first_with_cache_dir(root, base_branch, excludes, None)
-}
-
-/// Discover all tests with changed tests first using an optional cache directory override.
-pub fn discover_tests_changed_first_with_cache_dir(
     root: &Path,
     base_branch: Option<&str>,
     excludes: &[String],
@@ -370,7 +348,7 @@ mod tests {
         git_run(dir.path(), &["add", "test_feature.py"]);
         git_run(dir.path(), &["commit", "-m", "add feature test"]);
 
-        let discovered = discover_tests(dir.path(), true, Some("main"), &[]);
+        let discovered = discover_tests(dir.path(), true, Some("main"), &[], None);
         assert!(
             discovered.tests.iter().any(|t| t.name == "test_feature"),
             "should find the branch's test: {:?}",
@@ -404,7 +382,7 @@ mod tests {
         )
         .expect("write");
 
-        let discovered = discover_tests_changed_first(dir.path(), None, &[]);
+        let discovered = discover_tests_changed_first(dir.path(), None, &[], None);
         let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
 
         assert!(
@@ -437,7 +415,7 @@ mod tests {
             )],
         );
 
-        let discovered = discover_tests_changed_first(dir.path(), None, &[]);
+        let discovered = discover_tests_changed_first(dir.path(), None, &[], None);
         assert!(
             discovered.changed_prefix_len.is_none(),
             "changed_prefix_len should be None when no changes"
@@ -474,7 +452,7 @@ mod tests {
         git_run(dir.path(), &["add", "test_c.py"]);
         git_run(dir.path(), &["commit", "-m", "add test_c"]);
 
-        let discovered = discover_tests_changed_first(dir.path(), Some("main"), &[]);
+        let discovered = discover_tests_changed_first(dir.path(), Some("main"), &[], None);
         let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
 
         assert!(
@@ -502,7 +480,7 @@ mod tests {
         )
         .expect("write test_dyn.py");
 
-        let discovered = discover_tests(dir.path(), false, None, &[]);
+        let discovered = discover_tests(dir.path(), false, None, &[], None);
         assert!(
             !discovered.warnings.is_empty(),
             "should have at least one dynamic import warning"
@@ -551,7 +529,7 @@ mod tests {
             ),
         ]);
         let specs = vec![pathspec_file("test_a.py")];
-        let discovered = discover_tests_for_paths(dir.path(), &specs, &[]);
+        let discovered = discover_tests_for_paths(dir.path(), &specs, &[], None);
         let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec!["test_a"], "got: {names:?}");
     }
@@ -573,7 +551,7 @@ mod tests {
             ),
         ]);
         let specs = vec![pathspec_file("tests")];
-        let discovered = discover_tests_for_paths(dir.path(), &specs, &[]);
+        let discovered = discover_tests_for_paths(dir.path(), &specs, &[], None);
         let mut names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
         names.sort_unstable();
         assert_eq!(names, vec!["test_a", "test_b"], "got: {names:?}");
@@ -594,7 +572,7 @@ mod tests {
         // Dir + a contained file should dedupe to just the dir; both
         // tests should be discovered (not just test_a).
         let specs = vec![pathspec_file("tests"), pathspec_file("tests/test_a.py")];
-        let discovered = discover_tests_for_paths(dir.path(), &specs, &[]);
+        let discovered = discover_tests_for_paths(dir.path(), &specs, &[], None);
         let mut names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
         names.sort_unstable();
         assert_eq!(names, vec!["test_a", "test_b"], "got: {names:?}");
@@ -607,7 +585,7 @@ mod tests {
             "from tryke import test\n@test\ndef test_real(): pass\n",
         )]);
         let specs = vec![pathspec_file("does_not_exist.py")];
-        let discovered = discover_tests_for_paths(dir.path(), &specs, &[]);
+        let discovered = discover_tests_for_paths(dir.path(), &specs, &[], None);
         // Fallback runs full discovery; the post-filter (applied in
         // main, not here) is what would narrow the set. So we expect
         // every test in the project here.
@@ -631,7 +609,7 @@ mod tests {
             ),
         ]);
         let specs = vec![PathSpec::FileLine(PathBuf::from("test_a.py"), 2)];
-        let discovered = discover_tests_for_paths(dir.path(), &specs, &[]);
+        let discovered = discover_tests_for_paths(dir.path(), &specs, &[], None);
         let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
         // The walk is restricted to test_a.py — test_b should not appear
         // even before the post-filter narrows by line.
@@ -651,7 +629,8 @@ mod tests {
             ),
         ]);
         let specs = vec![pathspec_file("tests")];
-        let discovered = discover_tests_for_paths(dir.path(), &specs, &["tests/skip".to_string()]);
+        let discovered =
+            discover_tests_for_paths(dir.path(), &specs, &["tests/skip".to_string()], None);
         let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec!["test_a"], "got: {names:?}");
     }
@@ -666,7 +645,7 @@ mod tests {
         let outside_file = outside.path().join("stray.py");
         std::fs::write(&outside_file, "x = 1\n").expect("write stray");
         let specs = vec![PathSpec::File(outside_file)];
-        let discovered = discover_tests_for_paths(dir.path(), &specs, &[]);
+        let discovered = discover_tests_for_paths(dir.path(), &specs, &[], None);
         let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
         // Out-of-root spec falls back to full discovery rather than
         // attempting to walk outside the project.

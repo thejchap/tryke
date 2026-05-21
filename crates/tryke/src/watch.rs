@@ -358,7 +358,7 @@ mod tests {
             "from tryke import test, expect\n\n@test\ndef test_bad():\n    expect(1 + 1).to_equal(3)\n",
         )
         .expect("write test file");
-        let tests = discover_tests(dir.path(), false, None, &[]).tests;
+        let tests = discover_tests(dir.path(), false, None, &[], None).tests;
         let mut reporter = TextReporter::with_writer(Vec::new());
         let pool = WorkerPool::with_python_path(
             1,

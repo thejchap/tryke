@@ -5,11 +5,10 @@ use clap::Parser;
 use log::debug;
 use tryke::cli::{Cli, Commands, ReporterFormat};
 use tryke::discovery::{
-    discover_tests_changed_first_with_cache_dir, discover_tests_for_paths_with_cache_dir,
-    discover_tests_with_cache_dir, resolved_excludes,
+    discover_tests, discover_tests_changed_first, discover_tests_for_paths, resolved_excludes,
 };
 use tryke::execution::run_tests;
-use tryke::graph::{run_fixture_graph_with_cache_dir, run_graph_with_cache_dir};
+use tryke::graph::{run_fixture_graph, run_graph};
 use tryke::watch::run_watch;
 use tryke_reporter::{
     DotReporter, JSONReporter, JUnitReporter, LlmReporter, NextReporter, ProgressReporter,
@@ -204,21 +203,21 @@ fn main() -> Result<()> {
             // post-filter (`test_filter.apply` below) still runs to
             // honor `:line` specs, `--filter`, and `--markers`.
             let discovered = if !paths.is_empty() && !*changed && !*changed_first {
-                discover_tests_for_paths_with_cache_dir(
+                discover_tests_for_paths(
                     root_path,
                     &test_filter.path_specs,
                     &excludes,
                     resolved_cache_dir.as_deref(),
                 )
             } else if *changed_first {
-                discover_tests_changed_first_with_cache_dir(
+                discover_tests_changed_first(
                     root_path,
                     base_branch.as_deref(),
                     &excludes,
                     resolved_cache_dir.as_deref(),
                 )
             } else {
-                discover_tests_with_cache_dir(
+                discover_tests(
                     root_path,
                     *changed,
                     base_branch.as_deref(),
@@ -275,7 +274,7 @@ fn main() -> Result<()> {
             let config = tryke_config::load_effective_config(&root_path);
             let resolved_python = tryke_config::resolve_python(python.as_deref(), &config);
             let resolved_cache_dir = tryke_config::resolve_cache_dir(cache_dir.as_deref(), &config);
-            let server = tryke_server::Server::new_with_cache_dir(
+            let server = tryke_server::Server::new(
                 *port,
                 root_path,
                 excludes,
@@ -303,13 +302,9 @@ fn main() -> Result<()> {
             let config = tryke_config::load_effective_config(root_path);
             let resolved_cache_dir = tryke_config::resolve_cache_dir(cache_dir.as_deref(), &config);
             if *fixtures {
-                run_fixture_graph_with_cache_dir(
-                    Some(root_path),
-                    &excludes,
-                    resolved_cache_dir.as_deref(),
-                )
+                run_fixture_graph(Some(root_path), &excludes, resolved_cache_dir.as_deref())
             } else {
-                run_graph_with_cache_dir(
+                run_graph(
                     Some(root_path),
                     &excludes,
                     *connected_only,

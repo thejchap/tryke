@@ -31,17 +31,6 @@ impl Server {
         excludes: Vec<String>,
         python: String,
         log_level: LevelFilter,
-    ) -> Self {
-        Self::new_with_cache_dir(port, root, excludes, python, log_level, None)
-    }
-
-    #[must_use]
-    pub fn new_with_cache_dir(
-        port: u16,
-        root: PathBuf,
-        excludes: Vec<String>,
-        python: String,
-        log_level: LevelFilter,
         cache_dir: Option<PathBuf>,
     ) -> Self {
         Self {
@@ -196,7 +185,7 @@ mod tests {
         let root = dir.path().to_path_buf();
         let python = test_python_bin();
         tokio::spawn(async move {
-            Server::new(port, root, vec![], python, LevelFilter::Off)
+            Server::new(port, root, vec![], python, LevelFilter::Off, None)
                 .run_on_listener(listener)
                 .await
                 .unwrap();

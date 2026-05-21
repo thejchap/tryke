@@ -121,7 +121,7 @@ impl Discoverer {
             crate::resolve_src_roots(&root, src)
         };
         let cache = cache_dir.map_or_else(
-            || DiskCache::load(root.join(".tryke").join("cache").join("discovery-v1.bin")),
+            || DiskCache::load_in_state_dir(root.join(".tryke")),
             |dir| DiskCache::load_in_dir(dir.to_path_buf()),
         );
         Self {

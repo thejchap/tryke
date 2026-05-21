@@ -31,6 +31,10 @@ pub struct TrykeConfig {
     /// `None` means fall back to `python` on Windows / `python3` on Unix
     /// (per `default_python()`).
     pub python: Option<String>,
+    /// Directory for tryke's persistent discovery cache.
+    ///
+    /// `None` means use the default `<project-root>/.tryke/cache` path.
+    pub cache_dir: Option<PathBuf>,
 }
 
 impl TrykeConfig {
@@ -44,6 +48,7 @@ impl TrykeConfig {
                     src: config.src.unwrap_or_else(|| vec![".".into()]),
                 },
                 python: config.python,
+                cache_dir: config.cache_dir,
             })
         })
     }
@@ -91,6 +96,12 @@ pub fn load_effective_config(start: &Path) -> TrykeConfig {
             config.python = Some(root.join(path).to_string_lossy().into_owned());
         }
     }
+    if let Some(cache_dir) = config.cache_dir.as_deref() {
+        let has_prefix = matches!(cache_dir.components().next(), Some(Component::Prefix(_)));
+        if !cache_dir.is_absolute() && !cache_dir.has_root() && !has_prefix {
+            config.cache_dir = Some(root.join(cache_dir));
+        }
+    }
     config
 }
 
@@ -114,6 +125,17 @@ pub fn resolve_python(cli_override: Option<&str>, config: &TrykeConfig) -> Strin
         .map(str::to_owned)
         .or_else(|| config.python.clone())
         .unwrap_or_else(|| default_python().to_owned())
+}
+
+/// Resolve the discovery cache directory.
+///
+/// Precedence: CLI override > `[tool.tryke] cache_dir` in `pyproject.toml` >
+/// `None`, which tells discovery to use its default `<project-root>/.tryke/cache`.
+#[must_use]
+pub fn resolve_cache_dir(cli_override: Option<&Path>, config: &TrykeConfig) -> Option<PathBuf> {
+    cli_override
+        .map(Path::to_path_buf)
+        .or_else(|| config.cache_dir.clone())
 }
 
 /// Default `RUST_LOG`-style filter directive when `RUST_LOG` is unset.
@@ -174,6 +196,7 @@ struct RawTrykeConfig {
     exclude: Option<Vec<String>>,
     src: Option<Vec<String>>,
     python: Option<String>,
+    cache_dir: Option<PathBuf>,
 }
 
 #[cfg(test)]
@@ -201,6 +224,7 @@ mod tests {
                     src: vec![".".into()],
                 },
                 python: None,
+                cache_dir: None,
             })
         );
     }
@@ -216,6 +240,7 @@ mod tests {
                     src: vec![".".into()],
                 },
                 python: None,
+                cache_dir: None,
             })
         );
     }
@@ -244,6 +269,19 @@ mod tests {
     fn python_defaults_to_none() {
         let config = TrykeConfig::from_toml_str("[tool.tryke]\n").expect("some");
         assert_eq!(config.python, None);
+    }
+
+    #[test]
+    fn parses_cache_dir_path() {
+        let config = TrykeConfig::from_toml_str("[tool.tryke]\ncache_dir = \".cache/tryke\"\n")
+            .expect("some");
+        assert_eq!(config.cache_dir.as_deref(), Some(Path::new(".cache/tryke")));
+    }
+
+    #[test]
+    fn cache_dir_defaults_to_none() {
+        let config = TrykeConfig::from_toml_str("[tool.tryke]\n").expect("some");
+        assert_eq!(config.cache_dir, None);
     }
 
     #[test]
@@ -339,6 +377,32 @@ mod tests {
     }
 
     #[test]
+    fn load_effective_config_resolves_relative_cache_dir_against_config_root() {
+        let dir = tempdir();
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.tryke]\ncache_dir = \".cache/tryke\"\n",
+        )
+        .expect("write pyproject");
+        let nested = dir.path().join("subdir");
+        fs::create_dir_all(&nested).expect("create nested");
+        let config = load_effective_config(&nested);
+        assert_eq!(config.cache_dir, Some(dir.path().join(".cache/tryke")));
+    }
+
+    #[test]
+    fn load_effective_config_leaves_absolute_cache_dir_unchanged() {
+        let dir = tempdir();
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.tryke]\ncache_dir = \"/tmp/tryke-cache\"\n",
+        )
+        .expect("write pyproject");
+        let config = load_effective_config(dir.path());
+        assert_eq!(config.cache_dir, Some(PathBuf::from("/tmp/tryke-cache")));
+    }
+
+    #[test]
     fn resolve_python_prefers_cli_override() {
         let config = TrykeConfig {
             python: Some("/from/config".into()),
@@ -361,6 +425,36 @@ mod tests {
         let config = TrykeConfig::default();
         let expected = if cfg!(windows) { "python" } else { "python3" };
         assert_eq!(resolve_python(None, &config), expected);
+    }
+
+    #[test]
+    fn resolve_cache_dir_prefers_cli_override() {
+        let config = TrykeConfig {
+            cache_dir: Some(PathBuf::from("/from/config")),
+            ..TrykeConfig::default()
+        };
+        assert_eq!(
+            resolve_cache_dir(Some(Path::new("/from/cli")), &config),
+            Some(PathBuf::from("/from/cli"))
+        );
+    }
+
+    #[test]
+    fn resolve_cache_dir_falls_back_to_config() {
+        let config = TrykeConfig {
+            cache_dir: Some(PathBuf::from("/from/config")),
+            ..TrykeConfig::default()
+        };
+        assert_eq!(
+            resolve_cache_dir(None, &config),
+            Some(PathBuf::from("/from/config"))
+        );
+    }
+
+    #[test]
+    fn resolve_cache_dir_defaults_to_none() {
+        let config = TrykeConfig::default();
+        assert_eq!(resolve_cache_dir(None, &config), None);
     }
 
     #[test]

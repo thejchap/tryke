@@ -51,7 +51,18 @@ python = ".venv/bin/python3"
 
 Defaults to `python` on Windows and `python3` on Unix from `PATH`.
 
-**Path resolution.** A value with a path separator (e.g., `.venv/bin/python3`) is treated as a filesystem path; bare names (e.g., `python3`, `pypy`) are looked up via `PATH` exactly like `execvp` / `CreateProcess`. Relative paths are anchored to the directory containing `pyproject.toml`, not the cwd, so `python = ".venv/bin/python3"` keeps working when tryke is invoked from a sibling directory or a script. Absolute paths and Windows drive-relative values (e.g., `C:foo\python.exe`) are passed through unchanged.
+**Path resolution.** A value with a path separator (e.g., `.venv/bin/python3`) is treated as a filesystem path; bare names (e.g., `python3`, `pypy`) are looked up via `PATH` exactly like `execvp` / `CreateProcess`. Relative paths are anchored to the directory containing `pyproject.toml`, not the cwd, so `python = ".venv/bin/python3"` keeps working when tryke is invoked from a sibling directory or a script. Absolute paths and Windows drive-relative values (e.g., `C:foo\\python.exe`) are passed through unchanged.
+
+### `cache_dir`
+
+Directory for tryke's persistent discovery cache. By default, tryke stores discovery results under `<project-root>/.tryke/cache`; set `cache_dir` when that location is not suitable (for example, a read-only project checkout or a shared CI cache directory).
+
+```toml
+[tool.tryke]
+cache_dir = ".cache/tryke"
+```
+
+Relative paths are anchored to the directory containing `pyproject.toml`, not the cwd. The command-line `--cache-dir` flag takes precedence for one-off runs.
 
 ## CLI overrides
 
@@ -82,6 +93,17 @@ Override the project root (where Tryke looks for `pyproject.toml` and test files
 ```bash
 tryke test --root /path/to/project
 ```
+
+### `--cache-dir`
+
+Override the discovery cache directory from the command line:
+
+```bash
+tryke --cache-dir /tmp/tryke-cache test
+tryke server --cache-dir .cache/tryke
+```
+
+`--cache-dir` is a global flag and overrides `[tool.tryke] cache_dir`. Relative CLI paths are resolved by the shell/process cwd.
 
 ## Logging
 

@@ -251,7 +251,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
         let excludes = resolved_excludes(dir.path(), &[], &[]);
-        let tests = discover_tests(dir.path(), false, None, &excludes).tests;
+        let tests = discover_tests(dir.path(), false, None, &excludes, None).tests;
         let _ = run_tests(
             reporter,
             dir.path(),
@@ -353,7 +353,7 @@ mod tests {
         std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
         let mut reporter = TextReporter::new();
         // Non-git directory → git_changed_files returns None → discover_tests runs all (0 here)
-        let tests = discover_tests(dir.path(), true, None, &[]).tests;
+        let tests = discover_tests(dir.path(), true, None, &[], None).tests;
         assert!(
             run_tests(
                 &mut reporter,
@@ -399,7 +399,7 @@ def test_failing():
         )
         .expect("write test file");
 
-        let tests = discover_tests(dir.path(), false, None, &[]).tests;
+        let tests = discover_tests(dir.path(), false, None, &[], None).tests;
         assert_eq!(tests.len(), 2);
 
         let pool = WorkerPool::with_python_path(
@@ -449,7 +449,7 @@ def test_failing():
             "from tryke import test, expect\n\n@test\ndef test_ok():\n    expect(1 + 1).to_equal(2)\n",
         )
         .expect("write test file");
-        let tests = discover_tests(dir.path(), false, None, &[]).tests;
+        let tests = discover_tests(dir.path(), false, None, &[], None).tests;
         let mut reporter = TextReporter::with_writer(Vec::new());
         let pool = WorkerPool::with_python_path(
             1,
@@ -488,7 +488,7 @@ def test_failing():
             "from tryke import test, expect\n\n@test\ndef test_bad():\n    expect(1 + 1).to_equal(3)\n",
         )
         .expect("write test file");
-        let tests = discover_tests(dir.path(), false, None, &[]).tests;
+        let tests = discover_tests(dir.path(), false, None, &[], None).tests;
         let mut reporter = TextReporter::with_writer(Vec::new());
         let pool = WorkerPool::with_python_path(
             1,

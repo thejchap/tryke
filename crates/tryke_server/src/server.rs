@@ -18,6 +18,7 @@ pub struct Server {
     port: u16,
     root: PathBuf,
     excludes: Vec<String>,
+    cache_dir: Option<PathBuf>,
     python: String,
     log_level: LevelFilter,
 }
@@ -30,11 +31,13 @@ impl Server {
         excludes: Vec<String>,
         python: String,
         log_level: LevelFilter,
+        cache_dir: Option<PathBuf>,
     ) -> Self {
         Self {
             port,
             root,
             excludes,
+            cache_dir,
             python,
             log_level,
         }
@@ -72,9 +75,10 @@ impl Server {
         let dirty = Arc::new(AtomicBool::new(false));
 
         let (bcast_tx, _) = broadcast::channel::<Bytes>(256);
-        let disc = Arc::new(Mutex::new(Discoverer::new_with_excludes(
+        let disc = Arc::new(Mutex::new(Discoverer::new_with_excludes_and_cache_dir(
             &self.root,
             &self.excludes,
+            self.cache_dir.as_deref(),
         )));
         disc.lock().await.rediscover();
 
@@ -181,7 +185,7 @@ mod tests {
         let root = dir.path().to_path_buf();
         let python = test_python_bin();
         tokio::spawn(async move {
-            Server::new(port, root, vec![], python, LevelFilter::Off)
+            Server::new(port, root, vec![], python, LevelFilter::Off, None)
                 .run_on_listener(listener)
                 .await
                 .unwrap();

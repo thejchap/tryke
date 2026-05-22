@@ -302,6 +302,17 @@ pub enum Commands {
         python: Option<String>,
     },
 
+    /// Remove tryke's persistent discovery cache.
+    ///
+    /// Deletes the default `<project-root>/.tryke/cache` directory. When
+    /// `--cache-dir` or `[tool.tryke] cache_dir` points at a custom directory,
+    /// only tryke-owned cache files inside that directory are removed.
+    Clean {
+        /// Project root used to resolve the default cache directory.
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+
     /// Print the import dependency graph for the project.
     ///
     /// Renders the static import graph that drives discovery, change

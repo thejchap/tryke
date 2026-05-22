@@ -34,7 +34,7 @@ const CACHE_VERSION: u32 = 3;
 
 /// Name of the cache file within its directory. The stem is also reused
 /// (with a `.tmp` extension) for the atomic write in `save`.
-const CACHE_FILE_NAME: &str = "discovery-v1.bin";
+pub const CACHE_FILE_NAME: &str = "discovery-v1.bin";
 
 /// Identity of a source file derived from `stat`. Cheap to obtain
 /// without reading the file contents.
@@ -89,6 +89,66 @@ pub struct DiskCache {
 struct GitignoreConfig {
     dir: PathBuf,
     contents: &'static str,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct CleanCacheReport {
+    pub cache_dir: PathBuf,
+    pub removed_entries: usize,
+}
+
+/// Remove tryke's persistent discovery cache for `start`.
+///
+/// When `cache_dir` is `None`, the default cache lives under tryke's owned
+/// state directory at `<project-root>/.tryke/cache`, so the whole cache
+/// directory can be removed. `start` is resolved the same way discovery finds a
+/// project root: walk up to the nearest `pyproject.toml`, then fall back to
+/// `start` when no project file exists. When a custom cache directory is
+/// configured, only tryke-owned cache files are removed to avoid deleting
+/// unrelated user data.
+///
+/// # Errors
+///
+/// Returns any filesystem error encountered while deleting the cache directory
+/// or cache files, except missing cache paths which are treated as already
+/// clean.
+pub fn clean_project_cache(start: &Path, cache_dir: Option<&Path>) -> io::Result<CleanCacheReport> {
+    match cache_dir {
+        Some(cache_dir) => clean_custom_cache_dir(cache_dir),
+        None => clean_default_cache_dir(start),
+    }
+}
+
+fn clean_default_cache_dir(start: &Path) -> io::Result<CleanCacheReport> {
+    let root = crate::find_project_root(start).unwrap_or_else(|| start.to_path_buf());
+    let root = root.canonicalize().unwrap_or(root);
+    let cache_dir = root.join(".tryke").join("cache");
+    let removed_entries = match fs::remove_dir_all(&cache_dir) {
+        Ok(()) => 1,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => 0,
+        Err(err) => return Err(err),
+    };
+    Ok(CleanCacheReport {
+        cache_dir,
+        removed_entries,
+    })
+}
+
+fn clean_custom_cache_dir(cache_dir: &Path) -> io::Result<CleanCacheReport> {
+    let cache_file = cache_dir.join(CACHE_FILE_NAME);
+    let tmp_file = cache_file.with_extension("tmp");
+    let mut removed_entries = 0;
+    for path in [&cache_file, &tmp_file] {
+        match fs::remove_file(path) {
+            Ok(()) => removed_entries += 1,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(CleanCacheReport {
+        cache_dir: cache_dir.to_path_buf(),
+        removed_entries,
+    })
 }
 
 impl DiskCache {
@@ -291,6 +351,77 @@ mod tests {
         assert!(!gitignore.lines().any(|line| line.trim() == "*"));
         // The `.gitignore` ignores itself so it doesn't show up as untracked.
         assert!(gitignore.lines().any(|line| line.trim() == "/.gitignore"));
+    }
+
+    #[test]
+    fn clean_default_cache_removes_owned_state_cache_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_dir = dir
+            .path()
+            .canonicalize()
+            .expect("canonical tempdir")
+            .join(".tryke");
+        let cache_dir = state_dir.join("cache");
+        fs::create_dir_all(&cache_dir).expect("create cache dir");
+        fs::write(cache_dir.join("discovery-v1.bin"), b"cache").expect("write cache");
+        fs::write(cache_dir.join("future-cache.bin"), b"future").expect("write future cache");
+        fs::write(state_dir.join(".gitignore"), b"# created by tryke\n*\n")
+            .expect("write gitignore");
+
+        let report = clean_project_cache(dir.path(), None).expect("clean cache");
+
+        assert_eq!(report.cache_dir, cache_dir);
+        assert_eq!(report.removed_entries, 1);
+        assert!(!report.cache_dir.exists());
+        assert!(state_dir.join(".gitignore").exists());
+    }
+
+    #[test]
+    fn clean_default_cache_resolves_project_root_from_subdir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            b"[project]\nname = \"sample\"\n",
+        )
+        .expect("write pyproject");
+        let subdir = dir.path().join("src").join("pkg");
+        fs::create_dir_all(&subdir).expect("create subdir");
+        let project_root = dir.path().canonicalize().expect("canonical tempdir");
+        let cache_dir = project_root.join(".tryke").join("cache");
+        fs::create_dir_all(&cache_dir).expect("create cache dir");
+        fs::write(cache_dir.join("discovery-v1.bin"), b"cache").expect("write cache");
+
+        let report = clean_project_cache(&subdir, None).expect("clean cache");
+
+        assert_eq!(report.cache_dir, cache_dir);
+        assert_eq!(report.removed_entries, 1);
+        assert!(!report.cache_dir.exists());
+    }
+
+    #[test]
+    fn clean_custom_cache_dir_removes_only_tryke_cache_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache_dir = dir.path().join("custom-cache");
+        fs::create_dir_all(&cache_dir).expect("create custom cache dir");
+        fs::write(cache_dir.join("discovery-v1.bin"), b"cache").expect("write cache");
+        fs::write(cache_dir.join("discovery-v1.tmp"), b"tmp").expect("write tmp cache");
+        fs::write(cache_dir.join("keep-me.txt"), b"user data").expect("write user data");
+        fs::write(cache_dir.join(".gitignore"), b"custom\n").expect("write user gitignore");
+
+        let report = clean_project_cache(dir.path(), Some(&cache_dir)).expect("clean custom cache");
+
+        assert_eq!(report.cache_dir, cache_dir);
+        assert_eq!(report.removed_entries, 2);
+        assert!(!report.cache_dir.join("discovery-v1.bin").exists());
+        assert!(!report.cache_dir.join("discovery-v1.tmp").exists());
+        assert_eq!(
+            fs::read_to_string(report.cache_dir.join("keep-me.txt")).expect("read user data"),
+            "user data"
+        );
+        assert_eq!(
+            fs::read_to_string(report.cache_dir.join(".gitignore")).expect("read gitignore"),
+            "custom\n"
+        );
     }
 
     #[test]

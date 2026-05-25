@@ -63,6 +63,8 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - name: Create GitHub release
         run: |
+          set -euo pipefail
+
           uv run git-cliff --tag "${{ github.ref_name }}" --current --strip header \
             | gh release create "${{ github.ref_name }}" \
               --title "${{ github.ref_name }}" \

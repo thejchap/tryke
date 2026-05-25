@@ -17,3 +17,5 @@ config:
       - ul
       - video
   MD041: false
+  MD024:
+    siblings_only: true

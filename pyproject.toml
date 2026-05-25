@@ -81,4 +81,22 @@ dev = [
   # `BlockHtmlFormatter` passes through when a code block has no title.
   # Drop this pin once pymdown-extensions stops passing None.
   "pygments<2.20",
+  "bump-my-version>=1.3",
+  "git-cliff>=2.12",
 ]
+
+[tool.bumpversion]
+current_version = "0.0.29"
+commit = true
+tag = true
+tag_name = "v{new_version}"
+parse = "(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)"
+serialize = ["{major}.{minor}.{patch}"]
+message = "chore: bump: version {current_version} → {new_version}"
+pre_commit_hooks = ["uv sync", "git add uv.lock"]
+
+[[tool.bumpversion.files]]
+filename = "Cargo.toml"
+regex = true
+search = '\[workspace\.package\]\nversion = "{current_version}"'
+replace = '[workspace.package]\nversion = "{new_version}"'

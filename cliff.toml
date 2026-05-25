@@ -8,7 +8,7 @@ Released on {{ timestamp | date(format="%Y-%m-%d") }}.{% else %}## unreleased{% 
 {% for group, commits in commits | group_by(attribute="group") %}
 ### {{ group | striptags | trim | upper_first }}
 
-{% for commit in commits %}- {{ commit.message | upper_first }}
+{% for commit in commits %}- {% if commit.remote.pr_title %}{{ commit.remote.pr_title | upper_first }}{% if commit.remote.pr_number %} (#{{ commit.remote.pr_number }}){% endif %}{% else %}{{ commit.message | upper_first }}{% endif %}
 {% endfor %}{% endfor %}{% if github.contributors %}
 ### Contributors
 
@@ -29,7 +29,7 @@ commit_preprocessors = [{ pattern = "\\n[\\s\\S]*", replace = "" }]
 # Groups are driven by PR labels, not commit message prefixes.
 # Commits without a recognised label are skipped.
 commit_parsers = [
-  { field = "github.pr_labels", pattern = "enhancement", group = "Features" },
+  { field = "github.pr_labels", pattern = "(feature|enhancement)", group = "Features" },
   { field = "github.pr_labels", pattern = "bug(fix)?", group = "Bug Fixes" },
   { field = "github.pr_labels", pattern = "breaking", group = "Breaking Changes" },
   { field = "github.pr_labels", pattern = "documentation", group = "Documentation" },

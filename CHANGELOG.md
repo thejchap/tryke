@@ -1,9 +1,13 @@
 ## unreleased
 
+### Documentation
+
+- Mention uvx quickstart and playground in README and getting started (#127)
+
 ### Features
 
 - Add configurable discovery cache directory (#128)
-- Feat: add clean cache command (#129)
+- Add clean cache command (#129)
 
 ### Contributors
 
@@ -16,16 +20,20 @@ Released on 2026-05-18.
 
 ### Bug Fixes
 
-- Fix(reporter): honor --collect-only in next, sugar, dot, junit (#115)
-- Fix(server): close stale-worker race via in-band did_change RPC (#118)
+- Skip teardown drain when event loop is closed (#109)
+- Surface worker spawn and hook replay errors in test results (#107)
+- Honor --collect-only in next, sugar, dot, and junit reporters (#115)
+- Close stale worker race with in-band did_change RPC (#118)
 - Fix multiline CLI diagnostics (#124)
 
 ### Documentation
 
-- Docs: add highlights to README, align index.md getting-started with README (#121)
+- Add highlights to README and align getting started with README (#121)
 
 ### Features
 
+- Format durations over a minute as M:SS.SS in reporter summaries (#116)
+- Remove generated examples and default to watch mode (#120)
 - Highlight received assertion values (#123)
 - Add watch shortcut to clear results (#125)
 
@@ -37,6 +45,10 @@ Released on 2026-05-18.
 
 Released on 2026-05-08.
 
+### Features
+
+- Add --now flag to run tests immediately on watch startup (#102)
+
 ### Contributors
 
 - @thejchap
@@ -46,6 +58,10 @@ Released on 2026-05-08.
 
 Released on 2026-05-03.
 
+### Features
+
+- Unify Rust and Python worker logging via TRYKE_LOG (#94)
+
 ### Contributors
 
 - @thejchap
@@ -54,17 +70,22 @@ Released on 2026-05-03.
 
 Released on 2026-05-02.
 
+### Breaking Changes
+
+- Fold tryke watch into tryke test --watch (#73)
+
 ### Bug Fixes
 
-- Remove interpreter version check from `tryke_runner` (#92)
+- Remove interpreter version check from tryke_runner (#92)
 
 ### Documentation
 
+- Improve CLI documentation generation with detailed help text (#79)
 - Update documentation examples with labeled expectations (#87)
 
 ### Features
 
-- Feat(cases): allow @test("label").cases(...) composition (#90)
+- Support labeled test cases with @test("label").cases(...) (#90)
 
 ### Contributors
 
@@ -76,8 +97,8 @@ Released on 2026-04-28.
 
 ### Features
 
-- Feat(reporter): add `next` and `sugar` reporters (#71)
-- Add --no-progress flag to disable terminal native progress bar (#72)
+- Add next and sugar reporters (#71)
+- Add --no-progress flag to disable terminal progress bars (#72)
 
 ### Contributors
 
@@ -89,17 +110,17 @@ Released on 2026-04-26.
 
 ### Bug Fixes
 
-- Fix(runner): drain worker stderr to prevent RPC hang on chatty suites (#66)
+- Drain worker stderr to prevent RPC hangs on chatty suites (#66)
 - Replace importlib.reload with worker subprocess restart (#68)
 
 ### Documentation
 
-- Docs: refresh stale tryke test banner version to 0.0.23 (#65)
+- Refresh stale tryke test banner version to 0.0.23 (#65)
 
 ### Features
 
-- Feat(discovery): restrict walk + skip import graph when paths are passed (#64)
-- Feat(hooks): accept Annotated[T, Depends(...)] alongside default-form (#67)
+- Restrict discovery walk and skip import graph when paths are passed (#64)
+- Accept Annotated[T, Depends(...)] alongside default-form dependencies (#67)
 
 ### Contributors
 
@@ -117,12 +138,16 @@ Released on 2026-04-25.
 
 Released on 2026-04-25.
 
+### Bug Fixes
+
+- Replay hooks on respawn and stop unsafe test retries (#58)
+
 ### Features
 
-- Watch: add --all flag to rerun the full test set on every change (#59)
-- Feat(discovery): track PEP 810 lazy imports in dependency graph (#60)
-- Feat(discovery): resolve absolute imports across multiple src roots (#61)
-- Test labels (#62)
+- Add --all flag to rerun the full test set on every change (#59)
+- Track PEP 810 lazy imports in dependency graph (#60)
+- Resolve absolute imports across multiple source roots (#61)
+- Add test labels (#62)
 
 ### Contributors
 
@@ -149,11 +174,22 @@ Released on 2026-04-23.
 
 Released on 2026-04-23.
 
+### Bug Fixes
+
+- Share event loop across async fixtures and tests, and accept patch versions (#51)
+- Tag server runs with run_id and serialize concurrent runs (#54)
+
 ### Documentation
 
-- Docs: correct dot-reporter glyphs and add to_be_instance_of matcher (#53)
-- Docs: add session continuity and commit cadence to LLM migration prompt (#55)
-- Docs: drop stale _all/before_all/wrap_all hook terminology (#56)
+- Add comprehensive pytest-to-Tryke migration guide (#49)
+- Correct dot-reporter glyphs and add to_be_instance_of matcher (#53)
+- Add session continuity and commit cadence to LLM migration prompt (#55)
+- Drop stale _all/before_all hook terminology and fix --lf migration row (#56)
+
+### Features
+
+- Add to_be_instance_of matcher for type checking (#50)
+- Add fixtures, parametrization, Python 3.15 support, and docs (#52)
 
 ### Contributors
 
@@ -164,6 +200,10 @@ Released on 2026-04-23.
 
 Released on 2026-04-19.
 
+### Bug Fixes
+
+- Ship python/tryke_guard.py in the built wheel (#48)
+
 ### Contributors
 
 - @thejchap
@@ -172,6 +212,11 @@ Released on 2026-04-19.
 ## 0.0.17
 
 Released on 2026-04-18.
+
+### Features
+
+- Add @test.cases parametrization primitive (#46)
+- Add in-source testing via tryke_guard.__TRYKE_TESTING__ (#47)
 
 ### Contributors
 
@@ -188,6 +233,10 @@ Released on 2026-04-15.
 ## 0.0.14
 
 Released on 2026-04-14.
+
+### Features
+
+- Add @fixture and Depends() for setup, teardown, and DI (#39)
 
 ### Contributors
 
@@ -230,6 +279,15 @@ Released on 2026-03-17.
 
 Released on 2026-03-17.
 
+### Documentation
+
+- Revise documentation structure and installation guides (#30)
+
+### Features
+
+- Improve changed-test selection, discovery, docs, and benchmarks (#18)
+- Add doctest support for Python doctests (#32)
+
 ### Contributors
 
 - @thejchap
@@ -237,6 +295,11 @@ Released on 2026-03-17.
 ## 0.0.7
 
 Released on 2026-03-09.
+
+### Documentation
+
+- Update README (#9)
+- Update README (#10)
 
 ### Contributors
 

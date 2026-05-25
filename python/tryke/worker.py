@@ -50,20 +50,25 @@ just trusts the incoming list and does not re-parse source.
 from __future__ import annotations
 
 import contextlib
-import doctest
 import importlib
 import io
 import json
 import logging
 import os
 import sys
-import time
 import traceback
 from typing import TYPE_CHECKING
 
 import tryke_guard
-from tryke.hooks import HookExecutor, _fixture_per
-from tryke.runner import TestResult, failed, passed, run_test
+from tryke.hooks import HookExecutor
+from tryke.runner import (
+    HookInfo,
+    TestResult,
+    build_executor_from_hooks,
+    failed,
+    run_doctest,
+    run_test,
+)
 
 # Flip `tryke_guard.__TRYKE_TESTING__` on for this worker process. User
 # modules imported later via `_get_module` do
@@ -99,7 +104,7 @@ class Worker:
         self._output = output_stream
         self._modules: dict[str, ModuleType] = {}
         # Hook metadata registered per module by the runner (from JSON-RPC).
-        self._hook_metadata: dict[str, list[object]] = {}
+        self._hook_metadata: dict[str, list[HookInfo]] = {}
         # Hook executors cached per module.
         self._executors: dict[str, HookExecutor] = {}
 
@@ -264,7 +269,24 @@ class Worker:
         """
         if not isinstance(hooks, list):
             return
-        self._hook_metadata[module_name] = list(hooks)
+        typed: list[HookInfo] = []
+        for entry in hooks:
+            if not isinstance(entry, dict):
+                continue
+            h: dict[str, object] = {str(k): v for k, v in entry.items()}
+            name_val = h.get("name")
+            if not isinstance(name_val, str):
+                continue
+            raw_groups = h.get("groups", [])
+            groups = (
+                [str(g) for g in raw_groups] if isinstance(raw_groups, list) else []
+            )
+            raw_ln = h.get("line_number", 0)
+            line_number = raw_ln if isinstance(raw_ln, int) else 0
+            typed.append(
+                {"name": name_val, "groups": groups, "line_number": line_number}
+            )
+        self._hook_metadata[module_name] = typed
         # Invalidate any cached executor for this module.
         self._executors.pop(module_name, None)
         _log.debug("register_hooks: module=%s hook_count=%d", module_name, len(hooks))
@@ -285,23 +307,11 @@ class Worker:
             return None
 
         mod = self._get_module(module_name)
-        executor = HookExecutor()
-        for entry in hook_meta:
-            if not isinstance(entry, dict):
-                continue
-            # JSON-RPC delivers dict[str, object]; rebuild with typed comprehension.
-            h: dict[str, object] = {str(k): v for k, v in entry.items()}
-            name = str(h.get("name", ""))
-            raw_groups = h.get("groups", [])
-            groups = (
-                [str(g) for g in raw_groups] if isinstance(raw_groups, list) else []
-            )
-            raw_ln = h.get("line_number", 0)
-            line_number = raw_ln if isinstance(raw_ln, int) else 0
-            fn = getattr(mod, name, None)
-            if fn is not None and _fixture_per(fn) is not None:
-                executor.register_fixture(fn, groups=groups, line_number=line_number)
-
+        # Keep the executor entry even when no fixtures were registered so a
+        # repeated lookup short-circuits via the cache hit above. The empty
+        # executor still routes Depends() resolution through the shared
+        # resolver, matching pre-extraction behavior.
+        executor = build_executor_from_hooks(mod, hook_meta) or HookExecutor()
         self._executors[module_name] = executor
         return executor
 
@@ -342,11 +352,6 @@ class Worker:
     ) -> TestResult:
         try:
             mod = self._get_module(module_name)
-
-            obj = mod
-            if object_path:
-                for attr in object_path.split("."):
-                    obj = getattr(obj, attr)
         except Exception as exc:  # noqa: BLE001
             return failed(
                 0,
@@ -356,53 +361,7 @@ class Worker:
                 "",
                 "",
             )
-
-        finder = doctest.DocTestFinder(
-            verbose=False,
-            recurse=False,
-        )
-        tests = finder.find(
-            obj,
-            name=object_path or module_name,
-        )
-
-        output_buf = io.StringIO()
-        stdout_buf = io.StringIO()
-        stderr_buf = io.StringIO()
-
-        runner = doctest.DocTestRunner(
-            verbose=False,
-            optionflags=doctest.ELLIPSIS,
-        )
-
-        start = time.monotonic()
-        with (
-            contextlib.redirect_stdout(stdout_buf),
-            contextlib.redirect_stderr(stderr_buf),
-        ):
-            for dt in tests:
-                runner.run(
-                    dt,
-                    out=output_buf.write,
-                    clear_globs=False,
-                )
-
-        ms = int((time.monotonic() - start) * 1000)
-        with contextlib.redirect_stdout(io.StringIO()):
-            summary = runner.summarize(verbose=False)
-        out = stdout_buf.getvalue()
-        err = stderr_buf.getvalue()
-
-        if summary.failed > 0:
-            return failed(
-                ms,
-                output_buf.getvalue(),
-                None,
-                [],
-                out,
-                err,
-            )
-        return passed(ms, out, err)
+        return run_doctest(mod, object_path)
 
 
 def _configure_logging_from_env() -> None:

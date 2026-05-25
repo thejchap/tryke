@@ -1,10 +1,9 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use serde::Deserialize;
 use tryke_reporter::Reporter;
-use tryke_types::{RunTestResultWire, TestOutcome};
+use tryke_types::{RunSummary, RunTestResultWire, convert_wire_result};
 use wasm_bindgen::prelude::*;
 
 /// A single test result as sent by the Python playground runner: the
@@ -120,11 +119,11 @@ pub fn format_results(results_json: &str, reporter_name: &str) -> Result<String,
         serde_json::from_str(results_json).map_err(|e| JsError::new(&e.to_string()))?;
     let results: Vec<tryke_types::TestResult> = raw
         .into_iter()
-        .map(|r| tryke_types::convert_wire_result(r.test, r.result))
+        .map(|r| convert_wire_result(r.test, r.result))
         .collect();
 
     let tests: Vec<tryke_types::TestItem> = results.iter().map(|r| r.test.clone()).collect();
-    let summary = build_summary(&results);
+    let summary = RunSummary::from_results(&results);
 
     let output = match reporter_name {
         "text" => run_reporter(
@@ -235,41 +234,4 @@ fn run_collect<R: Reporter + IntoWriter>(
 ) -> Vec<u8> {
     reporter.on_collect_complete(tests);
     reporter.into_writer()
-}
-
-fn build_summary(results: &[tryke_types::TestResult]) -> tryke_types::RunSummary {
-    let mut passed = 0usize;
-    let mut failed = 0usize;
-    let mut skipped = 0usize;
-    let mut errors = 0usize;
-    let mut xfailed = 0usize;
-    let mut todo = 0usize;
-    let mut total_duration = Duration::ZERO;
-
-    for r in results {
-        total_duration += r.duration;
-        match &r.outcome {
-            TestOutcome::Passed => passed += 1,
-            TestOutcome::Failed { .. } | TestOutcome::XPassed => failed += 1,
-            TestOutcome::Skipped { .. } => skipped += 1,
-            TestOutcome::Error { .. } => errors += 1,
-            TestOutcome::XFailed { .. } => xfailed += 1,
-            TestOutcome::Todo { .. } => todo += 1,
-        }
-    }
-
-    tryke_types::RunSummary {
-        passed,
-        failed,
-        skipped,
-        errors,
-        xfailed,
-        todo,
-        duration: total_duration,
-        discovery_duration: None,
-        test_duration: Some(total_duration),
-        file_count: 0,
-        start_time: None,
-        changed_selection: None,
-    }
 }

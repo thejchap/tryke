@@ -10,23 +10,20 @@ internal representation.
 from __future__ import annotations
 
 import contextlib
-import doctest
 import importlib
-import io
 import json
 import sys
-import time
-import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Required, TypedDict
+from typing import Any
 
-from tryke.hooks import _FIXTURE_ATTR, HookExecutor
-from tryke.runner import TestResult, failed, passed, run_test
-
-if TYPE_CHECKING:
-    from types import ModuleType
-
-    from tryke.expect import CasesMarked
+from tryke.runner import (
+    HookInfo,
+    TestResult,
+    build_executor_from_hooks,
+    failed,
+    run_doctest,
+    run_test,
+)
 
 _PYODIDE_ROOT = Path("/home/pyodide")
 
@@ -119,98 +116,6 @@ def _test_result(test: dict[str, Any], result: TestResult) -> dict[str, Any]:
     return {"test": test, **result}
 
 
-def _resolve_doctest_object(mod: object, object_path: str) -> object:
-    """Walk a dotted attribute path off *mod* for doctest lookup."""
-    obj = mod
-    if object_path:
-        for attr in object_path.split("."):
-            obj = getattr(obj, attr)
-    return obj
-
-
-def _run_doctest(mod: object, object_path: str) -> TestResult:
-    """Execute the doctest(s) for *object_path* on *mod*.
-
-    Mirrors :meth:`tryke.worker.Worker._run_doctest` so playground
-    results match the normal worker path for items that
-    ``discover_file_from_source`` flags with ``doctest_object``.
-    """
-    try:
-        obj = _resolve_doctest_object(mod, object_path)
-    except Exception as exc:  # noqa: BLE001
-        return failed(
-            0,
-            f"{type(exc).__name__}: {exc}",
-            traceback.format_exc(),
-            [],
-            "",
-            "",
-        )
-
-    finder = doctest.DocTestFinder(verbose=False, recurse=False)
-    tests = finder.find(obj, name=object_path or getattr(mod, "__name__", ""))
-    output_buf = io.StringIO()
-    stdout_buf = io.StringIO()
-    stderr_buf = io.StringIO()
-    runner = doctest.DocTestRunner(verbose=False, optionflags=doctest.ELLIPSIS)
-
-    start = time.monotonic()
-    with (
-        contextlib.redirect_stdout(stdout_buf),
-        contextlib.redirect_stderr(stderr_buf),
-    ):
-        for dt in tests:
-            runner.run(dt, out=output_buf.write, clear_globs=False)
-
-    ms = int((time.monotonic() - start) * 1000)
-    with contextlib.redirect_stdout(io.StringIO()):
-        summary = runner.summarize(verbose=False)
-    out = stdout_buf.getvalue()
-    err = stderr_buf.getvalue()
-
-    if summary.failed > 0:
-        return failed(ms, output_buf.getvalue(), None, [], out, err)
-    return passed(ms, out, err)
-
-
-class _HookInfo(TypedDict, total=False):
-    """Shape of a hook item from WASM discovery (HookItem in TS).
-
-    Fields with serde ``skip_serializing_if`` on the Rust side may be
-    absent in the JSON, so everything except ``name`` is optional.
-    """
-
-    name: Required[str]
-    per: str
-    groups: list[str]
-    line_number: int | None
-
-
-def _build_executor(
-    mod: ModuleType,
-    hooks: list[_HookInfo],
-) -> HookExecutor | None:
-    """Create a :class:`HookExecutor` from WASM-discovered hook metadata.
-
-    Returns ``None`` when no fixtures are found, so the runner falls back
-    to the per-test ``DependencyResolver`` path (still correct for tests
-    that only use ``Depends()`` without registered fixtures).
-    """
-    executor = HookExecutor()
-    registered = False
-    for hook in hooks:
-        fn = getattr(mod, hook["name"], None)
-        if fn is None or not hasattr(fn, _FIXTURE_ATTR):
-            continue
-        executor.register_fixture(
-            fn,
-            groups=hook.get("groups", []),
-            line_number=hook.get("line_number") or 0,
-        )
-        registered = True
-    return executor if registered else None
-
-
 def run_tests(
     filename: str,
     source: str,
@@ -220,7 +125,7 @@ def run_tests(
 ) -> str:
     """Execute discovered tests and return JSON results for the WASM reporter."""
     tests: list[dict[str, Any]] = json.loads(tests_json)
-    hooks: list[_HookInfo] = json.loads(hooks_json) if hooks_json else []
+    hooks: list[HookInfo] = json.loads(hooks_json) if hooks_json else []
     results: list[dict[str, Any]] = []
 
     module_name = _write_files(filename, source, all_files_json)
@@ -237,13 +142,13 @@ def run_tests(
 
     # Build a shared executor so per-scope fixtures are resolved once and
     # reused across all tests (matching the native worker's lifecycle).
-    executor = _build_executor(mod, hooks)
+    executor = build_executor_from_hooks(mod, hooks)
 
     try:
         for t in tests:
             doctest_object = t.get("doctest_object")
             if doctest_object is not None:
-                results.append(_test_result(t, _run_doctest(mod, doctest_object)))
+                results.append(_test_result(t, run_doctest(mod, doctest_object)))
                 continue
 
             name: str = t["name"]
@@ -254,21 +159,12 @@ def run_tests(
                 results.append(_test_result(t, error))
                 continue
 
-            case_label: str | None = None
-            case_index = t.get("case_index")
-            if case_index is not None:
-                cases_marked: CasesMarked = fn
-                if hasattr(cases_marked, "__tryke_cases__"):
-                    cases = cases_marked.__tryke_cases__
-                    if case_index < len(cases):
-                        case_label = cases[case_index].label
-
             result = run_test(
                 fn,
                 executor=executor,
                 xfail=t.get("xfail"),
                 groups=t.get("groups"),
-                case_label=case_label,
+                case_label=t.get("case_label"),
             )
             results.append(_test_result(t, result))
     finally:

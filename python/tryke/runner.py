@@ -11,6 +11,7 @@ deserialize.
 from __future__ import annotations
 
 import contextlib
+import doctest
 import inspect
 import io
 import sys
@@ -18,7 +19,7 @@ import time
 import traceback
 import unittest
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Literal, NotRequired, Required, TypedDict
 
 from tryke.expect import (
     CaseArgs,
@@ -31,11 +32,13 @@ from tryke.expect import (
     _TodoMarked,
     _XfailMarked,
 )
+from tryke.hooks import HookExecutor, _fixture_per
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Generator, Iterable
+    from types import ModuleType
 
-    from tryke.hooks import HookExecutor, _FixtureFn
+    from tryke.hooks import _FixtureFn
 
 _TRYKE_PKG = str(Path(__file__).resolve().parent)
 
@@ -286,6 +289,97 @@ def extract_assertions(
                 )
             ]
     return []
+
+
+# -- Hook / doctest helpers ----------------------------------------------------
+
+
+class HookInfo(TypedDict, total=False):
+    """Statically-discovered fixture metadata, shared by the worker and playground.
+
+    Fields with serde ``skip_serializing_if`` on the Rust side may be
+    absent in the JSON, so everything except ``name`` is optional.
+    """
+
+    name: Required[str]
+    per: str
+    groups: list[str]
+    line_number: int | None
+
+
+def build_executor_from_hooks(
+    mod: ModuleType,
+    hooks: Iterable[HookInfo],
+) -> HookExecutor | None:
+    """Build a :class:`HookExecutor` from statically-discovered hook metadata.
+
+    Walks *hooks*, looks up each named callable on *mod*, and registers
+    the ones decorated with ``@fixture``. Returns ``None`` when no
+    fixtures end up registered so callers can choose to fall back to a
+    per-test :class:`DependencyResolver`.
+    """
+    executor = HookExecutor()
+    registered = False
+    for hook in hooks:
+        fn = getattr(mod, hook["name"], None)
+        if fn is None or _fixture_per(fn) is None:
+            continue
+        executor.register_fixture(
+            fn,
+            groups=hook.get("groups") or [],
+            line_number=hook.get("line_number") or 0,
+        )
+        registered = True
+    return executor if registered else None
+
+
+def run_doctest(mod: object, object_path: str) -> TestResult:
+    """Execute the doctest(s) for *object_path* on *mod*.
+
+    Walks ``object_path`` off *mod* (e.g. ``"Foo.bar"``), finds all
+    contained DocTests, and runs them with stdout/stderr captured.
+    Returns a failed result if any examples failed, otherwise passed.
+    """
+    try:
+        obj = mod
+        if object_path:
+            for attr in object_path.split("."):
+                obj = getattr(obj, attr)
+    except Exception as exc:  # noqa: BLE001
+        return failed(
+            0,
+            f"{type(exc).__name__}: {exc}",
+            traceback.format_exc(),
+            [],
+            "",
+            "",
+        )
+
+    finder_name = object_path or getattr(mod, "__name__", "")
+    finder = doctest.DocTestFinder(verbose=False, recurse=False)
+    tests = finder.find(obj, name=finder_name)
+    output_buf = io.StringIO()
+    stdout_buf = io.StringIO()
+    stderr_buf = io.StringIO()
+    runner = doctest.DocTestRunner(verbose=False, optionflags=doctest.ELLIPSIS)
+
+    start = time.monotonic()
+    with (
+        contextlib.redirect_stdout(stdout_buf),
+        contextlib.redirect_stderr(stderr_buf),
+    ):
+        for dt in tests:
+            runner.run(dt, out=output_buf.write, clear_globs=False)
+
+    ms = int((time.monotonic() - start) * 1000)
+    with contextlib.redirect_stdout(io.StringIO()):
+        summary = runner.summarize(verbose=False)
+    out = stdout_buf.getvalue()
+    err = stderr_buf.getvalue()
+
+    if summary.failed > 0:
+        return failed(ms, output_buf.getvalue(), None, [], out, err)
+    return passed(ms, out, err)
 
 
 # -- Soft-assertion context ----------------------------------------------------

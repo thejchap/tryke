@@ -1,11 +1,18 @@
-## [unreleased]
+## unreleased
 
 ### Features
 
 - Add configurable discovery cache directory (#128)
 - Feat: add clean cache command (#129)
 
-## [0.0.29] - 2026-05-18
+### Contributors
+
+- @sarvesh1327
+- @thejchap
+
+## 0.0.29
+
+Released on 2026-05-18.
 
 ### Bug Fixes
 
@@ -22,11 +29,30 @@
 - Highlight received assertion values (#123)
 - Add watch shortcut to clear results (#125)
 
-## [0.0.28] - 2026-05-08
+### Contributors
 
-## [0.0.27] - 2026-05-03
+- @thejchap
 
-## [0.0.26] - 2026-05-02
+## 0.0.28
+
+Released on 2026-05-08.
+
+### Contributors
+
+- @thejchap
+- @dependabot[bot]
+
+## 0.0.27
+
+Released on 2026-05-03.
+
+### Contributors
+
+- @thejchap
+
+## 0.0.26
+
+Released on 2026-05-02.
 
 ### Bug Fixes
 
@@ -40,14 +66,26 @@
 
 - Feat(cases): allow @test("label").cases(...) composition (#90)
 
-## [0.0.25] - 2026-04-28
+### Contributors
+
+- @thejchap
+
+## 0.0.25
+
+Released on 2026-04-28.
 
 ### Features
 
 - Feat(reporter): add `next` and `sugar` reporters (#71)
 - Add --no-progress flag to disable terminal native progress bar (#72)
 
-## [0.0.24] - 2026-04-26
+### Contributors
+
+- @thejchap
+
+## 0.0.24
+
+Released on 2026-04-26.
 
 ### Bug Fixes
 
@@ -63,9 +101,21 @@
 - Feat(discovery): restrict walk + skip import graph when paths are passed (#64)
 - Feat(hooks): accept Annotated[T, Depends(...)] alongside default-form (#67)
 
-## [0.0.23] - 2026-04-25
+### Contributors
 
-## [0.0.22] - 2026-04-25
+- @thejchap
+
+## 0.0.23
+
+Released on 2026-04-25.
+
+### Contributors
+
+- @thejchap
+
+## 0.0.22
+
+Released on 2026-04-25.
 
 ### Features
 
@@ -74,11 +124,30 @@
 - Feat(discovery): resolve absolute imports across multiple src roots (#61)
 - Test labels (#62)
 
-## [0.0.21] - 2026-04-23
+### Contributors
 
-## [0.0.20] - 2026-04-23
+- @thejchap
+- @claude
 
-## [0.0.19] - 2026-04-23
+## 0.0.21
+
+Released on 2026-04-23.
+
+### Contributors
+
+- @thejchap
+
+## 0.0.20
+
+Released on 2026-04-23.
+
+### Contributors
+
+- @thejchap
+
+## 0.0.19
+
+Released on 2026-04-23.
 
 ### Documentation
 
@@ -86,32 +155,130 @@
 - Docs: add session continuity and commit cadence to LLM migration prompt (#55)
 - Docs: drop stale _all/before_all/wrap_all hook terminology (#56)
 
-## [0.0.18] - 2026-04-19
+### Contributors
 
-## [0.0.17] - 2026-04-18
+- @thejchap
+- @claude
 
-## [0.0.15] - 2026-04-15
+## 0.0.18
 
-## [0.0.14] - 2026-04-14
+Released on 2026-04-19.
 
-## [0.0.13] - 2026-03-29
+### Contributors
 
-## [0.0.12] - 2026-03-26
+- @thejchap
+- @claude
 
-## [0.0.11] - 2026-03-21
+## 0.0.17
 
-## [0.0.10] - 2026-03-17
+Released on 2026-04-18.
 
-## [0.0.9] - 2026-03-17
+### Contributors
 
-## [0.0.7] - 2026-03-09
+- @thejchap
 
-## [0.0.6] - 2026-03-08
+## 0.0.15
 
-## [0.0.5] - 2026-03-08
+Released on 2026-04-15.
 
-## [0.0.4] - 2026-02-28
+### Contributors
 
-## [0.0.3] - 2026-02-28
+- @thejchap
 
-## [0.0.2] - 2026-02-28
+## 0.0.14
+
+Released on 2026-04-14.
+
+### Contributors
+
+- @thejchap
+
+## 0.0.13
+
+Released on 2026-03-29.
+
+### Contributors
+
+- @thejchap
+- @dependabot[bot]
+
+## 0.0.12
+
+Released on 2026-03-26.
+
+### Contributors
+
+- @thejchap
+
+## 0.0.11
+
+Released on 2026-03-21.
+
+### Contributors
+
+- @thejchap
+
+## 0.0.10
+
+Released on 2026-03-17.
+
+### Contributors
+
+- @thejchap
+
+## 0.0.9
+
+Released on 2026-03-17.
+
+### Contributors
+
+- @thejchap
+
+## 0.0.7
+
+Released on 2026-03-09.
+
+### Contributors
+
+- @thejchap
+- @dependabot[bot]
+
+## 0.0.6
+
+Released on 2026-03-08.
+
+### Contributors
+
+- @thejchap
+
+## 0.0.5
+
+Released on 2026-03-08.
+
+### Contributors
+
+- @thejchap
+
+## 0.0.4
+
+Released on 2026-02-28.
+
+### Contributors
+
+- @thejchap
+
+## 0.0.3
+
+Released on 2026-02-28.
+
+### Contributors
+
+- @thejchap
+
+## 0.0.2
+
+Released on 2026-02-28.
+
+### Contributors
+
+- @thejchap

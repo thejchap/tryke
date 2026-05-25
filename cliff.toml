@@ -2,15 +2,17 @@
 # trim = false so the trailing blank line in the body template is preserved,
 # ensuring git-cliff --prepend leaves a blank line before any existing content.
 trim = false
-body = """{% if version %}## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}{% else %}## [unreleased]{% endif %}
+body = """{% if version %}## {{ version | trim_start_matches(pat="v") }}
+
+Released on {{ timestamp | date(format="%Y-%m-%d") }}.{% else %}## unreleased{% endif %}
 {% for group, commits in commits | group_by(attribute="group") %}
 ### {{ group | striptags | trim | upper_first }}
 
 {% for commit in commits %}- {{ commit.message | upper_first }}
-{% endfor %}{% endfor %}{% if contributors %}
+{% endfor %}{% endfor %}{% if github.contributors %}
 ### Contributors
 
-{% for contributor in contributors %}- @{{ contributor.username }}
+{% for contributor in github.contributors %}- @{{ contributor.username }}
 {% endfor %}{% endif %}
 """
 
@@ -23,17 +25,15 @@ conventional_commits = false
 filter_unconventional = false
 # Strip everything from the first newline so that subjects wrapped across
 # two lines (without the required blank-line separator) still parse correctly.
-commit_preprocessors = [
-    { pattern = "\\n[\\s\\S]*", replace = "" },
-]
+commit_preprocessors = [{ pattern = "\\n[\\s\\S]*", replace = "" }]
 # Groups are driven by PR labels, not commit message prefixes.
 # Commits without a recognised label are skipped.
 commit_parsers = [
-    { field = "github.pr_labels", pattern = "enhancement", group = "Features" },
-    { field = "github.pr_labels", pattern = "bug(fix)?", group = "Bug Fixes" },
-    { field = "github.pr_labels", pattern = "breaking", group = "Breaking Changes" },
-    { field = "github.pr_labels", pattern = "documentation", group = "Documentation" },
-    { field = "github.pr_labels", pattern = "performance", group = "Performance" },
-    { field = "github.pr_labels", pattern = "internal", skip = true },
-    { skip = true },
+  { field = "github.pr_labels", pattern = "enhancement", group = "Features" },
+  { field = "github.pr_labels", pattern = "bug(fix)?", group = "Bug Fixes" },
+  { field = "github.pr_labels", pattern = "breaking", group = "Breaking Changes" },
+  { field = "github.pr_labels", pattern = "documentation", group = "Documentation" },
+  { field = "github.pr_labels", pattern = "performance", group = "Performance" },
+  { field = "github.pr_labels", pattern = "internal", skip = true },
+  { skip = true },
 ]

@@ -48,6 +48,14 @@ A Rust-based Python test runner with a Jest-style API.
 
 ## Getting started
 
+Run tryke with [uvx](https://docs.astral.sh/uv/guides/tools/) to get started quickly:
+
+```bash
+uvx tryke test
+```
+
+Or, check out the [tryke playground](https://playground.tryke.dev) to try it out in your browser.
+
 ```python
 from typing import Annotated
 
@@ -110,4 +118,4 @@ This repository is licensed under the [MIT License](https://github.com/thejchap/
 
 ## Installation
 
-See the [installation](guides/installation.md) documentation.
+See the [installation](./guides/installation.md) documentation.

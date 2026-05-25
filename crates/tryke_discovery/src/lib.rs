@@ -11,9 +11,11 @@ pub(crate) mod cache;
 pub(crate) mod db;
 mod discoverer;
 pub(crate) mod import_graph;
+pub use cache::{CleanCacheReport, clean_project_cache};
 pub use discoverer::Discoverer;
 
 use ignore::WalkBuilder;
+
 use ruff_python_ast::{Expr, Stmt};
 use ruff_python_parser::parse_module;
 use ruff_source_file::LineIndex;

@@ -66,17 +66,53 @@ impl Discoverer {
     #[must_use]
     pub fn new(start: &Path) -> Self {
         let config = tryke_config::load_effective_config(start);
-        Self::new_with_options(start, &config.discovery.exclude, &config.discovery.src)
+        Self::new_with_options_and_cache_dir(
+            start,
+            &config.discovery.exclude,
+            &config.discovery.src,
+            config.cache_dir.as_deref(),
+        )
     }
 
     #[must_use]
     pub fn new_with_excludes(start: &Path, excludes: &[String]) -> Self {
-        let src = tryke_config::load_effective_config(start).discovery.src;
-        Self::new_with_options(start, excludes, &src)
+        let config = tryke_config::load_effective_config(start);
+        Self::new_with_options_and_cache_dir(
+            start,
+            excludes,
+            &config.discovery.src,
+            config.cache_dir.as_deref(),
+        )
+    }
+
+    #[must_use]
+    pub fn new_with_excludes_and_cache_dir(
+        start: &Path,
+        excludes: &[String],
+        cache_dir: Option<&Path>,
+    ) -> Self {
+        let config = tryke_config::load_effective_config(start);
+        let resolved_cache_dir = tryke_config::resolve_cache_dir(cache_dir, &config);
+        Self::new_with_options_and_cache_dir(
+            start,
+            excludes,
+            &config.discovery.src,
+            resolved_cache_dir.as_deref(),
+        )
     }
 
     #[must_use]
     pub fn new_with_options(start: &Path, excludes: &[String], src: &[String]) -> Self {
+        Self::new_with_options_and_cache_dir(start, excludes, src, None)
+    }
+
+    #[must_use]
+    pub fn new_with_options_and_cache_dir(
+        start: &Path,
+        excludes: &[String],
+        src: &[String],
+        cache_dir: Option<&Path>,
+    ) -> Self {
         let root = crate::find_project_root(start).unwrap_or_else(|| start.to_path_buf());
         let root = root.canonicalize().unwrap_or(root);
         let src_roots = if src.is_empty() {
@@ -84,8 +120,10 @@ impl Discoverer {
         } else {
             crate::resolve_src_roots(&root, src)
         };
-        let cache_path = root.join(".tryke").join("cache").join("discovery-v1.bin");
-        let cache = DiskCache::load(cache_path);
+        let cache = cache_dir.map_or_else(
+            || DiskCache::load_in_state_dir(root.join(".tryke")),
+            |dir| DiskCache::load_in_dir(dir.to_path_buf()),
+        );
         Self {
             db: Database::default(),
             inputs: HashMap::new(),
@@ -716,6 +754,41 @@ mod tests {
         fs::write(dir.path().join("test_example.py"), source_two).expect("overwrite file");
         let second = discoverer.rediscover();
         assert_eq!(second.len(), 2);
+    }
+
+    #[test]
+    fn discoverer_saves_cache_under_custom_cache_dir() {
+        let source = "@test\ndef test_hello():\n    pass\n";
+        let dir = make_project(&[("test_example.py", source)]);
+        let cache_dir = dir.path().join("custom-cache");
+        let mut discoverer =
+            Discoverer::new_with_excludes_and_cache_dir(dir.path(), &[], Some(&cache_dir));
+
+        discoverer.rediscover();
+
+        assert!(cache_dir.join("discovery-v1.bin").exists());
+        assert!(!dir.path().join(".tryke/cache/discovery-v1.bin").exists());
+    }
+
+    #[test]
+    fn discoverer_saves_cache_under_configured_cache_dir() {
+        let source = "@test\ndef test_hello():\n    pass\n";
+        let dir = make_project(&[("test_example.py", source)]);
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.tryke]\ncache_dir = \"configured-cache\"\n",
+        )
+        .expect("write pyproject");
+        let mut discoverer = Discoverer::new(dir.path());
+
+        discoverer.rediscover();
+
+        assert!(
+            dir.path()
+                .join("configured-cache/discovery-v1.bin")
+                .exists()
+        );
+        assert!(!dir.path().join(".tryke/cache/discovery-v1.bin").exists());
     }
 
     #[test]

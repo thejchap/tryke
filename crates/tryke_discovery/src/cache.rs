@@ -32,6 +32,10 @@ use crate::db::DiscoveredFile;
 /// root) would miss resolutions under secondary roots like `python/`.
 const CACHE_VERSION: u32 = 3;
 
+/// Name of the cache file within its directory. The stem is also reused
+/// (with a `.tmp` extension) for the atomic write in `save`.
+pub const CACHE_FILE_NAME: &str = "discovery-v1.bin";
+
 /// Identity of a source file derived from `stat`. Cheap to obtain
 /// without reading the file contents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,12 +81,124 @@ pub struct DiskCache {
     /// The path we loaded from / will save to. `None` disables I/O
     /// (used by tests that don't want a filesystem footprint).
     path: Option<PathBuf>,
+    /// Best-effort `.gitignore` to create if one does not exist.
+    gitignore: Option<GitignoreConfig>,
+}
+
+#[derive(Debug)]
+struct GitignoreConfig {
+    dir: PathBuf,
+    contents: &'static str,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct CleanCacheReport {
+    pub cache_dir: PathBuf,
+    pub removed_entries: usize,
+}
+
+/// Remove tryke's persistent discovery cache for `start`.
+///
+/// When `cache_dir` is `None`, the default cache lives under tryke's owned
+/// state directory at `<project-root>/.tryke/cache`, so the whole cache
+/// directory can be removed. `start` is resolved the same way discovery finds a
+/// project root: walk up to the nearest `pyproject.toml`, then fall back to
+/// `start` when no project file exists. When a custom cache directory is
+/// configured, only tryke-owned cache files are removed to avoid deleting
+/// unrelated user data.
+///
+/// # Errors
+///
+/// Returns any filesystem error encountered while deleting the cache directory
+/// or cache files, except missing cache paths which are treated as already
+/// clean.
+pub fn clean_project_cache(start: &Path, cache_dir: Option<&Path>) -> io::Result<CleanCacheReport> {
+    match cache_dir {
+        Some(cache_dir) => clean_custom_cache_dir(cache_dir),
+        None => clean_default_cache_dir(start),
+    }
+}
+
+fn clean_default_cache_dir(start: &Path) -> io::Result<CleanCacheReport> {
+    let root = crate::find_project_root(start).unwrap_or_else(|| start.to_path_buf());
+    let root = root.canonicalize().unwrap_or(root);
+    let cache_dir = root.join(".tryke").join("cache");
+    let removed_entries = match fs::remove_dir_all(&cache_dir) {
+        Ok(()) => 1,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => 0,
+        Err(err) => return Err(err),
+    };
+    Ok(CleanCacheReport {
+        cache_dir,
+        removed_entries,
+    })
+}
+
+fn clean_custom_cache_dir(cache_dir: &Path) -> io::Result<CleanCacheReport> {
+    let cache_file = cache_dir.join(CACHE_FILE_NAME);
+    let tmp_file = cache_file.with_extension("tmp");
+    let mut removed_entries = 0;
+    for path in [&cache_file, &tmp_file] {
+        match fs::remove_file(path) {
+            Ok(()) => removed_entries += 1,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(CleanCacheReport {
+        cache_dir: cache_dir.to_path_buf(),
+        removed_entries,
+    })
 }
 
 impl DiskCache {
-    /// Load a cache from `path`. Returns an empty cache if the file is
-    /// missing, corrupted, or has a mismatched `CACHE_VERSION`.
+    /// Load a cache from an explicit `path`, writing no `.gitignore`.
+    ///
+    /// Test-only: production code must pick a gitignore policy via
+    /// `load_in_state_dir` (broad) or `load_in_dir` (narrow), so the cache
+    /// file's directory layout is always known to the constructor.
+    #[cfg(test)]
     pub fn load(path: PathBuf) -> Self {
+        Self::load_with_gitignore(path, None)
+    }
+
+    /// Load the discovery cache from the default `.tryke` state directory
+    /// layout: the cache file lives at `state_dir/cache/<CACHE_FILE_NAME>`.
+    ///
+    /// `state_dir` receives a broad `*` `.gitignore`. That is safe — and
+    /// future-proof for anything else tryke writes under it — because the
+    /// state directory is created and exclusively owned by tryke.
+    pub fn load_in_state_dir(state_dir: PathBuf) -> Self {
+        let path = state_dir.join("cache").join(CACHE_FILE_NAME);
+        Self::load_with_gitignore(
+            path,
+            Some(GitignoreConfig {
+                dir: state_dir,
+                contents: "# created by tryke\n*\n",
+            }),
+        )
+    }
+
+    /// Load the standard discovery cache file inside `cache_dir`.
+    ///
+    /// `cache_dir` is also the directory that receives the best-effort
+    /// `.gitignore`, matching user intent for a custom cache location. Unlike
+    /// the default `.tryke` state directory, this writes narrow patterns only:
+    /// a user-provided cache directory may be an existing project directory.
+    /// The `.gitignore` ignores itself too, so it doesn't surface as an
+    /// untracked file when the cache dir lives inside a git repo.
+    pub fn load_in_dir(cache_dir: PathBuf) -> Self {
+        let path = cache_dir.join(CACHE_FILE_NAME);
+        Self::load_with_gitignore(
+            path,
+            Some(GitignoreConfig {
+                dir: cache_dir,
+                contents: "# created by tryke\n/.gitignore\n/discovery-v1.bin\n/discovery-v1.tmp\n",
+            }),
+        )
+    }
+
+    fn load_with_gitignore(path: PathBuf, gitignore: Option<GitignoreConfig>) -> Self {
         let entries = match Self::try_load(&path) {
             Ok(entries) => entries,
             Err(err) => {
@@ -98,6 +214,7 @@ impl DiskCache {
         Self {
             entries,
             path: Some(path),
+            gitignore,
         }
     }
 
@@ -147,16 +264,15 @@ impl DiskCache {
         };
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
-            // Drop a `.gitignore` at the top of the tryke state dir
-            // (parent-of-parent of the cache file, since the layout is
-            // `.tryke/cache/discovery-v1.bin`) so users don't have to
-            // remember to gitignore tryke's internal cache. Best-effort
-            // — a write failure here shouldn't abort the save.
-            if let Some(state_dir) = parent.parent() {
-                let gitignore = state_dir.join(".gitignore");
-                if !gitignore.exists() {
-                    let _ = fs::write(&gitignore, "# created by tryke\n*\n");
-                }
+        }
+        // Drop a `.gitignore` at the tryke state/cache directory so users
+        // don't have to remember to ignore tryke's internal cache. Best-effort
+        // — a write failure here shouldn't abort the save.
+        if let Some(config) = self.gitignore.as_ref() {
+            let _ = fs::create_dir_all(&config.dir);
+            let gitignore = config.dir.join(".gitignore");
+            if !gitignore.exists() {
+                let _ = fs::write(&gitignore, config.contents);
             }
         }
         let file = CacheFile {
@@ -188,12 +304,124 @@ mod tests {
     #[test]
     fn roundtrip_empty() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("cache.json");
+        // Nest the cache file so both its parent and grandparent are
+        // inside the controlled tempdir — that lets us assert `load`
+        // writes no `.gitignore` into any ancestor.
+        let nested = dir.path().join("a").join("b");
+        fs::create_dir_all(&nested).expect("create nested");
+        let path = nested.join("cache.json");
         let cache = DiskCache::load(path.clone());
         assert_eq!(cache.entries.len(), 0);
         cache.save().expect("save");
         let reloaded = DiskCache::load(path);
         assert_eq!(reloaded.entries.len(), 0);
+        // `load` writes no `.gitignore` — not beside the cache file, and
+        // crucially not in any ancestor directory.
+        assert!(!nested.join(".gitignore").exists());
+        assert!(!dir.path().join("a").join(".gitignore").exists());
+        assert!(!dir.path().join(".gitignore").exists());
+    }
+
+    #[test]
+    fn default_cache_writes_broad_gitignore_in_state_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_dir = dir.path().join(".tryke");
+        let cache = DiskCache::load_in_state_dir(state_dir.clone());
+
+        cache.save().expect("save");
+
+        assert!(state_dir.join("cache").join("discovery-v1.bin").exists());
+        let gitignore = fs::read_to_string(state_dir.join(".gitignore")).expect("read gitignore");
+        assert_eq!(gitignore, "# created by tryke\n*\n");
+    }
+
+    #[test]
+    fn custom_cache_dir_writes_narrow_gitignore() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache_dir = dir.path().join("custom-cache");
+        let cache = DiskCache::load_in_dir(cache_dir.clone());
+
+        cache.save().expect("save");
+
+        let gitignore = fs::read_to_string(cache_dir.join(".gitignore")).expect("read gitignore");
+        assert_eq!(
+            gitignore,
+            "# created by tryke\n/.gitignore\n/discovery-v1.bin\n/discovery-v1.tmp\n"
+        );
+        assert!(!gitignore.lines().any(|line| line.trim() == "*"));
+        // The `.gitignore` ignores itself so it doesn't show up as untracked.
+        assert!(gitignore.lines().any(|line| line.trim() == "/.gitignore"));
+    }
+
+    #[test]
+    fn clean_default_cache_removes_owned_state_cache_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_dir = dir
+            .path()
+            .canonicalize()
+            .expect("canonical tempdir")
+            .join(".tryke");
+        let cache_dir = state_dir.join("cache");
+        fs::create_dir_all(&cache_dir).expect("create cache dir");
+        fs::write(cache_dir.join("discovery-v1.bin"), b"cache").expect("write cache");
+        fs::write(cache_dir.join("future-cache.bin"), b"future").expect("write future cache");
+        fs::write(state_dir.join(".gitignore"), b"# created by tryke\n*\n")
+            .expect("write gitignore");
+
+        let report = clean_project_cache(dir.path(), None).expect("clean cache");
+
+        assert_eq!(report.cache_dir, cache_dir);
+        assert_eq!(report.removed_entries, 1);
+        assert!(!report.cache_dir.exists());
+        assert!(state_dir.join(".gitignore").exists());
+    }
+
+    #[test]
+    fn clean_default_cache_resolves_project_root_from_subdir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            b"[project]\nname = \"sample\"\n",
+        )
+        .expect("write pyproject");
+        let subdir = dir.path().join("src").join("pkg");
+        fs::create_dir_all(&subdir).expect("create subdir");
+        let project_root = dir.path().canonicalize().expect("canonical tempdir");
+        let cache_dir = project_root.join(".tryke").join("cache");
+        fs::create_dir_all(&cache_dir).expect("create cache dir");
+        fs::write(cache_dir.join("discovery-v1.bin"), b"cache").expect("write cache");
+
+        let report = clean_project_cache(&subdir, None).expect("clean cache");
+
+        assert_eq!(report.cache_dir, cache_dir);
+        assert_eq!(report.removed_entries, 1);
+        assert!(!report.cache_dir.exists());
+    }
+
+    #[test]
+    fn clean_custom_cache_dir_removes_only_tryke_cache_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache_dir = dir.path().join("custom-cache");
+        fs::create_dir_all(&cache_dir).expect("create custom cache dir");
+        fs::write(cache_dir.join("discovery-v1.bin"), b"cache").expect("write cache");
+        fs::write(cache_dir.join("discovery-v1.tmp"), b"tmp").expect("write tmp cache");
+        fs::write(cache_dir.join("keep-me.txt"), b"user data").expect("write user data");
+        fs::write(cache_dir.join(".gitignore"), b"custom\n").expect("write user gitignore");
+
+        let report = clean_project_cache(dir.path(), Some(&cache_dir)).expect("clean custom cache");
+
+        assert_eq!(report.cache_dir, cache_dir);
+        assert_eq!(report.removed_entries, 2);
+        assert!(!report.cache_dir.join("discovery-v1.bin").exists());
+        assert!(!report.cache_dir.join("discovery-v1.tmp").exists());
+        assert_eq!(
+            fs::read_to_string(report.cache_dir.join("keep-me.txt")).expect("read user data"),
+            "user data"
+        );
+        assert_eq!(
+            fs::read_to_string(report.cache_dir.join(".gitignore")).expect("read gitignore"),
+            "custom\n"
+        );
     }
 
     #[test]

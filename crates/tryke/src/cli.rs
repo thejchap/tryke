@@ -51,6 +51,13 @@ pub struct Cli {
     /// this flag in CI or in terminals that mis-render the sequence.
     #[arg(long = "no-progress", global = true)]
     pub no_progress: bool,
+
+    /// Directory for tryke's persistent discovery cache.
+    ///
+    /// Overrides `[tool.tryke] cache_dir` in `pyproject.toml`. Defaults to
+    /// `<project-root>/.tryke/cache`.
+    #[arg(long = "cache-dir", global = true)]
+    pub cache_dir: Option<PathBuf>,
 }
 
 /// Reporter format used to render test results.
@@ -295,6 +302,17 @@ pub enum Commands {
         python: Option<String>,
     },
 
+    /// Remove tryke's persistent discovery cache.
+    ///
+    /// Deletes the default `<project-root>/.tryke/cache` directory. When
+    /// `--cache-dir` or `[tool.tryke] cache_dir` points at a custom directory,
+    /// only tryke-owned cache files inside that directory are removed.
+    Clean {
+        /// Project root used to resolve the default cache directory.
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+
     /// Print the import dependency graph for the project.
     ///
     /// Renders the static import graph that drives discovery, change
@@ -365,5 +383,38 @@ impl Commands {
             now: false,
             python: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn parses_global_cache_dir_before_subcommand() {
+        let cli = Cli::parse_from(["tryke", "--cache-dir", "/tmp/tryke-cache", "test"]);
+        assert_eq!(
+            cli.cache_dir.as_deref(),
+            Some(Path::new("/tmp/tryke-cache"))
+        );
+    }
+
+    #[test]
+    fn parses_global_cache_dir_after_subcommand() {
+        let cli = Cli::parse_from(["tryke", "test", "--cache-dir", "/tmp/tryke-cache"]);
+        assert_eq!(
+            cli.cache_dir.as_deref(),
+            Some(Path::new("/tmp/tryke-cache"))
+        );
+    }
+
+    #[test]
+    fn cache_dir_defaults_to_none() {
+        let cli = Cli::parse_from(["tryke", "test"]);
+        assert_eq!(cli.cache_dir, None);
     }
 }

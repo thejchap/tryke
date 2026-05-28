@@ -51,6 +51,11 @@ export function Chrome() {
     reporterRef.current = reporter;
   }, [reporter]);
 
+  const invalidateRunState = useCallback(() => {
+    runIdRef.current += 1;
+    lastResultsRef.current = "";
+  }, []);
+
   // Init WASM
   useEffect(() => {
     (async () => {
@@ -133,12 +138,14 @@ export function Chrome() {
       tests = discovery.parsed.tests;
       hooks = discovery.parsed.hooks;
     } catch {
+      invalidateRunState();
       setTerminalOutput("Discovery failed — check your Python syntax.");
       setRunStatus("done");
       return;
     }
 
     if (tests.length === 0) {
+      invalidateRunState();
       setTerminalOutput("No tests discovered in the current file.");
       setRunStatus("done");
       return;
@@ -157,7 +164,7 @@ export function Chrome() {
       hooks,
       allFiles: files.map((f) => ({ name: f.name, source: f.source })),
     });
-  }, [pyodideReady, wasm, files, activeFileIndex]);
+  }, [pyodideReady, wasm, files, activeFileIndex, invalidateRunState]);
 
   // Auto-run on initial Pyodide ready
   useEffect(() => {
@@ -193,15 +200,17 @@ export function Chrome() {
 
   const handleSourceChange = useCallback(
     (source: string) => {
+      invalidateRunState();
       setFiles((prev) =>
         prev.map((f, i) => (i === activeFileIndex ? { ...f, source } : f)),
       );
     },
-    [activeFileIndex],
+    [activeFileIndex, invalidateRunState],
   );
 
   const handleAddFile = useCallback(() => {
     if (!newFileName) return;
+    invalidateRunState();
     const name = newFileName.endsWith(".py")
       ? newFileName
       : `${newFileName}.py`;
@@ -214,28 +223,32 @@ export function Chrome() {
     }
     setNewFileName("");
     setShowNewFile(false);
-  }, [newFileName, files]);
+  }, [newFileName, files, invalidateRunState]);
 
   const handleRemoveFile = useCallback(
     (index: number) => {
       if (files.length <= 1) return;
+      invalidateRunState();
       setFiles((prev) => prev.filter((_, i) => i !== index));
       setActiveFileIndex((prev) =>
         prev >= index ? Math.max(0, prev - 1) : prev,
       );
     },
-    [files.length],
+    [files.length, invalidateRunState],
   );
 
-  const handleLoadExample = useCallback((exampleIndex: number) => {
-    const example = EXAMPLES[exampleIndex];
-    if (!example) return;
-    setFiles(example.files);
-    setActiveFileIndex(0);
-    setRunStatus("idle");
-    setTerminalOutput("");
-    lastResultsRef.current = "";
-  }, []);
+  const handleLoadExample = useCallback(
+    (exampleIndex: number) => {
+      const example = EXAMPLES[exampleIndex];
+      if (!example) return;
+      invalidateRunState();
+      setFiles(example.files);
+      setActiveFileIndex(0);
+      setRunStatus("idle");
+      setTerminalOutput("");
+    },
+    [invalidateRunState],
+  );
 
   return (
     <div className="h-full flex flex-col bg-bg text-text">

@@ -757,6 +757,44 @@ mod tests {
     }
 
     #[test]
+    fn discoverer_skips_discovery_when_ast_body_is_unchanged() {
+        let source_one = "from tryke import test\n\n@test\ndef test_one():\n    pass\n# first\n";
+        let dir = make_project(&[("test_example.py", source_one)]);
+        let path = dir
+            .path()
+            .join("test_example.py")
+            .canonicalize()
+            .expect("canonicalize test file");
+        let mut discoverer = Discoverer::new(dir.path());
+        crate::db::count_discover_file_executions_for(path.clone());
+
+        let first = discoverer.rediscover();
+        assert_eq!(first.len(), 1);
+        assert_eq!(crate::db::discover_file_executions(), 1);
+
+        let source_two =
+            "from tryke import test\n\n@test\ndef test_one():\n    pass\n# second comment\n";
+        fs::write(&path, source_two).expect("overwrite with trivia-only change");
+        let second = discoverer.rediscover_changed(std::slice::from_ref(&path));
+        assert_eq!(second.len(), 1);
+        assert_eq!(
+            crate::db::discover_file_executions(),
+            1,
+            "trivia-only source changes should not re-run discovery"
+        );
+
+        let source_three = "from tryke import test\n\n@test\ndef test_one():\n    pass\n\n@test\ndef test_two():\n    pass\n# second comment\n";
+        fs::write(&path, source_three).expect("overwrite with AST change");
+        let third = discoverer.rediscover_changed(std::slice::from_ref(&path));
+        assert_eq!(third.len(), 2);
+        assert_eq!(
+            crate::db::discover_file_executions(),
+            2,
+            "AST changes should re-run discovery"
+        );
+    }
+
+    #[test]
     fn discoverer_saves_cache_under_custom_cache_dir() {
         let source = "@test\ndef test_hello():\n    pass\n";
         let dir = make_project(&[("test_example.py", source)]);

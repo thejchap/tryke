@@ -1,5 +1,8 @@
 use std::path::PathBuf;
 
+use log::trace;
+use ruff_python_ast::{ModModule, Stmt};
+use ruff_python_parser::parse_module;
 use tryke_types::ParsedFile;
 
 #[salsa::db]
@@ -15,6 +18,83 @@ pub struct SourceFile {
     pub src_roots: Vec<PathBuf>,
     #[returns(ref)]
     pub path: PathBuf,
+}
+
+/// Parsed Python source cached as the first incremental layer.
+///
+/// Equality intentionally ignores raw source text. If the parser produces the
+/// same AST body for a new source string, Salsa keeps the old value and
+/// backdates dependents, so discovery is not re-run for trivia-only edits.
+#[derive(Debug, Clone)]
+pub(crate) struct ParsedAst {
+    source: String,
+    syntax: Option<ModModule>,
+}
+
+impl ParsedAst {
+    pub(crate) fn parse(source: &str) -> Self {
+        let syntax = parse_module(source)
+            .ok()
+            .map(ruff_python_parser::Parsed::into_syntax);
+        Self {
+            source: source.to_owned(),
+            syntax,
+        }
+    }
+
+    pub(crate) fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub(crate) fn syntax(&self) -> Option<&ModModule> {
+        self.syntax.as_ref()
+    }
+
+    fn body(&self) -> Option<&[Stmt]> {
+        self.syntax.as_ref().map(|module| module.body.as_slice())
+    }
+}
+
+impl PartialEq for ParsedAst {
+    fn eq(&self, other: &Self) -> bool {
+        self.body() == other.body()
+    }
+}
+
+#[cfg(test)]
+static DISCOVER_FILE_EXECUTIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+static COUNTED_DISCOVER_FILE_PATH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn count_discover_file_executions_for(path: PathBuf) {
+    *COUNTED_DISCOVER_FILE_PATH.lock().expect("counter mutex") = Some(path);
+    DISCOVER_FILE_EXECUTIONS.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub(crate) fn discover_file_executions() -> usize {
+    DISCOVER_FILE_EXECUTIONS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(test)]
+fn count_discover_file_execution(path: &std::path::Path) {
+    let counted = COUNTED_DISCOVER_FILE_PATH.lock().expect("counter mutex");
+    if counted.as_deref() == Some(path) {
+        DISCOVER_FILE_EXECUTIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[salsa::tracked(returns(ref))]
+pub(crate) fn parse_file(db: &dyn Db, file: SourceFile) -> ParsedAst {
+    let path = file.path(db);
+    trace!(
+        "parsing {}",
+        path.strip_prefix(file.root(db)).unwrap_or(path).display()
+    );
+    ParsedAst::parse(file.text(db))
 }
 
 /// Everything derivable from a single parse of a Python source file:
@@ -33,11 +113,14 @@ pub struct DiscoveredFile {
 
 #[salsa::tracked]
 pub fn discover_file(db: &dyn Db, file: SourceFile) -> DiscoveredFile {
-    crate::discover_file_from_source(
+    #[cfg(test)]
+    count_discover_file_execution(file.path(db));
+
+    crate::discover_file_from_ast(
         file.root(db),
         file.src_roots(db),
         file.path(db),
-        file.text(db),
+        parse_file(db, file),
     )
 }
 

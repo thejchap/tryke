@@ -17,10 +17,12 @@ pub use discoverer::Discoverer;
 use ignore::WalkBuilder;
 
 use ruff_python_ast::{Expr, Stmt};
-use ruff_python_parser::parse_module;
 use ruff_source_file::LineIndex;
 use ruff_text_size::{Ranged, TextRange, TextSize};
 use tryke_types::{ExpectedAssertion, FixturePer, HookItem, ParsedFile, TestItem};
+
+#[cfg(test)]
+use ruff_python_parser::parse_module;
 
 pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
     start
@@ -1837,27 +1839,23 @@ fn collect_doctests_from_body(
     }
 }
 
-/// Parse `source` once and produce everything discovery needs: the
+/// Walk a parsed source file once and produce everything discovery needs: the
 /// `ParsedFile` (tests, hooks, guard-else lines, errors), the project-local
 /// imports this file depends on, and whether it contains dynamic imports.
-/// Folding all three derivations into a single AST walk avoids the prior
-/// cold-start cost of parsing each file twice.
-pub(crate) fn discover_file_from_source(
+/// Keeping this downstream of `db::parse_file` lets Salsa skip discovery when
+/// source text changes but the parsed AST body is unchanged.
+pub(crate) fn discover_file_from_ast(
     root: &Path,
     src_roots: &[PathBuf],
     file: &Path,
-    source: &str,
+    parsed: &crate::db::ParsedAst,
 ) -> crate::db::DiscoveredFile {
-    trace!(
-        "parsing {}",
-        file.strip_prefix(root).unwrap_or(file).display()
-    );
-    let Ok(parsed) = parse_module(source) else {
+    let Some(module) = parsed.syntax() else {
         trace!("parse error in {}", file.display());
         return crate::db::DiscoveredFile::default();
     };
+    let source = parsed.source();
     let line_index = LineIndex::from_source_text(source);
-    let module = parsed.syntax();
     let body = &module.body;
     let aliases = TrykeAliases::collect(body);
     let mut tests = Vec::new();
@@ -1901,7 +1899,8 @@ pub(crate) fn parse_tests_from_source(
     file: &Path,
     source: &str,
 ) -> ParsedFile {
-    discover_file_from_source(root, src_roots, file, source).parsed
+    let parsed = crate::db::ParsedAst::parse(source);
+    discover_file_from_ast(root, src_roots, file, &parsed).parsed
 }
 
 fn parse_tests_from_file(root: &Path, src_roots: &[PathBuf], file: &Path) -> ParsedFile {

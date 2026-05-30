@@ -58,6 +58,10 @@ function LoadingSpinner() {
   );
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 interface WasmModule {
   discover: (source: string, filename: string) => DiscoveredFile;
   discover_multi: (files_json: string) => {
@@ -128,8 +132,8 @@ export function Editor({
     try {
       const tests = JSON.stringify(discovery.parsed.tests);
       return wasm.format_collect(tests, reporter);
-    } catch {
-      return "";
+    } catch (error) {
+      return `Error formatting ${reporter} collect output: ${errorMessage(error)}`;
     }
   }, [wasm, discovery, reporter]);
 

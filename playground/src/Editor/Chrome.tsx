@@ -23,6 +23,10 @@ interface WasmModule {
   version: () => string;
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function Chrome() {
   const [files, setFiles] = useState<PlaygroundFile[]>(KITCHEN_SINK.files);
   const [activeFileIndex, setActiveFileIndex] = useState(0);
@@ -91,8 +95,10 @@ export function Chrome() {
           try {
             const output = w.format_results(resultsJson, reporterRef.current);
             setTerminalOutput(output);
-          } catch {
-            setTerminalOutput(resultsJson);
+          } catch (error) {
+            setTerminalOutput(
+              `Error formatting ${reporterRef.current} output: ${errorMessage(error)}`,
+            );
           }
         } else {
           setTerminalOutput(resultsJson);
@@ -121,8 +127,10 @@ export function Chrome() {
     try {
       const output = wasm.format_results(lastResultsRef.current, reporter);
       setTerminalOutput(output);
-    } catch {
-      // Keep existing output
+    } catch (error) {
+      setTerminalOutput(
+        `Error formatting ${reporter} output: ${errorMessage(error)}`,
+      );
     }
   }, [reporter, wasm, runStatus]);
 
@@ -300,6 +308,8 @@ export function Chrome() {
         >
           <option value="text">text</option>
           <option value="dot">dot</option>
+          <option value="next">next</option>
+          <option value="sugar">sugar</option>
           <option value="json">json</option>
           <option value="llm">llm</option>
         </select>

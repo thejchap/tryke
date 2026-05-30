@@ -138,6 +138,18 @@ pub fn format_results(results_json: &str, reporter_name: &str) -> Result<String,
             &results,
             &summary,
         ),
+        "next" => run_reporter(
+            tryke_reporter::NextReporter::with_writer(Vec::new()),
+            &tests,
+            &results,
+            &summary,
+        ),
+        "sugar" => run_reporter(
+            tryke_reporter::SugarReporter::with_writer(Vec::new()),
+            &tests,
+            &results,
+            &summary,
+        ),
         "json" => run_reporter(
             tryke_reporter::JSONReporter::with_writer(Vec::new()),
             &tests,
@@ -169,6 +181,14 @@ pub fn format_collect(tests_json: &str, reporter_name: &str) -> Result<String, J
             &tests,
         ),
         "dot" => run_collect(tryke_reporter::DotReporter::with_writer(Vec::new()), &tests),
+        "next" => run_collect(
+            tryke_reporter::NextReporter::with_writer(Vec::new()),
+            &tests,
+        ),
+        "sugar" => run_collect(
+            tryke_reporter::SugarReporter::with_writer(Vec::new()),
+            &tests,
+        ),
         "json" => run_collect(
             tryke_reporter::JSONReporter::with_writer(Vec::new()),
             &tests,
@@ -197,6 +217,18 @@ impl IntoWriter for tryke_reporter::TextReporter<Vec<u8>> {
 }
 
 impl IntoWriter for tryke_reporter::DotReporter<Vec<u8>> {
+    fn into_writer(self) -> Vec<u8> {
+        self.into_writer()
+    }
+}
+
+impl IntoWriter for tryke_reporter::NextReporter<Vec<u8>> {
+    fn into_writer(self) -> Vec<u8> {
+        self.into_writer()
+    }
+}
+
+impl IntoWriter for tryke_reporter::SugarReporter<Vec<u8>> {
     fn into_writer(self) -> Vec<u8> {
         self.into_writer()
     }

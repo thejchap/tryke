@@ -4,15 +4,12 @@ pub mod dot;
 pub mod duration;
 pub mod json;
 pub mod junit;
-#[cfg(feature = "native")]
 pub mod live;
 pub mod llm;
-#[cfg(feature = "native")]
 pub mod next;
 #[cfg(feature = "native")]
 pub mod progress;
 pub mod reporter;
-#[cfg(feature = "native")]
 pub mod sugar;
 pub mod summary;
 pub mod text;
@@ -21,11 +18,9 @@ pub use dot::DotReporter;
 pub use json::JSONReporter;
 pub use junit::JUnitReporter;
 pub use llm::LlmReporter;
-#[cfg(feature = "native")]
 pub use next::NextReporter;
 #[cfg(feature = "native")]
 pub use progress::ProgressReporter;
 pub use reporter::Reporter;
-#[cfg(feature = "native")]
 pub use sugar::SugarReporter;
 pub use text::{TextReporter, Verbosity};

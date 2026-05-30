@@ -9,7 +9,7 @@
 
 use std::io::{self, Write};
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use owo_colors::OwoColorize;
 use tryke_types::{RunSummary, TestItem, TestOutcome, TestResult};
@@ -46,7 +46,6 @@ pub struct NextReporter<W: Write = io::Stdout> {
     passed: u64,
     failed: u64,
     skipped: u64,
-    start: Instant,
     subcommand_label: &'static str,
     watch_hint: Option<String>,
     clear_armed: bool,
@@ -67,7 +66,6 @@ impl NextReporter {
             passed: 0,
             failed: 0,
             skipped: 0,
-            start: Instant::now(),
             subcommand_label: "tryke test",
             watch_hint: None,
             clear_armed: false,
@@ -97,7 +95,6 @@ impl<W: Write> NextReporter<W> {
             passed: 0,
             failed: 0,
             skipped: 0,
-            start: Instant::now(),
             subcommand_label: "tryke test",
             watch_hint: None,
             clear_armed: false,
@@ -226,7 +223,6 @@ impl<W: Write> Reporter for NextReporter<W> {
         self.passed = 0;
         self.failed = 0;
         self.skipped = 0;
-        self.start = Instant::now();
         self.started = false;
         self.failure_seen = false;
 

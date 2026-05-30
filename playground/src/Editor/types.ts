@@ -65,7 +65,7 @@ export interface MultiResult {
   edges: GraphEdge[];
 }
 
-export type ReporterName = "text" | "dot" | "json" | "llm";
+export type ReporterName = "text" | "dot" | "next" | "sugar" | "json" | "llm";
 export type SecondaryTool =
   | "discovery"
   | "import-graph"

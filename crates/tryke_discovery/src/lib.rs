@@ -1841,11 +1841,12 @@ fn collect_doctests_from_body(
     }
 }
 
-/// Parse `source` once and produce everything discovery needs: the
+/// Walk a parsed source file once and produce everything discovery needs: the
 /// `ParsedFile` (tests, hooks, guard-else lines, errors), the project-local
 /// imports this file depends on, and whether it contains dynamic imports.
 /// Folding all three derivations into a single AST walk avoids the prior
-/// cold-start cost of parsing each file twice.
+/// cold-start cost of parsing each file twice. This is the entry point for
+/// the WASM playground, which has no Salsa database to parse through.
 #[must_use]
 pub fn discover_file_from_source(
     root: &Path,
@@ -1863,9 +1864,37 @@ pub fn discover_file_from_source(
         trace!("parse error in {}", file.display());
         return tryke_types::DiscoveredFile::default();
     };
+    discover_file_from_body(root, src_roots, file, &parsed.syntax().body, source)
+}
+
+/// Discover from an AST already parsed by `db::parse_file`. Keeping this
+/// downstream of the Salsa parse layer lets discovery be skipped when source
+/// text changes but the parsed AST body is unchanged.
+#[cfg(feature = "native")]
+pub(crate) fn discover_file_from_ast(
+    root: &Path,
+    src_roots: &[PathBuf],
+    file: &Path,
+    parsed: &crate::db::ParsedAst,
+) -> tryke_types::DiscoveredFile {
+    let Some(module) = parsed.syntax() else {
+        trace!("parse error in {}", file.display());
+        return tryke_types::DiscoveredFile::default();
+    };
+    discover_file_from_body(root, src_roots, file, &module.body, parsed.source())
+}
+
+/// Shared AST walk behind `discover_file_from_source` and
+/// `discover_file_from_ast`: collects tests, hooks, guard-else lines, local
+/// import candidates, and the dynamic-import flag in a single pass.
+fn discover_file_from_body(
+    root: &Path,
+    src_roots: &[PathBuf],
+    file: &Path,
+    body: &[Stmt],
+    source: &str,
+) -> tryke_types::DiscoveredFile {
     let line_index = LineIndex::from_source_text(source);
-    let module = parsed.syntax();
-    let body = &module.body;
     let aliases = TrykeAliases::collect(body);
     let mut tests = Vec::new();
     let mut hooks = Vec::new();

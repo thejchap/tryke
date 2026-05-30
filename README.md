@@ -45,41 +45,41 @@ Write a test.
 ```python
 from typing import Annotated
 
-import tryke as t
+from tryke import Depends, describe, expect, fixture, test
 
 
-@t.fixture(per="scope")
+@fixture(per="scope")
 def database():
     db = {}
     yield db
     db.clear()
 
 
-with t.describe("users"):
+with describe("users"):
 
-    @t.fixture
-    def users(database: Annotated[dict[str, dict[str, str]], t.Depends(database)]):
+    @fixture
+    def users(database: Annotated[dict[str, dict[str, str]], Depends(database)]):
         database["users"] = {}
 
         return database["users"]
 
-    with t.describe("get"):
+    with describe("get"):
 
-        @t.test("returns a stored user")
-        async def test_get(users: Annotated[dict[str, str], t.Depends(users)]):
+        @test("returns a stored user")
+        async def test_get(users: Annotated[dict[str, str], Depends(users)]):
             users["alice"] = "alice@example.com"
 
-            t.expect(users["alice"], name="returns stored email").to_equal(
+            expect(users["alice"], name="returns stored email").to_equal(
                 "alice@example.com"
             )
 
-    with t.describe("set"):
+    with describe("set"):
 
-        @t.test("stores a new user")
-        async def test_set(users: Annotated[dict[str, str], t.Depends(users)]):
+        @test("stores a new user")
+        async def test_set(users: Annotated[dict[str, str], Depends(users)]):
             users["bob"] = "bob@example.com"
 
-            t.expect(users["bob"], name="stores email under user key").to_equal(
+            expect(users["bob"], name="stores email under user key").to_equal(
                 "bob@example.com"
             )
 

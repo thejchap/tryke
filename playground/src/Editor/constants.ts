@@ -41,8 +41,8 @@ export const EXAMPLES: Example[] = [
   {
     label: "Multi-file imports",
     files: [
-      { name: "helpers.py", source: helpersSource },
       { name: "test_helpers.py", source: testHelpersSource },
+      { name: "helpers.py", source: helpersSource },
     ],
   },
   {

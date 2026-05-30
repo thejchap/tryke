@@ -168,7 +168,6 @@ def run_tests(
             )
             results.append(_test_result(t, result))
     finally:
-        if executor is not None:
-            executor.finalize()
+        executor.finalize()
 
     return json.dumps(results)

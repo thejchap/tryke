@@ -60,7 +60,6 @@ import traceback
 from typing import TYPE_CHECKING
 
 import tryke_guard
-from tryke.hooks import HookExecutor
 from tryke.runner import (
     HookInfo,
     TestResult,
@@ -84,6 +83,8 @@ tryke_guard.__TRYKE_TESTING__ = True
 if TYPE_CHECKING:
     from types import ModuleType
     from typing import TextIO
+
+    from tryke.hooks import HookExecutor
 
 _log = logging.getLogger("tryke.worker")
 
@@ -297,21 +298,16 @@ class Worker:
         if executor is not None:
             executor.finalize()
 
-    def _get_executor(self, module_name: str) -> HookExecutor | None:
+    def _get_executor(self, module_name: str) -> HookExecutor:
         """Build (or return cached) HookExecutor for a module."""
         if module_name in self._executors:
             return self._executors[module_name]
 
-        hook_meta = self._hook_metadata.get(module_name)
-        if not hook_meta:
-            return None
-
+        hook_meta = self._hook_metadata.get(module_name, [])
         mod = self._get_module(module_name)
-        # Keep the executor entry even when no fixtures were registered so a
-        # repeated lookup short-circuits via the cache hit above. The empty
-        # executor still routes Depends() resolution through the shared
-        # resolver, matching pre-extraction behavior.
-        executor = build_executor_from_hooks(mod, hook_meta) or HookExecutor()
+        # Keep the executor entry even when no fixtures were registered so
+        # Depends() resolution always runs through the shared resolver.
+        executor = build_executor_from_hooks(mod, hook_meta)
         self._executors[module_name] = executor
         return executor
 

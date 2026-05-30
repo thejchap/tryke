@@ -8,15 +8,13 @@ normal CPython worker.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import sys
 import tempfile
 from pathlib import Path
 
-from tryke import Depends, describe, expect, fixture, test
+from tryke import describe, expect, test
 from tryke import playground as _pg
-from tryke.runner import _run_without_executor
 
 
 def _fresh_pyodide_root() -> Path:
@@ -27,68 +25,6 @@ def _fresh_pyodide_root() -> Path:
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
     return root
-
-
-with describe("_run_without_executor"):
-
-    @test(name="case kwarg colliding with Depends fixture raises TypeError")
-    def test_collision_raises() -> None:
-        @fixture
-        def db() -> str:
-            return "real"
-
-        def my_test(db: str = Depends(db)) -> None:
-            pass
-
-        my_test.__name__ = "my_test"
-        # Collision: case provides `db`, but a fixture-injected `db` already exists.
-        raised: TypeError | None = None
-        try:
-            _run_without_executor(my_test, (), {"db": "fake"})
-        except TypeError as exc:
-            raised = exc
-        expect(raised is not None, "TypeError was raised on collision").to_be_truthy()
-        expect(
-            str(raised) if raised else "",
-            "collision message names parameter",
-        ).to_contain("db")
-
-    @test(name="async test runs on the resolver's shared loop")
-    def test_async_uses_shared_loop() -> None:
-        captured: dict[str, object] = {}
-
-        async def my_test() -> None:
-            captured["loop"] = asyncio.get_running_loop()
-
-        _run_without_executor(my_test, (), None)
-        loop = captured["loop"]
-        expect(loop is not None, "async test body ran").to_be_truthy()
-        # The shared loop is closed after _run_without_executor finishes,
-        # which is the contract: it lives only for the duration of a single
-        # playground test run and is then torn down with the resolver.
-        expect(
-            isinstance(loop, asyncio.AbstractEventLoop),
-            "shared loop is a real event loop",
-        ).to_be_truthy()
-
-    @test(name="async fixture and async test share one loop")
-    def test_async_fixture_and_test_share_loop() -> None:
-        loops: dict[str, asyncio.AbstractEventLoop] = {}
-
-        @fixture
-        async def setup() -> str:
-            loops["fixture"] = asyncio.get_running_loop()
-            return "ready"
-
-        async def my_test(setup: str = Depends(setup)) -> None:
-            loops["test"] = asyncio.get_running_loop()
-            expect(setup, "fixture value is injected").to_equal("ready")
-
-        _run_without_executor(my_test, (), None)
-        expect(
-            loops["fixture"] is loops["test"],
-            "fixture and test ran on the same event loop",
-        ).to_be_truthy()
 
 
 with describe("playground._write_files"):
@@ -164,6 +100,38 @@ with describe("playground.run_tests"):
         expect(results[0]["outcome"], "import-from-helpers test passes").to_equal(
             "passed"
         )
+
+    @test(name="imported scope fixtures share one executor for the run")
+    def test_imported_scope_fixture_lives_for_playground_run() -> None:
+        _fresh_pyodide_root()
+        helpers = (
+            "from tryke import fixture\n"
+            "@fixture(per='scope')\n"
+            "def db() -> list[int]:\n"
+            "    return []\n"
+        )
+        test_source = (
+            "from helpers import db\n"
+            "from tryke import Depends, expect\n"
+            "def first(db: list[int] = Depends(db)) -> None:\n"
+            "    db.append(1)\n"
+            "    expect(db, 'first receives shared db').to_equal([1])\n"
+            "def second(db: list[int] = Depends(db)) -> None:\n"
+            "    expect(db, 'second sees first mutation').to_equal([1])\n"
+        )
+        all_files = json.dumps(
+            [
+                {"name": "helpers.py", "source": helpers},
+                {"name": "test_main.py", "source": test_source},
+            ],
+        )
+        tests = json.dumps([{"name": "first"}, {"name": "second"}])
+        out = _pg.run_tests("test_main.py", test_source, tests, all_files)
+        results = json.loads(out)
+        expect(
+            [r["outcome"] for r in results],
+            "scope fixture result is shared across tests",
+        ).to_equal(["passed", "passed"])
 
     @test(name="doctest items are dispatched through doctest runner")
     def test_doctest_routing() -> None:

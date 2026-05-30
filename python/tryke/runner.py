@@ -2,17 +2,15 @@
 browser playground.
 
 The core function is :func:`run_test`, which takes an already-resolved
-callable and optional ``HookExecutor``, executes the test with fixture
-injection, soft-assertion tracking, stdout/stderr capture, and xfail
-handling, and returns a typed result dict that the Rust reporter can
-deserialize.
+callable and a ``HookExecutor``, executes the test with fixture injection,
+soft-assertion tracking, stdout/stderr capture, and xfail handling, and
+returns a typed result dict that the Rust reporter can deserialize.
 """
 
 from __future__ import annotations
 
 import contextlib
 import doctest
-import inspect
 import io
 import sys
 import time
@@ -310,16 +308,15 @@ class HookInfo(TypedDict, total=False):
 def build_executor_from_hooks(
     mod: ModuleType,
     hooks: Iterable[HookInfo],
-) -> HookExecutor | None:
+) -> HookExecutor:
     """Build a :class:`HookExecutor` from statically-discovered hook metadata.
 
     Walks *hooks*, looks up each named callable on *mod*, and registers
-    the ones decorated with ``@fixture``. Returns ``None`` when no
-    fixtures end up registered so callers can choose to fall back to a
-    per-test :class:`DependencyResolver`.
+    the ones decorated with ``@fixture``. The returned executor is used
+    even when no fixtures were registered so all ``Depends()`` resolution
+    goes through one lifecycle path.
     """
     executor = HookExecutor()
-    registered = False
     for hook in hooks:
         fn = getattr(mod, hook["name"], None)
         if fn is None or _fixture_per(fn) is None:
@@ -329,8 +326,7 @@ def build_executor_from_hooks(
             groups=hook.get("groups") or [],
             line_number=hook.get("line_number") or 0,
         )
-        registered = True
-    return executor if registered else None
+    return executor
 
 
 def run_doctest(mod: object, object_path: str) -> TestResult:
@@ -401,7 +397,7 @@ def soft_assertion_context() -> Generator[SoftContext, None, None]:
 def run_test(  # noqa: C901, PLR0911, PLR0912, PLR0915
     fn: _FixtureFn,
     *,
-    executor: HookExecutor | None = None,
+    executor: HookExecutor,
     xfail: str | None = None,
     groups: list[str] | None = None,
     case_label: str | None = None,
@@ -414,10 +410,8 @@ def run_test(  # noqa: C901, PLR0911, PLR0912, PLR0915
         The test function to run. Must already be resolved (i.e. the
         actual callable, not a string name).
     executor:
-        Optional :class:`HookExecutor` for fixture injection. When
-        provided, fixtures are resolved through the executor's
-        dependency graph. When ``None``, fixtures are resolved directly
-        via a temporary :class:`DependencyResolver`.
+        :class:`HookExecutor` for fixture injection. It may be empty,
+        but it still owns the resolver lifecycle for the whole run.
     xfail:
         If set, the test is expected to fail with this reason string.
     groups:
@@ -488,15 +482,12 @@ def run_test(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 contextlib.redirect_stdout(stdout_buf),
                 contextlib.redirect_stderr(stderr_buf),
             ):
-                if executor is not None:
-                    executor.run_test(
-                        fn,
-                        groups=groups or [],
-                        case_args=case_args,
-                        case_kwargs=case_kwargs,
-                    )
-                else:
-                    _run_without_executor(fn, case_args, case_kwargs)
+                executor.run_test(
+                    fn,
+                    groups=groups or [],
+                    case_args=case_args,
+                    case_kwargs=case_kwargs,
+                )
 
             ms = int((time.monotonic() - start) * 1000)
             out = stdout_buf.getvalue()
@@ -576,44 +567,3 @@ def run_test(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 err,
                 executed_lines=list(ctx.executed_lines),
             )
-
-
-def _run_without_executor(
-    fn: _FixtureFn,
-    case_args: tuple[object, ...],
-    case_kwargs: CaseArgs | None,
-) -> None:
-    """Execute a test function with ad-hoc fixture resolution.
-
-    Used by the playground (no pre-registered executor). Creates a
-    temporary :class:`DependencyResolver`, resolves ``Depends()``
-    markers, runs the function, and tears down fixtures afterward.
-    Mirrors :meth:`tryke.hooks.HookExecutor.run_test`: case kwargs may
-    not shadow fixture-injected parameters, and async test bodies run
-    on the resolver's shared loop so any async fixtures and the test
-    body share a single event loop.
-    """
-    from tryke.hooks import DependencyResolver  # noqa: PLC0415
-
-    resolver = DependencyResolver()
-    try:
-        test_kwargs = resolver.resolve(fn)
-        if case_kwargs:
-            conflicts = set(test_kwargs).intersection(case_kwargs)
-            if conflicts:
-                names = ", ".join(sorted(conflicts))
-                msg = (
-                    f"@test.cases argument(s) {{{names}}} collide with "
-                    f"fixture-injected parameter(s) of {fn.__name__}"
-                )
-                raise TypeError(msg)
-            test_kwargs = {**test_kwargs, **case_kwargs}
-        if inspect.iscoroutinefunction(fn):
-            resolver.shared_loop.run_until_complete(fn(*case_args, **test_kwargs))
-        else:
-            fn(*case_args, **test_kwargs)
-    finally:
-        resolver.teardown_test_generators()
-        resolver.teardown_scope_generators()
-        resolver.clear_all()
-        resolver.close_shared_loop()

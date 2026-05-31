@@ -58,11 +58,24 @@ def _module_name(filename: str) -> str:
 
 
 def _purge_module(name: str) -> None:
-    """Drop *name* and any submodules from ``sys.modules``."""
+    """Drop *name* and any submodules from ``sys.modules``.
+
+    Also clears the matching attribute on the parent package. The import
+    system binds an imported submodule as an attribute on its parent
+    (``pkg.helpers`` becomes ``pkg.helpers``), and that binding outlives a
+    bare ``sys.modules`` pop. Without clearing it, a later
+    ``from pkg import helpers`` resolves the stale attribute and runs code
+    the user has since removed from the playground.
+    """
     sys.modules.pop(name, None)
     prefix = f"{name}."
     for cached in [m for m in sys.modules if m.startswith(prefix)]:
         sys.modules.pop(cached, None)
+
+    parent_name, _, child = name.rpartition(".")
+    if parent_name and (parent := sys.modules.get(parent_name)) is not None:
+        with contextlib.suppress(AttributeError):
+            delattr(parent, child)
 
 
 def _write_files(

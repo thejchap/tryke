@@ -64,6 +64,40 @@ with describe("playground._write_files"):
             "removed module is dropped from sys.modules",
         ).to_be_falsy()
 
+    @test(name="clears the stale submodule attribute on the parent package")
+    def test_purge_clears_parent_attribute() -> None:
+        _fresh_pyodide_root()
+        first = json.dumps(
+            [
+                {"name": "test_main.py", "source": ""},
+                {"name": "pkg/helpers.py", "source": "VALUE = 1\n"},
+            ],
+        )
+        _pg._write_files("test_main.py", "", first)  # noqa: SLF001
+        # Simulate the import system's state after `from pkg import helpers`:
+        # an implicit namespace package `pkg` (no __init__.py, so _write_files
+        # never re-purges it) whose object holds a `helpers` attribute bound to
+        # the submodule. That binding outlives a bare sys.modules pop.
+        pkg = type(sys)("pkg")
+        helpers = type(sys)("pkg.helpers")
+        vars(pkg)["helpers"] = helpers
+        sys.modules["pkg"] = pkg
+        sys.modules["pkg.helpers"] = helpers
+
+        second = json.dumps([{"name": "test_main.py", "source": ""}])
+        _pg._write_files("test_main.py", "", second)  # noqa: SLF001
+        try:
+            expect(
+                "pkg.helpers" in sys.modules,
+                "removed submodule dropped from sys.modules",
+            ).to_be_falsy()
+            expect(
+                "helpers" in vars(sys.modules["pkg"]),
+                "stale submodule attribute cleared from parent package",
+            ).to_be_falsy()
+        finally:
+            sys.modules.pop("pkg", None)
+
     @test(name="package __init__.py purges the package name, not pkg.__init__")
     def test_init_purge() -> None:
         _fresh_pyodide_root()

@@ -94,10 +94,46 @@ to production via the `playground` GitHub Actions workflow.
 
 ## manual release
 
-1. bump version in both `crates/tryke/Cargo.toml` and `pyproject.toml`
-to the same value (e.g. `0.2.0`)
-2. commit: `git commit -am "release v0.2.0"`
-3. create and push the tag: `git tag v0.2.0 && git push origin main --tags`
-4. the `release` CI pipeline triggers automatically on the `v*` tag
-5. monitor the workflow at `https://github.com/thejchap/tryke/actions`
-6. once the `publish` job completes, verify on PyPI: `uv tool install tryke==0.2.0`
+1. start from a clean `main` branch with the latest CI passing
+2. run the release helper with the bump type:
+
+   ```bash
+   scripts/release.sh patch
+   ```
+
+   use `minor` or `major` instead of `patch` as needed.
+
+   the helper checks that the Cargo workspace version and
+   `pyproject.toml`'s `bump-my-version` `current_version` match, computes the
+   next `v<version>` tag, and prepends release notes to `CHANGELOG.md` with:
+
+   ```bash
+   uv run git-cliff --tag v0.2.0 --unreleased --prepend CHANGELOG.md
+   ```
+
+   if `git-cliff` cannot fetch GitHub PR metadata, export a `GITHUB_TOKEN` and
+   rerun the helper.
+
+3. when the helper pauses, review and edit the generated `CHANGELOG.md` entry.
+   press Enter to continue once it looks right.
+4. the helper runs markdown hooks for `CHANGELOG.md`, commits the changelog,
+   runs `bump-my-version` to update `pyproject.toml`, the workspace version in
+   `Cargo.toml`, and `uv.lock`, creates the release commit and `v<version>` tag,
+   then pushes both:
+
+   ```bash
+   git push origin HEAD
+   git push origin v0.2.0
+   ```
+
+5. the `release` workflow triggers automatically on the `v*` tag. it builds
+   linux, macOS, and windows wheels, publishes them to PyPI with `uv publish`,
+   and then creates the GitHub release notes from `git-cliff` using the tagged
+   commits.
+6. monitor the workflow at `https://github.com/thejchap/tryke/actions`
+7. once the `github-release` job completes, verify PyPI has the new version:
+
+   ```bash
+   uv tool install --force tryke==0.2.0
+   tryke --version
+   ```

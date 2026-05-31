@@ -9,12 +9,12 @@ internal representation.
 
 from __future__ import annotations
 
-import contextlib
 import importlib
 import json
+import shutil
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from tryke.runner import (
     HookInfo,
@@ -26,15 +26,20 @@ from tryke.runner import (
 )
 
 _PYODIDE_ROOT = Path("/home/pyodide")
+_USER_ROOT_NAME = "user"
 
 # Names that would shadow the bundled tryke package or escape the sandbox.
 _RESERVED_NAMES = frozenset({"tryke.py", "tryke_guard.py"})
 _RESERVED_PREFIXES = ("tryke/", "tryke_guard/")
 
-# Files written by previous run_tests() calls, relative to _PYODIDE_ROOT.
-# Tracked so we can unlink and purge sys.modules entries for files the user
-# removed from the playground between runs.
-_WRITTEN_FILES: set[str] = set()
+
+class SourceFile(TypedDict):
+    name: str
+    source: str
+
+
+def _user_root() -> Path:
+    return _PYODIDE_ROOT / _USER_ROOT_NAME
 
 
 def _is_safe_filename(name: str) -> bool:
@@ -57,27 +62,6 @@ def _module_name(filename: str) -> str:
     return mod.removesuffix(".__init__")
 
 
-def _purge_module(name: str) -> None:
-    """Drop *name* and any submodules from ``sys.modules``.
-
-    Also clears the matching attribute on the parent package. The import
-    system binds an imported submodule as an attribute on its parent
-    (``pkg.helpers`` becomes ``pkg.helpers``), and that binding outlives a
-    bare ``sys.modules`` pop. Without clearing it, a later
-    ``from pkg import helpers`` resolves the stale attribute and runs code
-    the user has since removed from the playground.
-    """
-    sys.modules.pop(name, None)
-    prefix = f"{name}."
-    for cached in [m for m in sys.modules if m.startswith(prefix)]:
-        sys.modules.pop(cached, None)
-
-    parent_name, _, child = name.rpartition(".")
-    if parent_name and (parent := sys.modules.get(parent_name)) is not None:
-        with contextlib.suppress(AttributeError):
-            delattr(parent, child)
-
-
 def _write_files(
     filename: str,
     source: str,
@@ -86,9 +70,8 @@ def _write_files(
     """Write user source files to the virtual FS and return the module name.
 
     Creates parent directories for nested paths (e.g. ``pkg/helpers.py``),
-    removes files left over from earlier runs whose tab the user has since
-    closed, and invalidates Python's import caches so the next import sees
-    the freshly-written tree.
+    resets the user-file sandbox, and invalidates Python's import caches so
+    the next import sees the freshly-written tree.
 
     Rejects unsafe filenames instead of skipping them: ``run_tests`` still
     discovers and imports the active tab's module, so silently dropping an
@@ -99,38 +82,26 @@ def _write_files(
         msg = f"unsafe filename: {filename!r}"
         raise ValueError(msg)
 
-    if all_files_json:
-        all_files: list[dict[str, str]] = json.loads(all_files_json)
-        current_names = {f["name"] for f in all_files}
-        for name in current_names:
-            if not _is_safe_filename(name):
-                msg = f"unsafe filename: {name!r}"
-                raise ValueError(msg)
+    files: list[SourceFile] = (
+        json.loads(all_files_json)
+        if all_files_json
+        else [{"name": filename, "source": source}]
+    )
+    for f in files:
+        if not _is_safe_filename(f["name"]):
+            msg = f"unsafe filename: {f['name']!r}"
+            raise ValueError(msg)
 
-        for stale in _WRITTEN_FILES - current_names:
-            stale_path = _PYODIDE_ROOT / stale
-            with contextlib.suppress(FileNotFoundError):
-                stale_path.unlink()
-            _purge_module(_module_name(stale))
+    user_root = _user_root()
+    shutil.rmtree(user_root, ignore_errors=True)
+    user_root.mkdir(parents=True, exist_ok=True)
 
-        _WRITTEN_FILES.clear()
-        for f in all_files:
-            name = f["name"]
-            file_path = _PYODIDE_ROOT / name
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            file_path.write_text(f["source"])
-            _WRITTEN_FILES.add(name)
-            _purge_module(_module_name(name))
-    else:
-        file_path = _PYODIDE_ROOT / filename
+    for f in files:
+        file_path = user_root / f["name"]
         file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_text(source)
-        # Track single-file writes too so a later multi-file run that omits
-        # this file treats it as stale and cleans it up.
-        _WRITTEN_FILES.add(filename)
+        file_path.write_text(f["source"])
 
     module_name = _module_name(filename)
-    _purge_module(module_name)
     importlib.invalidate_caches()
     return module_name
 

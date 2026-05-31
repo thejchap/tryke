@@ -2,10 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   DiscoveredFile,
   GraphEdge,
+  HookItem,
   PlaygroundFile,
   ReporterName,
   RunStatus,
   SecondaryTool,
+  TestItem,
 } from "./types";
 import { EXAMPLES, KITCHEN_SINK } from "./constants";
 import { Editor } from "./Editor";
@@ -21,6 +23,18 @@ interface WasmModule {
   version: () => string;
 }
 
+interface RunRequest {
+  type: "run";
+  runId: number;
+  filename: string;
+  source: string;
+  tests: TestItem[];
+  hooks: HookItem[];
+  allFiles: PlaygroundFile[];
+}
+
+const RUN_DEBOUNCE_MS = 500;
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -30,7 +44,7 @@ export function Chrome() {
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   const [secondaryTool, setSecondaryTool] = useState<SecondaryTool>("all");
   const [reporter, setReporter] = useState<ReporterName>("text");
-  const [pyodideReady, setPyodideReady] = useState(false);
+  const [pyodideReady, setPyodideReady] = useState(true);
   const [terminalOutput, setTerminalOutput] = useState("");
   const [runStatus, setRunStatus] = useState<RunStatus>("idle");
   const [wasm, setWasm] = useState<WasmModule | null>(null);
@@ -56,6 +70,9 @@ export function Chrome() {
   const invalidateRunState = useCallback(() => {
     runIdRef.current += 1;
     lastResultsRef.current = "";
+    workerRef.current?.terminate();
+    workerRef.current = null;
+    setPyodideReady(true);
   }, []);
 
   // Init WASM
@@ -68,24 +85,39 @@ export function Chrome() {
     })();
   }, []);
 
-  // Init Pyodide worker
-  useEffect(() => {
+  const startIsolatedRun = useCallback((request: RunRequest) => {
+    workerRef.current?.terminate();
+    setPyodideReady(false);
+
     const worker = new Worker(
       new URL("../workers/pyodide.worker.ts", import.meta.url),
       { type: "module" },
     );
+    workerRef.current = worker;
+
+    const finishWorker = () => {
+      worker.terminate();
+      if (workerRef.current === worker) {
+        workerRef.current = null;
+        setPyodideReady(true);
+      }
+    };
 
     worker.onmessage = (e: MessageEvent) => {
+      if (workerRef.current !== worker) return;
+
       const { type } = e.data;
 
       if (type === "ready") {
-        setPyodideReady(true);
+        worker.postMessage(request);
         return;
       }
 
       if (type === "result") {
-        // Ignore stale results from a previous run.
-        if (e.data.runId !== runIdRef.current) return;
+        const isCurrentRun = e.data.runId === runIdRef.current;
+        finishWorker();
+        if (!isCurrentRun) return;
+
         const resultsJson: string = e.data.results;
         lastResultsRef.current = resultsJson;
         const w = wasmRef.current;
@@ -106,17 +138,34 @@ export function Chrome() {
       }
 
       if (type === "error") {
-        if (e.data.runId !== undefined && e.data.runId !== runIdRef.current)
-          return;
+        const isCurrentRun =
+          e.data.runId === undefined
+            ? request.runId === runIdRef.current
+            : e.data.runId === runIdRef.current;
+        finishWorker();
+        if (!isCurrentRun) return;
+
         setTerminalOutput(`Error: ${e.data.message}`);
         setRunStatus("done");
       }
     };
 
-    worker.postMessage({ type: "init" });
-    workerRef.current = worker;
+    worker.onerror = (event: ErrorEvent) => {
+      if (workerRef.current !== worker) return;
 
-    return () => worker.terminate();
+      const isCurrentRun = request.runId === runIdRef.current;
+      finishWorker();
+      if (!isCurrentRun) return;
+
+      setTerminalOutput(`Error: Pyodide worker failed: ${event.message}`);
+      setRunStatus("done");
+    };
+
+    worker.postMessage({ type: "init" });
+  }, []);
+
+  useEffect(() => {
+    return () => workerRef.current?.terminate();
   }, []);
 
   // Re-render when reporter changes and we have results
@@ -133,12 +182,12 @@ export function Chrome() {
   }, [reporter, wasm, runStatus]);
 
   const handleRun = useCallback(() => {
-    if (!pyodideReady || !wasm) return;
+    if (!wasm) return;
 
     const activeFile = files[activeFileIndex]!;
 
-    let tests;
-    let hooks;
+    let tests: TestItem[];
+    let hooks: HookItem[];
     try {
       const discovery = wasm.discover(activeFile.source, activeFile.name);
       tests = discovery.parsed.tests;
@@ -161,7 +210,7 @@ export function Chrome() {
     setTerminalOutput("");
 
     const runId = ++runIdRef.current;
-    workerRef.current?.postMessage({
+    startIsolatedRun({
       type: "run",
       runId,
       filename: activeFile.name,
@@ -170,27 +219,25 @@ export function Chrome() {
       hooks,
       allFiles: files.map((f) => ({ name: f.name, source: f.source })),
     });
-  }, [pyodideReady, wasm, files, activeFileIndex, invalidateRunState]);
+  }, [wasm, files, activeFileIndex, invalidateRunState, startIsolatedRun]);
 
-  // Auto-run on initial Pyodide ready
+  // Run on initial WASM load and re-run on source change (debounced).
   useEffect(() => {
-    if (pyodideReady && wasm && !hasAutoRun.current) {
+    if (!wasm) return;
+    if (!hasAutoRun.current) {
       hasAutoRun.current = true;
       handleRun();
+      return;
     }
-  }, [pyodideReady, wasm, handleRun]);
 
-  // Re-run on source change (debounced)
-  useEffect(() => {
-    if (!pyodideReady || !wasm) return;
     if (runTimerRef.current) clearTimeout(runTimerRef.current);
     runTimerRef.current = setTimeout(() => {
       handleRun();
-    }, 50);
+    }, RUN_DEBOUNCE_MS);
     return () => {
       if (runTimerRef.current) clearTimeout(runTimerRef.current);
     };
-  }, [files, activeFileIndex, pyodideReady, wasm, handleRun]);
+  }, [files, activeFileIndex, wasm, handleRun]);
 
   // Cmd+Enter / Ctrl+Enter shortcut to run tests
   useEffect(() => {
@@ -319,8 +366,8 @@ export function Chrome() {
           }`}
           title={
             pyodideReady
-              ? "Pyodide (CPython in WebAssembly) is loaded and ready to run tests"
-              : "Loading Pyodide — tests will run once it finishes"
+              ? "Each run starts in a fresh Pyodide worker so import-time side effects are discarded"
+              : "Loading an isolated Pyodide worker for this run"
           }
         >
           {pyodideReady ? "Python ready" : "Loading Python..."}
@@ -329,7 +376,7 @@ export function Chrome() {
         {/* Run button */}
         <button
           onClick={handleRun}
-          disabled={!pyodideReady || runStatus === "running"}
+          disabled={!wasm || runStatus === "running"}
           className="text-xs font-bold px-3 py-1 rounded bg-green/20 text-green hover:bg-green/30 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           title="Run tests in the active file (⌘Enter)"
         >

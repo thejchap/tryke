@@ -37,8 +37,10 @@ async function init() {
 
   py.runPython(`
 import sys
+if "/home/pyodide/user" not in sys.path:
+    sys.path.insert(0, "/home/pyodide/user")
 if "/home/pyodide" not in sys.path:
-    sys.path.insert(0, "/home/pyodide")
+    sys.path.insert(1, "/home/pyodide")
 
 # Flip the guard so code inside "if __TRYKE_TESTING__:" blocks executes
 # when user modules are imported — matches what the native worker does.

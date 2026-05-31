@@ -1,37 +1,64 @@
 """Tests for the playground harness and the runner's no-executor path.
 
 The playground module runs in Pyodide and writes user files to
-``/home/pyodide`` (the Pyodide home dir). These tests monkeypatch
-``playground._PYODIDE_ROOT`` to a temp dir so they can run in the
-normal CPython worker.
+``/home/pyodide`` (the Pyodide home dir). The ``pyodide_root`` fixture
+points ``playground._PYODIDE_ROOT`` at a fresh temp dir so the tests can
+run in the normal CPython worker, and restores the process-global state
+the harness mutates (``_PYODIDE_ROOT``, ``_WRITTEN_FILES``, ``sys.path``,
+``sys.modules``) after each test so nothing leaks into the rest of the
+suite.
 """
 
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from tryke import describe, expect, test
+from tryke import Depends, describe, expect, fixture, test
 from tryke import playground as _pg
 
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
-def _fresh_pyodide_root() -> Path:
-    """Allocate a clean temp dir, point playground at it, and add it to sys.path."""
+
+@fixture(per="test")
+def pyodide_root() -> Generator[Path, None, None]:
+    """Point the playground at a fresh temp dir, then restore global state.
+
+    The harness mutates process-global state — ``_pg._PYODIDE_ROOT``,
+    ``_pg._WRITTEN_FILES``, ``sys.path``, and the modules imported during
+    ``run_tests``. Snapshotting and restoring around each test keeps that
+    state from leaking into the rest of the suite, which shares the process.
+    """
+    saved_root = _pg._PYODIDE_ROOT  # noqa: SLF001
+    saved_written = set(_pg._WRITTEN_FILES)  # noqa: SLF001
+    saved_path = list(sys.path)
+    saved_modules = set(sys.modules)
+
     root = Path(tempfile.mkdtemp(prefix="tryke-playground-"))
     _pg._PYODIDE_ROOT = root  # noqa: SLF001
     _pg._WRITTEN_FILES.clear()  # noqa: SLF001
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
-    return root
+    sys.path.insert(0, str(root))
+    try:
+        yield root
+    finally:
+        _pg._PYODIDE_ROOT = saved_root  # noqa: SLF001
+        _pg._WRITTEN_FILES.clear()  # noqa: SLF001
+        _pg._WRITTEN_FILES.update(saved_written)  # noqa: SLF001
+        sys.path[:] = saved_path
+        for name in set(sys.modules) - saved_modules:
+            sys.modules.pop(name, None)
+        shutil.rmtree(root, ignore_errors=True)
 
 
 with describe("playground._write_files"):
 
     @test(name="creates parent directories for nested filenames")
-    def test_creates_parent_dirs() -> None:
-        root = _fresh_pyodide_root()
+    def test_creates_parent_dirs(root: Path = Depends(pyodide_root)) -> None:
         all_files = json.dumps(
             [{"name": "pkg/helpers.py", "source": "X = 1\n"}],
         )
@@ -41,9 +68,85 @@ with describe("playground._write_files"):
             "nested file written with parent dirs",
         ).to_equal("X = 1\n")
 
+    @test(name="rejects an unsafe active filename")
+    def test_rejects_unsafe_active_filename(
+        _root: Path = Depends(pyodide_root),
+    ) -> None:
+        all_files = json.dumps([{"name": "../escape.py", "source": ""}])
+        expect(
+            lambda: _pg._write_files("../escape.py", "", all_files),  # noqa: SLF001
+            "unsafe active filename is rejected",
+        ).to_raise(ValueError)
+
+    @test(name="rejects an unsafe filename among the provided files")
+    def test_rejects_unsafe_file_in_set(
+        _root: Path = Depends(pyodide_root),
+    ) -> None:
+        all_files = json.dumps(
+            [
+                {"name": "test_main.py", "source": ""},
+                {"name": "tryke.py", "source": "X = 1\n"},
+            ],
+        )
+        expect(
+            lambda: _pg._write_files("test_main.py", "", all_files),  # noqa: SLF001
+            "unsafe file in the set is rejected",
+        ).to_raise(ValueError)
+
+    @test(name="single-file writes are tracked for the next multi-file purge")
+    def test_single_file_mode_tracks_written_files(
+        root: Path = Depends(pyodide_root),
+    ) -> None:
+        # Single-file mode (all_files_json=None) must still record the file so
+        # a later multi-file run that omits it treats it as stale and unlinks
+        # it, rather than leaking the file across runs.
+        _pg._write_files("leftover.py", "X = 1\n", None)  # noqa: SLF001
+        expect(
+            "leftover.py" in _pg._WRITTEN_FILES,  # noqa: SLF001
+            "single-file write recorded in _WRITTEN_FILES",
+        ).to_be_truthy()
+
+        current = json.dumps([{"name": "test_main.py", "source": ""}])
+        _pg._write_files("test_main.py", "", current)  # noqa: SLF001
+        expect(
+            (root / "leftover.py").exists(),
+            "previously tracked single-file write purged as stale",
+        ).to_be_falsy()
+
+    @test(name="clears the stale submodule attribute on the parent package")
+    def test_purge_clears_parent_attribute(
+        _root: Path = Depends(pyodide_root),
+    ) -> None:
+        first = json.dumps(
+            [
+                {"name": "test_main.py", "source": ""},
+                {"name": "pkg/helpers.py", "source": "VALUE = 1\n"},
+            ],
+        )
+        _pg._write_files("test_main.py", "", first)  # noqa: SLF001
+        # Simulate the import system's state after `from pkg import helpers`:
+        # an implicit namespace package `pkg` (no __init__.py, so _write_files
+        # never re-purges it) whose object holds a `helpers` attribute bound to
+        # the submodule. That binding outlives a bare sys.modules pop.
+        pkg = type(sys)("pkg")
+        helpers = type(sys)("pkg.helpers")
+        vars(pkg)["helpers"] = helpers
+        sys.modules["pkg"] = pkg
+        sys.modules["pkg.helpers"] = helpers
+
+        second = json.dumps([{"name": "test_main.py", "source": ""}])
+        _pg._write_files("test_main.py", "", second)  # noqa: SLF001
+        expect(
+            "pkg.helpers" in sys.modules,
+            "removed submodule dropped from sys.modules",
+        ).to_be_falsy()
+        expect(
+            "helpers" in vars(sys.modules["pkg"]),
+            "stale submodule attribute cleared from parent package",
+        ).to_be_falsy()
+
     @test(name="purges files removed since the previous run")
-    def test_purges_removed_files() -> None:
-        root = _fresh_pyodide_root()
+    def test_purges_removed_files(root: Path = Depends(pyodide_root)) -> None:
         first = json.dumps(
             [
                 {"name": "test_main.py", "source": ""},
@@ -64,43 +167,8 @@ with describe("playground._write_files"):
             "removed module is dropped from sys.modules",
         ).to_be_falsy()
 
-    @test(name="clears the stale submodule attribute on the parent package")
-    def test_purge_clears_parent_attribute() -> None:
-        _fresh_pyodide_root()
-        first = json.dumps(
-            [
-                {"name": "test_main.py", "source": ""},
-                {"name": "pkg/helpers.py", "source": "VALUE = 1\n"},
-            ],
-        )
-        _pg._write_files("test_main.py", "", first)  # noqa: SLF001
-        # Simulate the import system's state after `from pkg import helpers`:
-        # an implicit namespace package `pkg` (no __init__.py, so _write_files
-        # never re-purges it) whose object holds a `helpers` attribute bound to
-        # the submodule. That binding outlives a bare sys.modules pop.
-        pkg = type(sys)("pkg")
-        helpers = type(sys)("pkg.helpers")
-        vars(pkg)["helpers"] = helpers
-        sys.modules["pkg"] = pkg
-        sys.modules["pkg.helpers"] = helpers
-
-        second = json.dumps([{"name": "test_main.py", "source": ""}])
-        _pg._write_files("test_main.py", "", second)  # noqa: SLF001
-        try:
-            expect(
-                "pkg.helpers" in sys.modules,
-                "removed submodule dropped from sys.modules",
-            ).to_be_falsy()
-            expect(
-                "helpers" in vars(sys.modules["pkg"]),
-                "stale submodule attribute cleared from parent package",
-            ).to_be_falsy()
-        finally:
-            sys.modules.pop("pkg", None)
-
     @test(name="package __init__.py purges the package name, not pkg.__init__")
-    def test_init_purge() -> None:
-        _fresh_pyodide_root()
+    def test_init_purge(_root: Path = Depends(pyodide_root)) -> None:
         all_files = json.dumps(
             [{"name": "pkg/__init__.py", "source": "VALUE = 1\n"}],
         )
@@ -113,8 +181,7 @@ with describe("playground._write_files"):
 with describe("playground.run_tests"):
 
     @test(name="multi-file imports resolve via written files")
-    def test_multi_file() -> None:
-        _fresh_pyodide_root()
+    def test_multi_file(_root: Path = Depends(pyodide_root)) -> None:
         helpers = "VALUE = 42\n"
         test_source = (
             "from helpers import VALUE\n"
@@ -136,8 +203,9 @@ with describe("playground.run_tests"):
         )
 
     @test(name="imported scope fixtures share one executor for the run")
-    def test_imported_scope_fixture_lives_for_playground_run() -> None:
-        _fresh_pyodide_root()
+    def test_imported_scope_fixture_lives_for_playground_run(
+        _root: Path = Depends(pyodide_root),
+    ) -> None:
         helpers = (
             "from tryke import fixture\n"
             "@fixture(per='scope')\n"
@@ -168,8 +236,7 @@ with describe("playground.run_tests"):
         ).to_equal(["passed", "passed"])
 
     @test(name="doctest items are dispatched through doctest runner")
-    def test_doctest_routing() -> None:
-        _fresh_pyodide_root()
+    def test_doctest_routing(_root: Path = Depends(pyodide_root)) -> None:
         source = (
             "def add(a: int, b: int) -> int:\n"
             '    """Add two numbers.\n'

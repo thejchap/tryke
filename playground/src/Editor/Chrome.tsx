@@ -7,10 +7,8 @@ import type {
   RunStatus,
   SecondaryTool,
 } from "./types";
-import { EXAMPLES } from "./constants";
+import { EXAMPLES, KITCHEN_SINK } from "./constants";
 import { Editor } from "./Editor";
-
-const KITCHEN_SINK = EXAMPLES[6]!;
 
 interface WasmModule {
   discover: (source: string, filename: string) => DiscoveredFile;

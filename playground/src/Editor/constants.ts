@@ -21,6 +21,16 @@ export interface Example {
   files: PlaygroundFile[];
 }
 
+// The default playground content. Exported by name so callers don't depend
+// on its position in EXAMPLES (a reorder there shouldn't change the default).
+export const KITCHEN_SINK: Example = {
+  label: "Kitchen Sink",
+  files: [
+    { name: "test_kitchen_sink.py", source: testKitchenSinkSource },
+    { name: "mathlib.py", source: mathlibSource },
+  ],
+};
+
 export const EXAMPLES: Example[] = [
   {
     label: "Basic assertions",
@@ -49,13 +59,7 @@ export const EXAMPLES: Example[] = [
     label: "Fixtures & Depends",
     files: [{ name: "test_fixtures.py", source: testFixturesSource }],
   },
-  {
-    label: "Kitchen Sink",
-    files: [
-      { name: "test_kitchen_sink.py", source: testKitchenSinkSource },
-      { name: "mathlib.py", source: mathlibSource },
-    ],
-  },
+  KITCHEN_SINK,
   {
     label: "Skip / Todo / XFail",
     files: [{ name: "test_markers.py", source: testMarkersSource }],

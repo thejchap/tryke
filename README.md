@@ -40,7 +40,7 @@ Or, check out the [tryke playground](https://playground.tryke.dev) to try it out
 
 To learn more about using tryke, see the [documentation](https://tryke.dev/).
 
-Write a test.
+Then write a test:
 
 ```python
 from typing import Annotated

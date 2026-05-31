@@ -89,10 +89,23 @@ def _write_files(
     removes files left over from earlier runs whose tab the user has since
     closed, and invalidates Python's import caches so the next import sees
     the freshly-written tree.
+
+    Rejects unsafe filenames instead of skipping them: ``run_tests`` still
+    discovers and imports the active tab's module, so silently dropping an
+    unsafe name would leave the runner importing the bundled ``tryke``
+    package (or a never-written module) and reporting misleading errors.
     """
+    if not _is_safe_filename(filename):
+        msg = f"unsafe filename: {filename!r}"
+        raise ValueError(msg)
+
     if all_files_json:
         all_files: list[dict[str, str]] = json.loads(all_files_json)
         current_names = {f["name"] for f in all_files}
+        for name in current_names:
+            if not _is_safe_filename(name):
+                msg = f"unsafe filename: {name!r}"
+                raise ValueError(msg)
 
         for stale in _WRITTEN_FILES - current_names:
             stale_path = _PYODIDE_ROOT / stale
@@ -103,20 +116,18 @@ def _write_files(
         _WRITTEN_FILES.clear()
         for f in all_files:
             name = f["name"]
-            if not _is_safe_filename(name):
-                continue
             file_path = _PYODIDE_ROOT / name
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_text(f["source"])
             _WRITTEN_FILES.add(name)
             _purge_module(_module_name(name))
     else:
-        if not _is_safe_filename(filename):
-            msg = f"unsafe filename: {filename!r}"
-            raise ValueError(msg)
         file_path = _PYODIDE_ROOT / filename
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(source)
+        # Track single-file writes too so a later multi-file run that omits
+        # this file treats it as stale and cleans it up.
+        _WRITTEN_FILES.add(filename)
 
     module_name = _module_name(filename)
     _purge_module(module_name)

@@ -99,6 +99,7 @@ export function Editor({
 }: Props) {
   const activeFile = files[activeFileIndex]!;
   const deferredSource = useDeferredValue(activeFile.source);
+  const deferredFiles = useDeferredValue(files);
 
   const discovery = useMemo<DiscoveredFile | null>(() => {
     if (!wasm) return null;
@@ -109,13 +110,19 @@ export function Editor({
     }
   }, [wasm, deferredSource, activeFile.name]);
 
+  // Key off deferredFiles (not files) so multi-file discovery doesn't
+  // re-parse every file synchronously on each keystroke, matching the
+  // deferred single-file path above.
   const multiDiscovery = useMemo(() => {
-    if (!wasm || files.length < 2)
-      return { edges: [] as GraphEdge[], files: files.map((f) => f.name) };
+    if (!wasm || deferredFiles.length < 2)
+      return {
+        edges: [] as GraphEdge[],
+        files: deferredFiles.map((f) => f.name),
+      };
     try {
       const result = wasm.discover_multi(
         JSON.stringify(
-          files.map((f) => ({ filename: f.name, source: f.source })),
+          deferredFiles.map((f) => ({ filename: f.name, source: f.source })),
         ),
       );
       return {
@@ -123,9 +130,12 @@ export function Editor({
         files: result.files.map((f) => f.path),
       };
     } catch {
-      return { edges: [] as GraphEdge[], files: files.map((f) => f.name) };
+      return {
+        edges: [] as GraphEdge[],
+        files: deferredFiles.map((f) => f.name),
+      };
     }
-  }, [wasm, files]);
+  }, [wasm, deferredFiles]);
 
   const collectOutput = useMemo(() => {
     if (!wasm || !discovery) return "";

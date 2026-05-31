@@ -9,12 +9,6 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 ## running python tests
 
-Worker interpreter resolution is `--python` > `[tool.tryke] python` in
-`pyproject.toml` > `python` (Windows) / `python3` (Unix) on `PATH`.
-With nothing configured, activate the project venv (or use `uv run`)
-before invoking the runner so the default picks up the right
-interpreter:
-
 ```bash
 uv run cargo run -- test --reporter llm
 ```
@@ -33,7 +27,7 @@ we use [`cargo-nextest`](https://nexte.st) — install once with
 `cargo install cargo-nextest --locked`, then:
 
 ```bash
-cargo nextest run --workspace --all-features
+uv run cargo nextest run --workspace --all-features
 ```
 
 ## dev guidelines
@@ -41,7 +35,7 @@ cargo nextest run --workspace --all-features
 - all changes must be tested. if you're not testing your changes, you're not done.
 - get your tests to pass. if you didn't run the tests, your code does not work.
 - follow existing code style. check neighboring files for patterns.
-- always run uvx prek run -a at the end of a task.
+- always run `uvx prek run -a` at the end of a task.
 - when making changes that affect CLI output, render the ANSI output and
   share a screenshot with the user for review.
 - When opening a PR, use `.github/pull_request_template.md` and keep each section concise.

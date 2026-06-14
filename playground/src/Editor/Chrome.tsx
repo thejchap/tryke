@@ -411,11 +411,13 @@ export function Chrome() {
             <span>{file.name}</span>
             {files.length > 1 && (
               <button
+                type="button"
                 onClick={(e) => {
                   e.stopPropagation();
                   handleRemoveFile(i);
                 }}
                 className="ml-1 text-text-dim hover:text-red text-[10px]"
+                aria-label={`Remove ${file.name}`}
                 title="Remove file"
               >
                 x
@@ -442,8 +444,10 @@ export function Chrome() {
           </form>
         ) : (
           <button
+            type="button"
             onClick={() => setShowNewFile(true)}
             className="px-2 py-1.5 text-xs text-text-dim hover:text-text"
+            aria-label="Add file"
             title="Add a new file"
           >
             +

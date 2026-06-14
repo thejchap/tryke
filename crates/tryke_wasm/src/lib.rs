@@ -131,7 +131,12 @@ pub fn format_results(results_json: &str, reporter_name: &str) -> Result<String,
         .collect();
 
     let tests: Vec<tryke_types::TestItem> = results.iter().map(|r| r.test.clone()).collect();
-    let summary = RunSummary::from_results(&results);
+    let mut summary = RunSummary::from_results(&results);
+    summary.file_count = results
+        .iter()
+        .filter_map(|result| result.test.file_path.as_ref())
+        .collect::<HashSet<_>>()
+        .len();
 
     let output = match reporter_name {
         "text" => run_reporter(

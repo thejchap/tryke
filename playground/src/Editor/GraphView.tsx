@@ -50,7 +50,7 @@ export function GraphView({ edges, files }: Props) {
     return { nodes, edges: edgeLines, width, height };
   }, [edges, files]);
 
-  if (!layout || files.length === 0) {
+  if (!layout || files.length < 2) {
     return (
       <div className="p-4 text-text-dim text-sm">
         Add multiple files to see import graph.

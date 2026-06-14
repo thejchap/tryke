@@ -414,11 +414,8 @@ async fn handle_unit(
         )
         .await;
     }
-    let finalize_modules: std::collections::HashSet<String> = if unit.hooks.is_empty() {
-        std::collections::HashSet::new()
-    } else {
-        unit.tests.iter().map(|t| t.module_path.clone()).collect()
-    };
+    let finalize_modules: std::collections::HashSet<String> =
+        unit.tests.iter().map(|t| t.module_path.clone()).collect();
     for test in unit.tests {
         trace!("worker_task: running test {}", test.name);
         run_single_test(

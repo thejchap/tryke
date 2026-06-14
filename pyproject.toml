@@ -31,7 +31,7 @@ Repository = "https://github.com/thejchap/tryke"
 # Treat `python/` as a source root so files like `python/tryke_guard.py`
 # are recognised as top-level modules instead of implicit namespace
 # packages (INP001). Mirrors maturin's `python-source = "python"`.
-src = ["python"]
+src = ["python", "playground/examples"]
 
 [tool.ruff.lint]
 select = ["ALL"]
@@ -43,7 +43,13 @@ ignore = ["D", "COM812"]
 # flag that pattern. Exempt files that exercise the @fixture surface.
 [tool.ruff.lint.per-file-ignores]
 "tests/test_hooks.py" = ["B008", "PT028"]
+# Same Depends(...) defaults. ARG001/PT019 additionally fire on the
+# pyodide_root fixture that many tests depend on only for its setup/teardown
+# side effects; tryke has no `usefixtures` equivalent, so the parameter is the
+# only way to request it.
+"tests/test_playground.py" = ["B008", "PT028", "ARG001", "PT019"]
 "python/tryke/hooks.py" = ["B008"]
+"playground/examples/*.py" = ["ANN", "INP001", "T201", "FBT003", "EM101", "TRY003", "S101", "PT"]
 # This test deliberately spawns subprocesses to prove that the in-source
 # testing flag does NOT leak into child processes. The subprocess args are
 # fully controlled (sys.executable, fixed -c script), so S603 is spurious.
@@ -55,6 +61,9 @@ ignore = ["D", "COM812"]
 # Without this, `from tryke.worker import ...` in tests/ would not
 # resolve to python/tryke/worker.py in the import graph.
 src = [".", "python"]
+# Playground examples include intentionally-failing tests for the browser
+# demo; exclude them from the project test suite.
+exclude = ["playground/examples"]
 
 [tool.maturin]
 bindings = "bin"

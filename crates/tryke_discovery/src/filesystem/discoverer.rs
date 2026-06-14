@@ -8,7 +8,7 @@ use rayon::prelude::*;
 use salsa::Setter;
 use tryke_types::{HookItem, TestItem};
 
-use crate::{
+use super::{
     cache::{DiskCache, FileKey},
     db::{Database, DiscoveredFile, SourceFile, discover_file},
     import_graph::{GraphEntry, ImportGraph},
@@ -113,12 +113,12 @@ impl Discoverer {
         src: &[String],
         cache_dir: Option<&Path>,
     ) -> Self {
-        let root = crate::find_project_root(start).unwrap_or_else(|| start.to_path_buf());
+        let root = super::find_project_root(start).unwrap_or_else(|| start.to_path_buf());
         let root = root.canonicalize().unwrap_or(root);
         let src_roots = if src.is_empty() {
             vec![root.clone()]
         } else {
-            crate::resolve_src_roots(&root, src)
+            super::resolve_src_roots(&root, src)
         };
         let cache = cache_dir.map_or_else(
             || DiskCache::load_in_state_dir(root.join(".tryke")),
@@ -139,7 +139,7 @@ impl Discoverer {
     }
 
     pub fn rediscover(&mut self) -> Vec<TestItem> {
-        let mut paths = crate::collect_python_files(&self.root, &self.excludes);
+        let mut paths = super::collect_python_files(&self.root, &self.excludes);
         paths.sort();
         debug!(
             "rediscover: found {} python files in {}",
@@ -283,7 +283,7 @@ impl Discoverer {
         self.inputs.clear();
         self.import_graph = ImportGraph::default();
 
-        let paths = crate::collect_python_files_restricted(&self.root, walk_roots, &self.excludes);
+        let paths = super::collect_python_files_restricted(&self.root, walk_roots, &self.excludes);
         debug!(
             "rediscover_restricted: found {} python files across {} walk roots",
             paths.len(),
@@ -505,7 +505,7 @@ impl Discoverer {
     /// at the caller.
     #[must_use]
     pub fn is_excluded(&self, path: &Path) -> bool {
-        crate::build_change_set_ignore(&self.root, &self.excludes)
+        super::build_change_set_ignore(&self.root, &self.excludes)
             .matched_path_or_any_parents(path, false)
             .is_ignore()
     }
@@ -766,11 +766,11 @@ mod tests {
             .canonicalize()
             .expect("canonicalize test file");
         let mut discoverer = Discoverer::new(dir.path());
-        crate::db::count_discover_file_executions_for(path.clone());
+        crate::filesystem::db::count_discover_file_executions_for(path.clone());
 
         let first = discoverer.rediscover();
         assert_eq!(first.len(), 1);
-        assert_eq!(crate::db::discover_file_executions(), 1);
+        assert_eq!(crate::filesystem::db::discover_file_executions(), 1);
 
         let source_two =
             "from tryke import test\n\n@test\ndef test_one():\n    pass\n# second comment\n";
@@ -778,7 +778,7 @@ mod tests {
         let second = discoverer.rediscover_changed(std::slice::from_ref(&path));
         assert_eq!(second.len(), 1);
         assert_eq!(
-            crate::db::discover_file_executions(),
+            crate::filesystem::db::discover_file_executions(),
             1,
             "trivia-only source changes should not re-run discovery"
         );
@@ -788,7 +788,7 @@ mod tests {
         let third = discoverer.rediscover_changed(std::slice::from_ref(&path));
         assert_eq!(third.len(), 2);
         assert_eq!(
-            crate::db::discover_file_executions(),
+            crate::filesystem::db::discover_file_executions(),
             2,
             "AST changes should re-run discovery"
         );

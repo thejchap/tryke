@@ -10,7 +10,6 @@
 
 use std::collections::HashSet;
 use std::io::{self, Write};
-use std::time::Instant;
 
 use owo_colors::OwoColorize;
 use tryke_types::{RunSummary, TestItem, TestOutcome, TestResult};
@@ -59,7 +58,6 @@ pub struct SugarReporter<W: Write = io::Stdout> {
     current_file: Option<String>,
     current_marks: Vec<String>,
     failures: Vec<TestResult>,
-    start: Instant,
     subcommand_label: &'static str,
     watch_hint: Option<String>,
     clear_armed: bool,
@@ -82,7 +80,6 @@ impl SugarReporter {
             current_file: None,
             current_marks: Vec::new(),
             failures: Vec::new(),
-            start: Instant::now(),
             subcommand_label: "tryke test",
             watch_hint: None,
             clear_armed: false,
@@ -112,7 +109,6 @@ impl<W: Write> SugarReporter<W> {
             current_file: None,
             current_marks: Vec::new(),
             failures: Vec::new(),
-            start: Instant::now(),
             subcommand_label: "tryke test",
             watch_hint: None,
             clear_armed: false,
@@ -300,7 +296,6 @@ impl<W: Write> Reporter for SugarReporter<W> {
         self.current_file = None;
         self.current_marks.clear();
         self.failures.clear();
-        self.start = Instant::now();
         self.started = false;
         self.failure_seen = false;
 

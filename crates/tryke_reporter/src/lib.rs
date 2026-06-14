@@ -7,6 +7,7 @@ pub mod junit;
 pub mod live;
 pub mod llm;
 pub mod next;
+#[cfg(feature = "terminal")]
 pub mod progress;
 pub mod reporter;
 pub mod sugar;
@@ -18,6 +19,7 @@ pub use json::JSONReporter;
 pub use junit::JUnitReporter;
 pub use llm::LlmReporter;
 pub use next::NextReporter;
+#[cfg(feature = "terminal")]
 pub use progress::ProgressReporter;
 pub use reporter::Reporter;
 pub use sugar::SugarReporter;

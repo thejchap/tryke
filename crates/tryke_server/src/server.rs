@@ -43,13 +43,21 @@ impl Server {
         }
     }
 
-    #[expect(clippy::missing_errors_doc)]
+    /// Bind the server to its configured localhost port and run it.
+    ///
+    /// # Errors
+    /// Returns an error if binding the TCP listener fails or if the listener
+    /// loop exits with an error.
     pub async fn run(self) -> anyhow::Result<()> {
         let listener = TcpListener::bind(("127.0.0.1", self.port)).await?;
         self.run_on_listener(listener).await
     }
 
-    #[expect(clippy::missing_errors_doc)]
+    /// Run the server on an existing listener.
+    ///
+    /// # Errors
+    /// Returns an error if file watching cannot be initialized or if accepting
+    /// a TCP connection fails.
     pub async fn run_on_listener(self, listener: TcpListener) -> anyhow::Result<()> {
         let size = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
         let pool = Arc::new(WorkerPool::new(

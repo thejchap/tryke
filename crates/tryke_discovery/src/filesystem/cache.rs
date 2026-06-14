@@ -16,7 +16,7 @@ use std::{
 use log::{debug, trace};
 use serde::{Deserialize, Serialize};
 
-use crate::db::DiscoveredFile;
+use super::db::DiscoveredFile;
 
 /// Bumped whenever the cache schema (the shape of `DiscoveredFile` or
 /// its transitive fields) changes in a way that'd make old entries
@@ -120,7 +120,7 @@ pub fn clean_project_cache(start: &Path, cache_dir: Option<&Path>) -> io::Result
 }
 
 fn clean_default_cache_dir(start: &Path) -> io::Result<CleanCacheReport> {
-    let root = crate::find_project_root(start).unwrap_or_else(|| start.to_path_buf());
+    let root = super::find_project_root(start).unwrap_or_else(|| start.to_path_buf());
     let root = root.canonicalize().unwrap_or(root);
     let cache_dir = root.join(".tryke").join("cache");
     let removed_entries = match fs::remove_dir_all(&cache_dir) {

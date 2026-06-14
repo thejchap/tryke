@@ -1,0 +1,15 @@
+@import "tailwindcss";
+@import "@xterm/xterm/css/xterm.css";
+
+@theme {
+  --color-bg: #1e1e2e;
+  --color-surface: #181825;
+  --color-surface-hover: #313244;
+  --color-border: #313244;
+  --color-text: #cdd6f4;
+  --color-text-dim: #6c7086;
+  --color-accent: #89b4fa;
+  --color-green: #a6e3a1;
+  --color-red: #f38ba8;
+  --color-yellow: #f9e2af;
+}

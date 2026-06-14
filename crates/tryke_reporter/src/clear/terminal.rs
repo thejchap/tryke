@@ -1,5 +1,3 @@
-use std::io::IsTerminal;
-
 /// Whether stdout is a real terminal we can safely send a clear
 /// sequence to. Captured at reporter construction time and stored on
 /// the reporter so that reporters writing to a non-stdout target
@@ -7,6 +5,7 @@ use std::io::IsTerminal;
 /// writer) never trip the clear.
 #[must_use]
 pub fn stdout_is_terminal() -> bool {
+    use std::io::IsTerminal;
     std::io::stdout().is_terminal()
 }
 

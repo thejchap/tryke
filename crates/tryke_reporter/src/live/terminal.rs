@@ -13,7 +13,8 @@
 //! and stay free of ANSI escapes.
 
 use std::borrow::Cow;
-use std::io::{self, IsTerminal, Write};
+use std::io::Write;
+use std::io::{self, IsTerminal};
 use std::time::Duration;
 
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
@@ -28,6 +29,16 @@ const DRAW_HZ: u8 = 60;
 #[must_use]
 pub fn supports_live() -> bool {
     io::stdout().is_terminal() && io::stderr().is_terminal()
+}
+
+#[must_use]
+fn terminal_width() -> usize {
+    let (_, cols) = console::Term::stderr().size();
+    if cols == 0 {
+        FALLBACK_WIDTH
+    } else {
+        cols as usize
+    }
 }
 
 /// Format `d` as `HH:MM:SS`, with the entire duration clamped to
@@ -82,18 +93,13 @@ impl LiveArea {
     #[must_use]
     pub fn new() -> Self {
         let enabled = supports_live();
+        let width = terminal_width();
         let multi = if enabled {
             Some(MultiProgress::with_draw_target(
                 ProgressDrawTarget::stderr_with_hz(DRAW_HZ),
             ))
         } else {
             None
-        };
-        let (_, cols) = console::Term::stderr().size();
-        let width = if cols == 0 {
-            FALLBACK_WIDTH
-        } else {
-            cols as usize
         };
         Self {
             enabled,

@@ -17,7 +17,11 @@ use tryke_discovery::build_change_set_ignore;
 // this window.
 const DEBOUNCE_DELAY: Duration = Duration::from_millis(50);
 
-#[expect(clippy::missing_errors_doc)]
+/// Spawn a recursive Python-file watcher for `root`.
+///
+/// # Errors
+/// Returns an error if the debouncer cannot be created or if the watcher
+/// cannot subscribe to `root`.
 pub fn spawn_watcher(
     root: &Path,
     excludes: &[String],

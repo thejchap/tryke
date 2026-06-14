@@ -42,7 +42,12 @@ impl Client {
         }
     }
 
-    #[expect(clippy::missing_errors_doc)]
+    /// Connect to the running server, execute a test run, and stream reporter events.
+    ///
+    /// # Errors
+    /// Returns an error if no server is listening, if socket I/O or response
+    /// parsing fails, if the server returns an RPC error, or if the run
+    /// completes with failed or errored tests.
     pub fn run(self, root: &Path, reporter: &mut dyn Reporter) -> anyhow::Result<()> {
         let stream = TcpStream::connect(("127.0.0.1", self.port))
             .map_err(|_| anyhow::anyhow!("no server running on port {}", self.port))?;

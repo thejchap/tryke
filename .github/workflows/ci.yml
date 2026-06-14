@@ -57,6 +57,21 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - run: uv run ty check
 
+  playground:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        working-directory: playground
+        run: bun install --frozen-lockfile
+      - name: Lint
+        working-directory: playground
+        run: bun run lint
+      - name: Check formatting
+        working-directory: playground
+        run: bun run format:check
+
   test:
     runs-on: ${{ matrix.os }}
     permissions:
@@ -84,7 +99,7 @@ jobs:
 
   ci:
     if: always()
-    needs: [fmt, clippy, cli-docs, ruff, ty, test]
+    needs: [fmt, clippy, cli-docs, ruff, ty, playground, test]
     runs-on: ubuntu-latest
     steps:
       - run: |

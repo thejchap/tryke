@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use log::trace;
 use ruff_python_ast::{ModModule, Stmt};
 use ruff_python_parser::parse_module;
-use tryke_types::ParsedFile;
+
+pub use tryke_types::DiscoveredFile;
 
 #[salsa::db]
 pub trait Db: salsa::Database {}
@@ -97,26 +98,12 @@ pub(crate) fn parse_file(db: &dyn Db, file: SourceFile) -> ParsedAst {
     ParsedAst::parse(file.text(db))
 }
 
-/// Everything derivable from a single parse of a Python source file:
-/// the `ParsedFile` (tests, hooks, guard-else lines, errors), the
-/// candidate import paths this file references, and the dynamic-import
-/// flag. Produced in one AST walk so callers never parse the file
-/// twice. `import_candidates` holds first-wins alternatives that the
-/// discoverer resolves against the project's enumerated file set,
-/// avoiding per-import `stat()` syscalls.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct DiscoveredFile {
-    pub parsed: ParsedFile,
-    pub import_candidates: Vec<Vec<PathBuf>>,
-    pub dynamic_imports: bool,
-}
-
 #[salsa::tracked]
 pub fn discover_file(db: &dyn Db, file: SourceFile) -> DiscoveredFile {
     #[cfg(test)]
     count_discover_file_execution(file.path(db));
 
-    crate::discover_file_from_ast(
+    super::discover_file_from_ast(
         file.root(db),
         file.src_roots(db),
         file.path(db),

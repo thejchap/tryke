@@ -9,18 +9,29 @@ repository.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+default = ["filesystem"]
+filesystem = [
+  "dep:ignore",
+  "dep:log",
+  "dep:rayon",
+  "dep:rmp-serde",
+  "dep:salsa",
+  "dep:tryke_config",
+]
+
 [dependencies]
-ignore = { workspace = true }
-log = "0.4"
-rayon = { workspace = true }
-rmp-serde = { workspace = true }
-salsa = { workspace = true }
+ignore = { workspace = true, optional = true }
+log = { version = "0.4", optional = true }
+rayon = { workspace = true, optional = true }
+rmp-serde = { workspace = true, optional = true }
+salsa = { workspace = true, optional = true }
 serde = { workspace = true }
 ruff_python_ast = { workspace = true }
 ruff_python_parser = { workspace = true }
 ruff_source_file = { workspace = true }
 ruff_text_size = { workspace = true }
-tryke_config = { workspace = true }
+tryke_config = { workspace = true, optional = true }
 tryke_types = { workspace = true }
 
 [dev-dependencies]

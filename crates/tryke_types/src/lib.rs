@@ -337,8 +337,9 @@ pub fn convert_wire_result(test: TestItem, wire: RunTestResultWire) -> TestResul
 /// Convert a raw [`AssertionWire`] into an [`Assertion`], enriching span /
 /// arg-span / line / path data from the optionally-supplied
 /// [`ExpectedAssertion`] (statically discovered ahead of time). When no
-/// match is provided, falls back to parsing the `expect(...)` expression
-/// itself to compute the subject span.
+/// match is provided, the assertion falls back to highlighting the whole
+/// expression instead of attempting to re-parse Python syntax from the
+/// worker payload.
 #[must_use]
 pub fn convert_assertion(
     wire: AssertionWire,
@@ -349,10 +350,8 @@ pub fn convert_assertion(
         .unwrap_or(wire.expression);
     let (span_offset, span_length) = expected_assertion
         .and_then(|ea| ea.subject_span)
-        .unwrap_or_else(|| compute_subject_span(&expression));
-    let expected_arg_span = expected_assertion
-        .and_then(|ea| ea.expected_arg_span)
-        .or_else(|| expected_assertion.and_then(|ea| find_arg_span(&expression, ea)));
+        .unwrap_or((0, expression.len().max(1)));
+    let expected_arg_span = expected_assertion.and_then(|ea| ea.expected_arg_span);
     let line = expected_assertion.map_or(wire.line as usize, |ea| ea.line as usize);
     // Make absolute paths relative to cwd so diagnostics show short paths.
     // In WASM `current_dir()` returns `Err` and the unchanged path is used.
@@ -377,97 +376,6 @@ pub fn convert_assertion(
         received: wire.received,
         expected_arg_span,
     }
-}
-
-/// Find the byte span of the first matcher argument inside `expression`,
-/// guided by AST metadata from `ExpectedAssertion`. Returns `None` for
-/// no-arg matchers like `to_be_falsy()`.
-fn find_arg_span(expression: &str, ea: &ExpectedAssertion) -> Option<(usize, usize)> {
-    let arg = ea.args.first()?;
-    if arg.is_empty() {
-        return None;
-    }
-    let matcher_pat = format!("{}(", ea.matcher);
-    let matcher_pos = expression.find(&matcher_pat)?;
-    let content_start = matcher_pos + matcher_pat.len();
-    let remaining = expression.get(content_start..)?;
-    let arg_offset_in_remaining = remaining.find(arg.as_str())?;
-    let offset = content_start + arg_offset_in_remaining;
-    Some((offset, arg.len()))
-}
-
-/// Find the first argument inside `expect(subject, ...)` by matching parens.
-/// Stops at the first top-level comma so that optional arguments like the
-/// label in `expect(val, "label")` are excluded from the span.
-fn compute_subject_span(expression: &str) -> (usize, usize) {
-    let Some((start, end)) = find_expect_first_arg_bounds(expression) else {
-        return (0, expression.len().max(1));
-    };
-    normalize_subject_span(expression, start, end)
-}
-
-fn find_expect_first_arg_bounds(expression: &str) -> Option<(usize, usize)> {
-    let pos = expression.find("expect(")?;
-    let start = pos + "expect(".len();
-    let bytes = expression.as_bytes();
-    let mut closers = vec![b')'];
-    let mut index = start;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\'' | b'"' => {
-                index = skip_python_string_literal(bytes, index);
-                continue;
-            }
-            b'(' => closers.push(b')'),
-            b'[' => closers.push(b']'),
-            b'{' => closers.push(b'}'),
-            b',' | b')' if closers.len() == 1 => return Some((start, index)),
-            b')' | b']' | b'}' if closers.last().copied() == Some(bytes[index]) => {
-                closers.pop();
-            }
-            _ => {}
-        }
-        index += 1;
-    }
-    Some((start, expression.len()))
-}
-
-fn skip_python_string_literal(bytes: &[u8], start: usize) -> usize {
-    let quote = bytes[start];
-    let triple = start + 2 < bytes.len() && bytes[start + 1] == quote && bytes[start + 2] == quote;
-    let mut index = start + if triple { 3 } else { 1 };
-    while index < bytes.len() {
-        if bytes[index] == b'\\' {
-            index = (index + 2).min(bytes.len());
-        } else if triple
-            && index + 2 < bytes.len()
-            && bytes[index] == quote
-            && bytes[index + 1] == quote
-            && bytes[index + 2] == quote
-        {
-            return index + 3;
-        } else if !triple && bytes[index] == quote {
-            return index + 1;
-        } else {
-            index += 1;
-        }
-    }
-    bytes.len()
-}
-
-fn normalize_subject_span(expression: &str, raw_start: usize, raw_end: usize) -> (usize, usize) {
-    let bytes = expression.as_bytes();
-    let mut start = raw_start;
-    while start < raw_end && bytes[start].is_ascii_whitespace() {
-        start += 1;
-    }
-
-    let mut end = raw_end;
-    while end > start && bytes[end - 1].is_ascii_whitespace() {
-        end -= 1;
-    }
-
-    (start, end.saturating_sub(start).max(1))
 }
 
 fn expected_end_line(ea: &ExpectedAssertion) -> u32 {
@@ -1013,7 +921,7 @@ mod tests {
     }
 
     #[test]
-    fn convert_assertion_without_discovery_computes_span_from_expression() {
+    fn convert_assertion_without_discovery_highlights_whole_expression() {
         let wire = AssertionWire {
             expression: "expect(x).to_equal(2)".into(),
             expected: "2".into(),
@@ -1023,9 +931,8 @@ mod tests {
             file: Some("tests/test_math.py".into()),
         };
         let a = convert_assertion(wire, None);
-        // "expect(" is 7 chars, subject "x" starts at 7, length 1
-        assert_eq!(a.span_offset, 7);
-        assert_eq!(a.span_length, 1);
+        assert_eq!(a.span_offset, 0);
+        assert_eq!(a.span_length, "expect(x).to_equal(2)".len());
         assert_eq!(a.expected_arg_span, None);
     }
 
@@ -1044,6 +951,8 @@ mod tests {
             matcher: "to_equal".into(),
             args: vec!["2".into()],
             line: 10,
+            subject_span: Some((7, 1)),
+            expected_arg_span: Some((19, 1)),
             ..Default::default()
         };
         let a = convert_assertion(wire, Some(&expected));
@@ -1077,162 +986,5 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(expected_arg_value(&discovered_value), Some("x == y"));
-    }
-
-    #[test]
-    fn compute_subject_span_simple() {
-        let (off, len) = compute_subject_span("expect(x).to_equal(2)");
-        assert_eq!(off, 7);
-        assert_eq!(len, 1);
-    }
-
-    #[test]
-    fn compute_subject_span_nested_parens() {
-        let (off, len) = compute_subject_span("expect(foo(bar(1))).to_be_truthy()");
-        assert_eq!(off, 7);
-        assert_eq!(len, 11); // "foo(bar(1))"
-    }
-
-    #[test]
-    fn compute_subject_span_no_expect() {
-        let (off, len) = compute_subject_span("assert x == 1");
-        assert_eq!(off, 0);
-        assert_eq!(len, 13);
-    }
-
-    #[test]
-    fn compute_subject_span_stops_at_comma() {
-        let (off, len) = compute_subject_span("expect(val, \"label\")");
-        assert_eq!(off, 7);
-        assert_eq!(len, 3); // "val"
-    }
-
-    #[test]
-    fn compute_subject_span_nested_parens_with_label() {
-        let (off, len) = compute_subject_span("expect(foo(a, b), \"label\")");
-        assert_eq!(off, 7);
-        assert_eq!(len, 9); // "foo(a, b)"
-    }
-
-    #[test]
-    fn compute_subject_span_nested_list_with_label() {
-        let expression = "expect([1, {\"two\": (2, 3)}], \"label\")";
-        let (off, len) = compute_subject_span(expression);
-        let expected = "[1, {\"two\": (2, 3)}]";
-        let expected_off = expression.find(expected).expect("list subject");
-        assert_eq!(off, expected_off);
-        assert_eq!(len, expected.len());
-    }
-
-    #[test]
-    fn compute_subject_span_ignores_commas_inside_strings() {
-        let expression = "expect(\"a, b\", \"label\").to_equal(\"a, b\")";
-        let (off, len) = compute_subject_span(expression);
-        let expected = "\"a, b\"";
-        let expected_off = expression.find(expected).expect("string subject");
-        assert_eq!(off, expected_off);
-        assert_eq!(len, expected.len());
-    }
-
-    #[test]
-    fn compute_subject_span_ignores_parens_inside_triple_quoted_strings() {
-        let expression = "expect('''a) b''', \"label\").to_equal(\"a) b\")";
-        let (off, len) = compute_subject_span(expression);
-        let expected = "'''a) b'''";
-        let expected_off = expression.find(expected).expect("string subject");
-        assert_eq!(off, expected_off);
-        assert_eq!(len, expected.len());
-    }
-
-    #[test]
-    fn compute_subject_span_ignores_commas_inside_raw_strings() {
-        let expression = "expect(r\"a, b\", \"label\").to_equal(r\"a, b\")";
-        let (off, len) = compute_subject_span(expression);
-        let expected = "r\"a, b\"";
-        let expected_off = expression.find(expected).expect("raw string subject");
-        assert_eq!(off, expected_off);
-        assert_eq!(len, expected.len());
-    }
-
-    #[test]
-    fn compute_subject_span_whitespace_before_comma() {
-        let (off, len) = compute_subject_span("expect(val  , \"label\")");
-        assert_eq!(off, 7);
-        assert_eq!(len, 3); // "val" (trailing whitespace trimmed)
-    }
-
-    #[test]
-    fn compute_subject_span_multiline_keyword_expr_falls_back_to_keyword_arg() {
-        let expression = "t.expect(\n    expr=ctx.module_lines_call_count,\n    name=\"2nd call\"\n).to_equal(other=1)";
-        let (off, len) = compute_subject_span(expression);
-        let expected_off = expression
-            .find("expr=ctx.module_lines_call_count")
-            .expect("keyword subject in expression");
-        assert_eq!(off, expected_off);
-        assert_eq!(len, "expr=ctx.module_lines_call_count".len());
-    }
-
-    fn make_expected(matcher: &str, args: &[&str], line: u32) -> ExpectedAssertion {
-        ExpectedAssertion {
-            subject: "x".into(),
-            matcher: matcher.into(),
-            negated: false,
-            args: args.iter().map(|s| (*s).to_string()).collect(),
-            line,
-            label: None,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn find_arg_span_matcher_with_arg() {
-        let ea = make_expected("to_equal", &["2"], 10);
-        let span = find_arg_span("expect(x).to_equal(2)", &ea);
-        assert_eq!(span, Some((19, 1)));
-    }
-
-    #[test]
-    fn find_arg_span_no_arg_matcher() {
-        let ea = make_expected("to_be_falsy", &[], 10);
-        let span = find_arg_span("expect(val).to_be_falsy()", &ea);
-        assert_eq!(span, None);
-    }
-
-    #[test]
-    fn find_arg_span_complex_expression() {
-        let ea = ExpectedAssertion {
-            subject: "foo(bar(1))".into(),
-            matcher: "to_equal".into(),
-            negated: false,
-            args: vec!["42".into()],
-            line: 10,
-            label: None,
-            ..Default::default()
-        };
-        let span = find_arg_span("expect(foo(bar(1))).to_equal(42)", &ea);
-        assert_eq!(span, Some((29, 2)));
-    }
-
-    #[test]
-    fn find_arg_span_string_arg() {
-        let ea = make_expected("to_equal", &["\"hello\""], 10);
-        let span = find_arg_span("expect(x).to_equal(\"hello\")", &ea);
-        assert_eq!(span, Some((19, 7)));
-    }
-
-    #[test]
-    fn find_arg_span_keyword_arg() {
-        let ea = make_expected("to_equal", &["other=1"], 10);
-        let expression = "expect(x).to_equal(other=1)";
-        let span = find_arg_span(expression, &ea);
-        let expected_offset = expression.find("other=1").expect("arg in expression");
-        assert_eq!(span, Some((expected_offset, 7)));
-    }
-
-    #[test]
-    fn find_arg_span_matcher_not_found() {
-        let ea = make_expected("to_contain", &["5"], 10);
-        let span = find_arg_span("expect(x).to_equal(2)", &ea);
-        assert_eq!(span, None);
     }
 }

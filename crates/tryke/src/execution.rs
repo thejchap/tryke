@@ -5,7 +5,7 @@ use log::LevelFilter;
 use tokio_stream::StreamExt;
 use tryke_reporter::Reporter;
 use tryke_runner::{DistMode, WorkerPool, partition_with_hooks};
-use tryke_types::{ChangedSelectionSummary, HookItem, RunSummary, TestOutcome};
+use tryke_types::{ChangedSelectionSummary, HookItem, RunSummary, TestOutcome, DiscoveryWarning,DiscoveryWarningKind };
 
 pub fn worker_pool_size() -> usize {
     std::thread::available_parallelism().map_or(4, std::num::NonZero::get)
@@ -143,7 +143,13 @@ pub async fn report_cycle(
         // flush any deferred watch-mode clear/header before the
         // warning lands — otherwise the first `on_test_complete`'s
         // clear would scrub it off the screen.
-        reporter.on_scheduler_warning(w);
+
+        let warning = DiscoveryWarning {
+            file_path: PathBuf::new(), 
+            kind: DiscoveryWarningKind::Scheduler,
+            message: w.clone(),
+        };
+        reporter.on_discovery_warning(&warning);
     }
     let mut stream = pool.run(partition.units);
     while let Some(result) = stream.next().await {

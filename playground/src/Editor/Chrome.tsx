@@ -55,6 +55,7 @@ export function Chrome() {
   const wasmRef = useRef<WasmModule | null>(null);
   const reporterRef = useRef<ReporterName>(reporter);
   const runIdRef = useRef(0);
+  const didAutoRunRef = useRef(false);
 
   useEffect(() => {
     wasmRef.current = wasm;
@@ -222,6 +223,17 @@ export function Chrome() {
       allFiles: files.map((f) => ({ name: f.name, source: f.source })),
     });
   }, [wasm, files, activeFileIndex, invalidateRunState, startIsolatedRun]);
+
+  // Auto-run the default example once on first load, as soon as the WASM
+  // module is ready to discover tests. The run spins up the Pyodide worker
+  // itself, so this kicks off execution the moment Python can run — the
+  // playground shows live results instead of an empty terminal. Guarded by a
+  // ref so it fires only on the initial load, not on later re-renders.
+  useEffect(() => {
+    if (!wasm || didAutoRunRef.current) return;
+    didAutoRunRef.current = true;
+    handleRun();
+  }, [wasm, handleRun]);
 
   const handleSourceChange = useCallback(
     (source: string) => {

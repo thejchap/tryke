@@ -33,8 +33,6 @@ interface RunRequest {
   allFiles: PlaygroundFile[];
 }
 
-const RUN_DEBOUNCE_MS = 500;
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -56,8 +54,6 @@ export function Chrome() {
   const lastResultsRef = useRef<string>("");
   const wasmRef = useRef<WasmModule | null>(null);
   const reporterRef = useRef<ReporterName>(reporter);
-  const runTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const hasAutoRun = useRef(false);
   const runIdRef = useRef(0);
 
   useEffect(() => {
@@ -74,6 +70,12 @@ export function Chrome() {
     workerRef.current = null;
     setPyodideReady(true);
   }, []);
+
+  const clearRunResult = useCallback(() => {
+    invalidateRunState();
+    setRunStatus("idle");
+    setTerminalOutput("");
+  }, [invalidateRunState]);
 
   // Init WASM
   useEffect(() => {
@@ -221,49 +223,19 @@ export function Chrome() {
     });
   }, [wasm, files, activeFileIndex, invalidateRunState, startIsolatedRun]);
 
-  // Run on initial WASM load and re-run on source change (debounced).
-  useEffect(() => {
-    if (!wasm) return;
-    if (!hasAutoRun.current) {
-      hasAutoRun.current = true;
-      handleRun();
-      return;
-    }
-
-    if (runTimerRef.current) clearTimeout(runTimerRef.current);
-    runTimerRef.current = setTimeout(() => {
-      handleRun();
-    }, RUN_DEBOUNCE_MS);
-    return () => {
-      if (runTimerRef.current) clearTimeout(runTimerRef.current);
-    };
-  }, [files, activeFileIndex, wasm, handleRun]);
-
-  // Cmd+Enter / Ctrl+Enter shortcut to run tests
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-        e.preventDefault();
-        handleRun();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [handleRun]);
-
   const handleSourceChange = useCallback(
     (source: string) => {
-      invalidateRunState();
+      clearRunResult();
       setFiles((prev) =>
         prev.map((f, i) => (i === activeFileIndex ? { ...f, source } : f)),
       );
     },
-    [activeFileIndex, invalidateRunState],
+    [activeFileIndex, clearRunResult],
   );
 
   const handleAddFile = useCallback(() => {
     if (!newFileName) return;
-    invalidateRunState();
+    clearRunResult();
     const name = newFileName.endsWith(".py")
       ? newFileName
       : `${newFileName}.py`;
@@ -276,31 +248,38 @@ export function Chrome() {
     }
     setNewFileName("");
     setShowNewFile(false);
-  }, [newFileName, files, invalidateRunState]);
+  }, [newFileName, files, clearRunResult]);
 
   const handleRemoveFile = useCallback(
     (index: number) => {
       if (files.length <= 1) return;
-      invalidateRunState();
+      clearRunResult();
       setFiles((prev) => prev.filter((_, i) => i !== index));
       setActiveFileIndex((prev) =>
         prev >= index ? Math.max(0, prev - 1) : prev,
       );
     },
-    [files.length, invalidateRunState],
+    [files.length, clearRunResult],
   );
 
   const handleLoadExample = useCallback(
     (exampleIndex: number) => {
       const example = EXAMPLES[exampleIndex];
       if (!example) return;
-      invalidateRunState();
+      clearRunResult();
       setFiles(example.files);
       setActiveFileIndex(0);
-      setRunStatus("idle");
-      setTerminalOutput("");
     },
-    [invalidateRunState],
+    [clearRunResult],
+  );
+
+  const handleSelectFile = useCallback(
+    (index: number) => {
+      if (index === activeFileIndex) return;
+      clearRunResult();
+      setActiveFileIndex(index);
+    },
+    [activeFileIndex, clearRunResult],
   );
 
   return (
@@ -366,7 +345,7 @@ export function Chrome() {
           }`}
           title={
             pyodideReady
-              ? "Each run starts in a fresh Pyodide worker so import-time side effects are discarded"
+              ? "Click Run to start a fresh Pyodide worker for this test run"
               : "Loading an isolated Pyodide worker for this run"
           }
         >
@@ -377,10 +356,18 @@ export function Chrome() {
         <button
           onClick={handleRun}
           disabled={!wasm || runStatus === "running"}
-          className="text-xs font-bold px-3 py-1 rounded bg-green/20 text-green hover:bg-green/30 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          title="Run tests in the active file (⌘Enter)"
+          className="inline-flex items-center gap-1.5 text-xs font-bold px-3 py-1 rounded bg-green/20 text-green hover:bg-green/30 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          title="Run tests in the active file"
         >
-          {runStatus === "running" ? "Running..." : "Run ⌘⏎"}
+          <svg
+            aria-hidden="true"
+            className="h-3 w-3 shrink-0"
+            viewBox="0 0 16 16"
+            fill="currentColor"
+          >
+            <path d="M4 2.75v10.5l9-5.25-9-5.25z" />
+          </svg>
+          {runStatus === "running" ? "Running..." : "Run"}
         </button>
       </div>
 
@@ -400,11 +387,11 @@ export function Chrome() {
                 ? "bg-bg text-text"
                 : "text-text-dim hover:text-text hover:bg-surface-hover"
             }`}
-            onClick={() => setActiveFileIndex(i)}
+            onClick={() => handleSelectFile(i)}
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === " ") {
                 e.preventDefault();
-                setActiveFileIndex(i);
+                handleSelectFile(i);
               }
             }}
           >

@@ -20,6 +20,7 @@ interface PyodideInterface {
 }
 
 let pyodide: PyodideInterface | null = null;
+let hasExecutedRun = false;
 
 async function init() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -70,12 +71,27 @@ self.onmessage = async (e: MessageEvent) => {
   }
 
   if (type === "run") {
+    const { runId, filename, source, tests, hooks, allFiles } = e.data;
+
     if (!pyodide) {
-      self.postMessage({ type: "error", message: "Pyodide not initialized" });
+      self.postMessage({
+        type: "error",
+        runId,
+        message: "Pyodide not initialized",
+      });
       return;
     }
 
-    const { runId, filename, source, tests, hooks, allFiles } = e.data;
+    if (hasExecutedRun) {
+      self.postMessage({
+        type: "error",
+        runId,
+        message: "Pyodide worker already ran tests; start a fresh worker",
+      });
+      return;
+    }
+
+    hasExecutedRun = true;
     try {
       const allFilesArg = allFiles
         ? JSON.stringify(JSON.stringify(allFiles))

@@ -43,7 +43,7 @@ notify = "6"
 notify-debouncer-mini = "0.4"
 toml = "1.0"
 ctrlc = "3"
-console = "0.15"
+console = "0.16"
 indicatif = "0.18"
 tryke = { path = "crates/tryke" }
 tryke_config = { path = "crates/tryke_config" }

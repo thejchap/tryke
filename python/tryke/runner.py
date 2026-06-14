@@ -112,9 +112,6 @@ type TestResult = (
 )
 
 
-# -- Result constructors ------------------------------------------------------
-
-
 def passed(
     duration_ms: int,
     stdout: str,
@@ -208,9 +205,6 @@ def todo(
     }
 
 
-# -- Assertion extraction ------------------------------------------------------
-
-
 def _is_user_frame(frame: traceback.FrameSummary) -> bool:
     return not str(
         Path(frame.filename).resolve(),
@@ -287,9 +281,6 @@ def extract_assertions(
                 )
             ]
     return []
-
-
-# -- Hook / doctest helpers ----------------------------------------------------
 
 
 class HookInfo(TypedDict, total=False):
@@ -378,9 +369,6 @@ def run_doctest(mod: object, object_path: str) -> TestResult:
     return passed(ms, out, err)
 
 
-# -- Soft-assertion context ----------------------------------------------------
-
-
 @contextlib.contextmanager
 def soft_assertion_context() -> Generator[SoftContext, None, None]:
     ctx = SoftContext()
@@ -389,9 +377,6 @@ def soft_assertion_context() -> Generator[SoftContext, None, None]:
         yield ctx
     finally:
         _set_soft_context(None)
-
-
-# -- Core test runner ----------------------------------------------------------
 
 
 def run_test(  # noqa: C901, PLR0911, PLR0912, PLR0915

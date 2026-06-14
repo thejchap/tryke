@@ -12,7 +12,6 @@ from __future__ import annotations
 import importlib
 import json
 import shutil
-import sys
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -124,9 +123,6 @@ def run_tests(
     results: list[dict[str, Any]] = []
 
     module_name = _write_files(filename, source, all_files_json)
-
-    if "tryke" not in sys.modules:
-        import tryke  # noqa: F401, PLC0415
 
     try:
         mod = importlib.import_module(module_name)

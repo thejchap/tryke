@@ -44,7 +44,10 @@ impl WorkerProcess {
     /// same level as the rust process. Pass `LevelFilter::Off` to keep the
     /// worker silent (no env var set), preserving the pre-existing
     /// "no chatter unless asked" default.
-    #[expect(clippy::missing_errors_doc)]
+    ///
+    /// # Errors
+    /// Returns an error if the Python process cannot be spawned, if its stdio
+    /// pipes cannot be captured, or if the stderr drainer cannot be started.
     pub fn spawn(
         python_bin: &str,
         python_path: &[&Path],
@@ -175,7 +178,11 @@ impl WorkerProcess {
         Ok(serde_json::from_value(val)?)
     }
 
-    #[expect(clippy::missing_errors_doc)]
+    /// Run a discovered test or doctest in the worker process.
+    ///
+    /// # Errors
+    /// Returns an error if the request cannot be serialized, if worker I/O
+    /// fails, or if the worker returns a JSON-RPC error.
     pub async fn run_test(&mut self, test: &TestItem) -> Result<TestResult> {
         if let Some(object_path) = &test.doctest_object {
             return self.run_doctest(test, object_path).await;
@@ -193,7 +200,10 @@ impl WorkerProcess {
 
     /// Send hook metadata for a module to the Python worker.
     /// Must be called before running any tests from that module.
-    #[expect(clippy::missing_errors_doc)]
+    ///
+    /// # Errors
+    /// Returns an error if hook metadata cannot be serialized or the worker
+    /// rejects the registration request.
     pub async fn register_hooks(&mut self, params: RegisterHooksParams) -> Result<()> {
         let value = serde_json::to_value(params)?;
         self.call::<serde_json::Value>("register_hooks", Some(value))
@@ -204,7 +214,10 @@ impl WorkerProcess {
     /// Tell the Python worker to run scope-level teardown for `per="scope"`
     /// fixtures in a module. Must be called after all tests from that module
     /// have run.
-    #[expect(clippy::missing_errors_doc)]
+    ///
+    /// # Errors
+    /// Returns an error if the finalize request cannot be serialized or the
+    /// worker reports a teardown failure.
     pub async fn finalize_hooks(&mut self, module: String) -> Result<()> {
         let value = serde_json::to_value(FinalizeHooksParams { module })?;
         self.call::<serde_json::Value>("finalize_hooks", Some(value))
@@ -221,7 +234,11 @@ impl WorkerProcess {
         Ok(convert_wire_result(test.clone(), wire))
     }
 
-    #[expect(clippy::missing_errors_doc)]
+    /// Verify that the worker process is responsive.
+    ///
+    /// # Errors
+    /// Returns an error if the ping RPC fails or if the worker returns an
+    /// unexpected response.
     pub async fn ping(&mut self) -> Result<()> {
         let result: String = self.call("ping", None).await?;
         if result == "pong" {

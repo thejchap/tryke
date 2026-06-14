@@ -43,7 +43,9 @@ struct FileResult {
 /// Parse a single Python source file and return the discovery result
 /// (tests, hooks, import candidates, dynamic-import flag) as a JS
 /// object.
-#[expect(clippy::missing_errors_doc)]
+///
+/// # Errors
+/// Returns an error if the discovery result cannot be converted to a JS value.
 #[wasm_bindgen]
 pub fn discover(source: &str, filename: &str) -> Result<JsValue, JsError> {
     // Use a stable root so nested files like "pkg/test_api.py" keep their
@@ -58,7 +60,10 @@ pub fn discover(source: &str, filename: &str) -> Result<JsValue, JsError> {
 
 /// Parse multiple Python source files and return a combined result
 /// including resolved import graph edges.
-#[expect(clippy::missing_errors_doc)]
+///
+/// # Errors
+/// Returns an error if `files_json` is invalid or if the combined discovery
+/// result cannot be converted to a JS value.
 #[wasm_bindgen]
 pub fn discover_multi(files_json: &str) -> Result<JsValue, JsError> {
     let files: Vec<PlaygroundFile> =
@@ -112,7 +117,10 @@ pub fn discover_multi(files_json: &str) -> Result<JsValue, JsError> {
 /// runner: `[{test: {...}, outcome: "passed", duration_ms: 42, ...}]`.
 /// The conversion to `tryke_types::TestResult` happens here so the
 /// Python side doesn't need to know about the reporter's wire format.
-#[expect(clippy::missing_errors_doc)]
+///
+/// # Errors
+/// Returns an error if `results_json` is invalid or if `reporter_name` does
+/// not name a supported reporter.
 #[wasm_bindgen]
 pub fn format_results(results_json: &str, reporter_name: &str) -> Result<String, JsError> {
     let raw: Vec<PlaygroundResult> =
@@ -169,7 +177,10 @@ pub fn format_results(results_json: &str, reporter_name: &str) -> Result<String,
 }
 
 /// Render the `--collect-only` output for a set of discovered tests.
-#[expect(clippy::missing_errors_doc)]
+///
+/// # Errors
+/// Returns an error if `tests_json` is invalid or if `reporter_name` does not
+/// name a supported reporter.
 #[wasm_bindgen]
 pub fn format_collect(tests_json: &str, reporter_name: &str) -> Result<String, JsError> {
     let tests: Vec<tryke_types::TestItem> =

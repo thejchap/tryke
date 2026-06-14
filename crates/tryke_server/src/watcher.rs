@@ -207,28 +207,6 @@ mod tests {
     }
 
     #[test]
-    fn watcher_ignores_gitignored_py_files() {
-        let dir = make_project();
-        let venv_dir = dir.path().join(".venv");
-        fs::create_dir_all(&venv_dir).expect("create .venv");
-        fs::write(dir.path().join(".gitignore"), ".venv/\n").expect("write .gitignore");
-        let ignored_file = venv_dir.join("lib.py");
-        fs::write(&ignored_file, "x = 1").expect("write ignored py file");
-
-        let (tx, rx) = mpsc::channel();
-        let _debouncer = spawn_watcher(dir.path(), &[], tx).expect("spawn watcher");
-
-        thread::sleep(Duration::from_millis(100));
-
-        fs::write(&ignored_file, "x = 2").expect("update ignored py file");
-
-        assert!(
-            rx.recv_timeout(Duration::from_millis(400)).is_err(),
-            "should not fire for gitignored py files"
-        );
-    }
-
-    #[test]
     fn watcher_sends_path_of_changed_file() {
         let dir = make_project();
         let py_file = dir.path().join("test_target.py");

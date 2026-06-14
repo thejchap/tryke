@@ -89,7 +89,7 @@ dev = [
   # option, which crashes on the `None` that pymdown-extensions 10.21's
   # `BlockHtmlFormatter` passes through when a code block has no title.
   # Drop this pin once pymdown-extensions stops passing None.
-  "pygments<2.20",
+  "pygments<2.21",
   "bump-my-version>=1.3",
   "git-cliff>=2.12",
 ]

@@ -35,16 +35,22 @@ repos:
         exclude: ^docs/cli\.md$
       - id: eslint
         name: eslint
-        entry: bash -c 'cd playground && bun run lint'
-        pass_filenames: false
-        types_or: [ts, tsx]
-        language: system
+        entry: eslint
+        args: [--config, playground/eslint.config.cjs]
+        files: ^playground/src/.*\.(ts|tsx)$
+        language: node
+        additional_dependencies:
+          - eslint@10.4.0
+          - typescript-eslint@8.59.3
+          - '@eslint/js@10.0.1'
+          - eslint-plugin-react-hooks@7.1.1
+          - typescript@5.8.3
       - id: prettier
         name: prettier
-        entry: bash -c 'cd playground && bun run format:check'
-        pass_filenames: false
-        types_or: [ts, tsx]
-        language: system
+        entry: prettier --check
+        files: ^playground/src/.*\.(ts|tsx)$
+        language: node
+        additional_dependencies: ['prettier@3.8.3']
       - id: ruff-check
         name: ruff check
         entry: uv run ruff check --fix

@@ -23,8 +23,8 @@ notify-debouncer-mini = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tryke_config = { workspace = true }
-tryke_discovery = { workspace = true, features = ["native"] }
-tryke_reporter = { workspace = true, features = ["native"] }
+tryke_discovery = { workspace = true, features = ["filesystem"] }
+tryke_reporter = { workspace = true, features = ["terminal"] }
 tryke_runner = { workspace = true }
 tryke_server = { workspace = true }
 tryke_types = { workspace = true }

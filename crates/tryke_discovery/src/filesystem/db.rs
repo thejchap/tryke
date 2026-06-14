@@ -103,7 +103,7 @@ pub fn discover_file(db: &dyn Db, file: SourceFile) -> DiscoveredFile {
     #[cfg(test)]
     count_discover_file_execution(file.path(db));
 
-    crate::discover_file_from_ast(
+    super::discover_file_from_ast(
         file.root(db),
         file.src_roots(db),
         file.path(db),

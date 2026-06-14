@@ -21,8 +21,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
-tryke_discovery = { workspace = true, features = ["native"] }
-tryke_reporter = { workspace = true, features = ["native"] }
+tryke_discovery = { workspace = true, features = ["filesystem"] }
+tryke_reporter = { workspace = true, features = ["terminal"] }
 tryke_runner = { workspace = true }
 tryke_types = { workspace = true }
 

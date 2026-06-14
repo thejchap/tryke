@@ -5,15 +5,8 @@
 /// writer) never trip the clear.
 #[must_use]
 pub fn stdout_is_terminal() -> bool {
-    #[cfg(feature = "native")]
-    {
-        use std::io::IsTerminal;
-        std::io::stdout().is_terminal()
-    }
-    #[cfg(not(feature = "native"))]
-    {
-        false
-    }
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal()
 }
 
 /// Clear the terminal screen unconditionally. Callers must check
@@ -21,8 +14,5 @@ pub fn stdout_is_terminal() -> bool {
 /// construction time) — this function does not consult stdout's TTY
 /// status.
 pub fn clear_terminal() {
-    #[cfg(feature = "native")]
-    {
-        let _ = clearscreen::clear();
-    }
+    let _ = clearscreen::clear();
 }

@@ -14,15 +14,12 @@
 
 use std::borrow::Cow;
 use std::io::Write;
-#[cfg(feature = "native")]
 use std::io::{self, IsTerminal};
 use std::time::Duration;
 
-#[cfg(feature = "native")]
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 const FALLBACK_WIDTH: usize = 80;
-#[cfg(feature = "native")]
 const DRAW_HZ: u8 = 60;
 
 /// Returns true when both stdout and stderr are terminals. Gates the
@@ -31,30 +28,16 @@ const DRAW_HZ: u8 = 60;
 /// strand rows on stderr while the summary goes to a captured stdout.
 #[must_use]
 pub fn supports_live() -> bool {
-    #[cfg(feature = "native")]
-    {
-        io::stdout().is_terminal() && io::stderr().is_terminal()
-    }
-    #[cfg(not(feature = "native"))]
-    {
-        false
-    }
+    io::stdout().is_terminal() && io::stderr().is_terminal()
 }
 
 #[must_use]
 fn terminal_width() -> usize {
-    #[cfg(feature = "native")]
-    {
-        let (_, cols) = console::Term::stderr().size();
-        if cols == 0 {
-            FALLBACK_WIDTH
-        } else {
-            cols as usize
-        }
-    }
-    #[cfg(not(feature = "native"))]
-    {
+    let (_, cols) = console::Term::stderr().size();
+    if cols == 0 {
         FALLBACK_WIDTH
+    } else {
+        cols as usize
     }
 }
 
@@ -100,9 +83,7 @@ pub fn render_bar(filled: usize, total: usize, width: usize) -> String {
 /// for per-test/per-file rows.
 pub struct LiveArea {
     enabled: bool,
-    #[cfg(feature = "native")]
     multi: Option<MultiProgress>,
-    #[cfg(feature = "native")]
     bar: Option<ProgressBar>,
     width: usize,
 }
@@ -113,7 +94,6 @@ impl LiveArea {
     pub fn new() -> Self {
         let enabled = supports_live();
         let width = terminal_width();
-        #[cfg(feature = "native")]
         let multi = if enabled {
             Some(MultiProgress::with_draw_target(
                 ProgressDrawTarget::stderr_with_hz(DRAW_HZ),
@@ -121,18 +101,11 @@ impl LiveArea {
         } else {
             None
         };
-        #[cfg(feature = "native")]
-        {
-            Self {
-                enabled,
-                multi,
-                bar: None,
-                width,
-            }
-        }
-        #[cfg(not(feature = "native"))]
-        {
-            Self { enabled, width }
+        Self {
+            enabled,
+            multi,
+            bar: None,
+            width,
         }
     }
 
@@ -140,21 +113,11 @@ impl LiveArea {
     /// no-ops; `println` forwards to the caller's writer.
     #[must_use]
     pub fn hidden() -> Self {
-        #[cfg(feature = "native")]
-        {
-            Self {
-                enabled: false,
-                multi: None,
-                bar: None,
-                width: FALLBACK_WIDTH,
-            }
-        }
-        #[cfg(not(feature = "native"))]
-        {
-            Self {
-                enabled: false,
-                width: FALLBACK_WIDTH,
-            }
+        Self {
+            enabled: false,
+            multi: None,
+            bar: None,
+            width: FALLBACK_WIDTH,
         }
     }
 
@@ -171,86 +134,51 @@ impl LiveArea {
     /// Lazily start the bar with `total` ticks and a custom indicatif
     /// template. Idempotent — second call replaces style + length.
     pub fn start(&mut self, total: u64, template: &str) {
-        #[cfg(not(feature = "native"))]
-        {
-            let _ = (total, template);
+        let Some(multi) = self.multi.as_ref() else {
+            return;
+        };
+        let style = ProgressStyle::with_template(template)
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
+            .progress_chars("█░ ");
+        if let Some(existing) = self.bar.as_ref() {
+            existing.set_style(style);
+            existing.set_length(total);
+            return;
         }
-        #[cfg(feature = "native")]
-        {
-            let Some(multi) = self.multi.as_ref() else {
-                return;
-            };
-            let style = ProgressStyle::with_template(template)
-                .unwrap_or_else(|_| ProgressStyle::default_bar())
-                .progress_chars("█░ ");
-            if let Some(existing) = self.bar.as_ref() {
-                existing.set_style(style);
-                existing.set_length(total);
-                return;
-            }
-            let bar = multi.add(ProgressBar::new(total));
-            bar.set_style(style);
-            // Steady tick keeps {elapsed_precise} animating between actual
-            // position updates so the bar feels alive on slow/quiet runs.
-            bar.enable_steady_tick(Duration::from_millis(1000 / u64::from(DRAW_HZ)));
-            self.bar = Some(bar);
-        }
+        let bar = multi.add(ProgressBar::new(total));
+        bar.set_style(style);
+        // Steady tick keeps {elapsed_precise} animating between actual
+        // position updates so the bar feels alive on slow/quiet runs.
+        bar.enable_steady_tick(Duration::from_millis(1000 / u64::from(DRAW_HZ)));
+        self.bar = Some(bar);
     }
 
     /// Replace the bar's template (e.g. switch to a red-fill variant
     /// when the first failure arrives).
     pub fn set_template(&self, template: &str) {
-        #[cfg(not(feature = "native"))]
-        {
-            let _ = template;
-        }
-        #[cfg(feature = "native")]
-        {
-            if let Some(bar) = self.bar.as_ref() {
-                let style = ProgressStyle::with_template(template)
-                    .unwrap_or_else(|_| ProgressStyle::default_bar())
-                    .progress_chars("█░ ");
-                bar.set_style(style);
-            }
+        if let Some(bar) = self.bar.as_ref() {
+            let style = ProgressStyle::with_template(template)
+                .unwrap_or_else(|_| ProgressStyle::default_bar())
+                .progress_chars("█░ ");
+            bar.set_style(style);
         }
     }
 
     pub fn set_position(&self, pos: u64) {
-        #[cfg(not(feature = "native"))]
-        {
-            let _ = pos;
-        }
-        #[cfg(feature = "native")]
-        {
-            if let Some(bar) = self.bar.as_ref() {
-                bar.set_position(pos);
-            }
+        if let Some(bar) = self.bar.as_ref() {
+            bar.set_position(pos);
         }
     }
 
     pub fn set_message<S: Into<Cow<'static, str>>>(&self, msg: S) {
-        #[cfg(not(feature = "native"))]
-        {
-            let _ = msg;
-        }
-        #[cfg(feature = "native")]
-        {
-            if let Some(bar) = self.bar.as_ref() {
-                bar.set_message(msg);
-            }
+        if let Some(bar) = self.bar.as_ref() {
+            bar.set_message(msg);
         }
     }
 
     pub fn set_prefix<S: Into<Cow<'static, str>>>(&self, prefix: S) {
-        #[cfg(not(feature = "native"))]
-        {
-            let _ = prefix;
-        }
-        #[cfg(feature = "native")]
-        {
-            if let Some(bar) = self.bar.as_ref() {
-                bar.set_prefix(prefix);
-            }
+        if let Some(bar) = self.bar.as_ref() {
+            bar.set_prefix(prefix);
         }
     }
 
@@ -259,16 +187,9 @@ impl LiveArea {
     /// even if `line` already ended with one).
     pub fn println<W: Write>(&self, w: &mut W, line: &str) {
         let trimmed = line.strip_suffix('\n').unwrap_or(line);
-        #[cfg(feature = "native")]
-        {
-            if let Some(multi) = self.multi.as_ref() {
-                let _ = multi.println(trimmed);
-            } else {
-                let _ = writeln!(w, "{trimmed}");
-            }
-        }
-        #[cfg(not(feature = "native"))]
-        {
+        if let Some(multi) = self.multi.as_ref() {
+            let _ = multi.println(trimmed);
+        } else {
             let _ = writeln!(w, "{trimmed}");
         }
     }
@@ -277,11 +198,8 @@ impl LiveArea {
     /// `MultiProgress`'s own `Drop` covers cursor restore if this isn't
     /// called (panic, abort).
     pub fn finish_and_clear(&mut self) {
-        #[cfg(feature = "native")]
-        {
-            if let Some(bar) = self.bar.take() {
-                bar.finish_and_clear();
-            }
+        if let Some(bar) = self.bar.take() {
+            bar.finish_and_clear();
         }
     }
 }

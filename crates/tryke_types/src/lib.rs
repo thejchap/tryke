@@ -224,6 +224,8 @@ pub enum DiscoveryWarningKind {
     /// Discovery does not descend into guards with alternative branches, so
     /// any tests inside would be silently dropped; surface it instead.
     TestingGuardHasElseBranch,
+
+    Scheduler,
 }
 
 /// A non-fatal issue detected during test discovery that may degrade

@@ -565,6 +565,14 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                     warning.message.yellow(),
                 );
             }
+            DiscoveryWarningKind::Scheduler => {
+                let _ = writeln!(
+                    self.writer,
+                    "{} {}",
+                    "warning:".yellow().bold(),
+                    warning.message.yellow(),
+                 );
+            }
         }
     }
 }

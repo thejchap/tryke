@@ -20,19 +20,43 @@ use crate::protocol::{
 const STDERR_RETAIN_BYTES: usize = 1 << 20; // 1 MiB
 
 pub struct WorkerProcess {
+    /// The spawned python worker (`python -m tryke.worker`).
+    ///
+    /// Held so the
+    /// process stays alive for this struct's lifetime and can be killed /
+    /// awaited on shutdown.
     child: Child,
+
+    /// Buffered writer over the worker's stdin.
+    ///
+    /// JSON-RPC requests are
+    /// written here as newline-delimited JSON and flushed once per `call`.
     stdin: BufWriter<ChildStdin>,
+
+    /// Buffered reader over the worker's stdout. JSON-RPC responses are read
+    /// line by line; non-JSON lines a native library may leak to fd 1 during
+    /// import are skipped in `call`.
     stdout: BufReader<ChildStdout>,
-    /// Continuously-drained worker stderr. A background task reads the
+
+    /// Continuously-drained worker stderr.
+    ///
+    /// A background task reads the
     /// child's stderr pipe into this buffer so the pipe never fills and
     /// the worker can't block on a stderr write mid-RPC.
     stderr_buf: Arc<Mutex<VecDeque<u8>>>,
+
     /// Handle to the stderr-drainer task. `drain_stderr` joins this
     /// (with a short timeout) so any bytes still in the kernel pipe at
     /// the moment of a worker failure end up in `stderr_buf` before we
     /// snapshot it — without this, a worker that dies during startup
     /// can lose its python traceback to a race with the RPC error path.
     stderr_drainer: Option<tokio::task::JoinHandle<()>>,
+
+    /// Monotonic JSON-RPC request id, stamped onto each request and bumped
+    /// in `call`. The transport is strictly synchronous (one request in
+    /// flight at a time), so this isn't used to match responses to requests
+    /// — it's only here to give each request the unique id the JSON-RPC 2.0
+    /// spec requires.
     next_id: u64,
 }
 
@@ -67,7 +91,9 @@ impl WorkerProcess {
         if let Some(value) = worker_log_env_value(log_level) {
             command.env("TRYKE_LOG", value);
         }
+
         let mut child = command.spawn()?;
+
         let stdin = BufWriter::new(child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?);
         let stdout = BufReader::new(child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?);
         let stderr = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
@@ -299,6 +325,7 @@ impl Drop for WorkerProcess {
         // dropped (e.g. on the error-respawn path in pool.rs). start_kill() is
         // the synchronous variant — safe to call on already-dead processes.
         let _ = self.child.start_kill();
+
         // Dropping a Tokio JoinHandle detaches the task, so abort it
         // explicitly to avoid an orphan drainer outliving the worker on
         // respawn paths (the drainer holds stderr_buf + the stderr FD).
@@ -321,6 +348,7 @@ fn spawn_stderr_drainer(
 ) -> Result<tokio::task::JoinHandle<()>> {
     let handle = tokio::runtime::Handle::try_current()
         .map_err(|e| anyhow!("WorkerProcess::spawn requires an active tokio runtime: {e}"))?;
+
     Ok(handle.spawn(async move {
         let mut reader = stderr;
         let mut chunk = [0u8; 8192];

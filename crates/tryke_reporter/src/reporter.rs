@@ -18,9 +18,10 @@ pub trait Reporter {
     fn on_run_complete(&mut self, summary: &RunSummary);
     fn on_collect_complete(&mut self, _tests: &[TestItem]) {}
     fn on_discovery_error(&mut self, _error: &DiscoveryError) {}
-    /// Called once per file when dynamic imports are detected during discovery.
-    /// Implementations should surface this to the user so they understand why
-    /// those files are always included in `--changed` runs.
+    /// Surface a non-fatal warning discovered while collecting or planning a
+    /// run. Implementations that render visible output should flush any
+    /// deferred watch-mode clear/header before writing the warning so it is not
+    /// wiped by the next test event.
     fn on_discovery_warning(&mut self, _warning: &DiscoveryWarning) {}
     /// Lets the CLI tell the reporter which subcommand invoked it, so run
     /// headers can read "tryke test --watch" instead of the generic "tryke test".
@@ -47,17 +48,6 @@ pub trait Reporter {
     /// reporters clear the screen and paint a compact IDLE frame;
     /// structured reporters can ignore this.
     fn on_watch_results_cleared(&mut self, _info: &WatchIdleInfo<'_>) {}
-    /// Surface a non-fatal scheduler warning emitted between
-    /// `on_run_start` and the first `on_test_complete` (e.g. dist
-    /// upgrades forced by per-scope fixtures). Routing through the
-    /// reporter — instead of `eprintln!` — lets watch-mode reporters
-    /// flush any deferred clear/header *before* writing the warning,
-    /// so it isn't wiped from the screen when the first test event
-    /// triggers the clear. Default impl preserves the historical
-    /// behavior for non-TTY reporters: write to stderr.
-    fn on_scheduler_warning(&mut self, message: &str) {
-        eprintln!("warning: {message}");
-    }
 }
 
 #[cfg(test)]

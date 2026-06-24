@@ -510,14 +510,6 @@ impl<W: io::Write> Reporter for TextReporter<W> {
         self.clear_armed = true;
     }
 
-    fn on_scheduler_warning(&mut self, message: &str) {
-        // Drain the deferred clear + header so the warning lands on
-        // the same fresh screen as the upcoming run output, instead
-        // of being wiped by the first `on_test_complete`.
-        self.flush_pending_header();
-        let _ = writeln!(self.writer, "{} {message}", "warning:".yellow().bold());
-    }
-
     fn on_watch_idle(&mut self, info: &crate::reporter::WatchIdleInfo<'_>) {
         // Honor any pending clear (and only then). Discovery warnings
         // emitted just before this call already flushed the clear and
@@ -540,7 +532,11 @@ impl<W: io::Write> Reporter for TextReporter<W> {
     }
 
     fn on_discovery_warning(&mut self, warning: &DiscoveryWarning) {
-        self.flush_pending_clear();
+        if self.header_pending {
+            self.flush_pending_header();
+        } else {
+            self.flush_pending_clear();
+        }
         match warning.kind {
             DiscoveryWarningKind::DynamicImports => {
                 let _ = writeln!(
@@ -557,21 +553,14 @@ impl<W: io::Write> Reporter for TextReporter<W> {
                     "__import__()".dimmed(),
                 );
             }
-            DiscoveryWarningKind::TestingGuardHasElseBranch => {
+            DiscoveryWarningKind::TestingGuardHasElseBranch
+            | DiscoveryWarningKind::DistModeUpgrade => {
                 let _ = writeln!(
                     self.writer,
                     "{} {}",
                     "warning:".yellow().bold(),
                     warning.message.yellow(),
                 );
-            }
-            DiscoveryWarningKind::Scheduler => {
-                let _ = writeln!(
-                    self.writer,
-                    "{} {}",
-                    "warning:".yellow().bold(),
-                    warning.message.yellow(),
-                 );
             }
         }
     }
@@ -669,6 +658,25 @@ mod tests {
         r.on_run_start(&[]);
         assert!(!r.header_pending, "header should write inline, not defer");
         assert!(output(&r).contains("tryke test"));
+    }
+
+    #[test]
+    fn dist_mode_upgrade_warning_flushes_pending_header() {
+        let mut r = reporter();
+        r.arm_clear();
+        r.on_run_start(&[]);
+        assert!(r.header_pending);
+
+        r.on_discovery_warning(&tryke_types::DiscoveryWarning {
+            file_path: PathBuf::new(),
+            kind: tryke_types::DiscoveryWarningKind::DistModeUpgrade,
+            message: "scheduler: upgrading --dist test → file".into(),
+        });
+
+        let out = output(&r);
+        assert!(!r.header_pending);
+        assert!(out.contains("tryke test"), "warning should flush header");
+        assert!(out.contains("--dist test"), "warning message should render");
     }
 
     #[test]

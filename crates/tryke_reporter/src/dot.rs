@@ -1,7 +1,7 @@
 use std::io;
 
 use owo_colors::OwoColorize;
-use tryke_types::{RunSummary, TestItem, TestOutcome, TestResult};
+use tryke_types::{DiscoveryWarning, RunSummary, TestItem, TestOutcome, TestResult};
 
 use crate::Reporter;
 
@@ -124,9 +124,14 @@ impl<W: io::Write> Reporter for DotReporter<W> {
         self.clear_armed = true;
     }
 
-    fn on_scheduler_warning(&mut self, message: &str) {
+    fn on_discovery_warning(&mut self, warning: &DiscoveryWarning) {
         self.flush_pending_header();
-        let _ = writeln!(self.writer, "{} {message}", "warning:".yellow().bold());
+        let _ = writeln!(
+            self.writer,
+            "{} {}",
+            "warning:".yellow().bold(),
+            warning.message.yellow()
+        );
     }
 
     fn on_watch_idle(&mut self, info: &crate::reporter::WatchIdleInfo<'_>) {

@@ -1,6 +1,8 @@
 use std::io::{self, Write};
 
-use tryke_types::{DiscoveryError, RunSummary, TestItem, TestOutcome, TestResult};
+use tryke_types::{
+    DiscoveryError, DiscoveryWarning, RunSummary, TestItem, TestOutcome, TestResult,
+};
 
 use crate::Reporter;
 
@@ -129,6 +131,10 @@ impl<R: Reporter> Reporter for ProgressReporter<R> {
         self.inner.on_discovery_error(error);
     }
 
+    fn on_discovery_warning(&mut self, warning: &DiscoveryWarning) {
+        self.inner.on_discovery_warning(warning);
+    }
+
     fn set_subcommand_label(&mut self, label: &'static str) {
         self.inner.set_subcommand_label(label);
     }
@@ -147,10 +153,6 @@ impl<R: Reporter> Reporter for ProgressReporter<R> {
 
     fn on_watch_results_cleared(&mut self, info: &crate::reporter::WatchIdleInfo<'_>) {
         self.inner.on_watch_results_cleared(info);
-    }
-
-    fn on_scheduler_warning(&mut self, message: &str) {
-        self.inner.on_scheduler_warning(message);
     }
 }
 

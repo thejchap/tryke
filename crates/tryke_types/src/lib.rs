@@ -602,17 +602,22 @@ pub struct DiscoveryError {
 }
 
 /// The kind of issue detected during test discovery.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiscoveryWarningKind {
     /// File contains `importlib.import_module()` or `__import__()` calls.
     /// tryke cannot statically trace these imports, so the file is always
     /// included in `--changed` runs regardless of what actually changed.
     DynamicImports,
+
     /// File contains `if __TRYKE_TESTING__:` with an `elif` or `else` branch.
     /// Discovery does not descend into guards with alternative branches, so
     /// any tests inside would be silently dropped; surface it instead.
     TestingGuardHasElseBranch,
+
+    /// The requested distribution mode was upgraded to preserve fixture
+    /// semantics, so execution may be less granular than requested.
+    DistModeUpgrade,
 }
 
 /// A non-fatal issue detected during test discovery that may degrade
@@ -709,6 +714,18 @@ mod tests {
         let json = serde_json::to_string(&warning).expect("serialize");
         assert!(json.contains("dynamic_imports"));
         assert!(json.contains("loader.py"));
+    }
+
+    #[test]
+    fn dist_mode_upgrade_warning_serializes() {
+        let warning = DiscoveryWarning {
+            file_path: PathBuf::new(),
+            kind: DiscoveryWarningKind::DistModeUpgrade,
+            message: "scheduler upgraded distribution".into(),
+        };
+        let json = serde_json::to_string(&warning).expect("serialize");
+        assert!(json.contains("dist_mode_upgrade"));
+        assert!(json.contains("scheduler upgraded distribution"));
     }
 
     #[test]

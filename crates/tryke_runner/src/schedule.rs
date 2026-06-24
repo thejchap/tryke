@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use indexmap::IndexMap;
-use tryke_types::{HookItem, TestItem};
+use tryke_types::{DiscoveryWarning, DiscoveryWarningKind, HookItem, TestItem};
 
 /// How tests are partitioned into work units for distribution across workers.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -37,16 +37,20 @@ pub fn partition(tests: Vec<TestItem>, mode: DistMode) -> Vec<WorkUnit> {
     partition_with_hooks(tests, &[], mode).units
 }
 
-/// The result of [`partition_with_hooks`]: the work units plus any
-/// warnings produced while planning. Warnings cover situations where
-/// the requested `mode` had to be upgraded for correctness (e.g. a
-/// file-scope `per="scope"` fixture forced file-level grouping), and
-/// should be surfaced to the user so they understand why the
-/// distribution differs from what they asked for on the CLI.
+/// The result of the scheduler's allocation of a set of tests to a worker
 #[derive(Debug)]
 pub struct PartitionResult {
+    /// A set of `WorkUnit`s allocated to a worker
+    ///
+    /// `WorkUnit` is a set of tests to be run together
     pub units: Vec<WorkUnit>,
-    pub warnings: Vec<String>,
+
+    /// Warnings produced while planning. Warnings cover situations where
+    /// the requested `mode` had to be upgraded for correctness (e.g. a
+    /// file-scope `per="scope"` fixture forced file-level grouping), and
+    /// should be surfaced to the user so they understand why the
+    /// distribution differs from what they asked for on the CLI.
+    pub warnings: Vec<DiscoveryWarning>,
 }
 
 /// Like [`partition`], but attaches discovered hooks to each work unit.
@@ -114,7 +118,7 @@ pub fn partition_with_hooks(
         .filter(|m| in_run_modules.contains(m))
         .collect();
 
-    let mut warnings: Vec<String> = Vec::new();
+    let mut warnings: Vec<DiscoveryWarning> = Vec::new();
     let mut units: Vec<WorkUnit> = if mode == DistMode::Test && !constrained_modules.is_empty() {
         // Test mode: upgrade constrained modules to group or file level.
         let (constrained, free): (Vec<_>, Vec<_>) = tests
@@ -128,13 +132,17 @@ pub fn partition_with_hooks(
         } else {
             "file"
         };
-        warnings.push(format!(
-            "scheduler: upgrading --dist test → {upgraded_to} for {n} module(s) \
-             because of per=\"scope\" fixtures ({mods}). Move the fixture into \
-             a describe() to keep finer-grained distribution.",
-            n = affected.len(),
-            mods = affected.join(", "),
-        ));
+        warnings.push(DiscoveryWarning {
+            file_path: PathBuf::new(),
+            kind: DiscoveryWarningKind::DistModeUpgrade,
+            message: format!(
+                "scheduler: upgrading --dist test → {upgraded_to} for {n} module(s) \
+                 because of per=\"scope\" fixtures ({mods}). Move the fixture into \
+                 a describe() to keep finer-grained distribution.",
+                n = affected.len(),
+                mods = affected.join(", "),
+            ),
+        });
 
         let mut result: Vec<WorkUnit> = free
             .into_iter()
@@ -158,13 +166,17 @@ pub fn partition_with_hooks(
 
         let mut affected: Vec<&str> = file_constrained_modules.iter().copied().collect();
         affected.sort_unstable();
-        warnings.push(format!(
-            "scheduler: upgrading --dist group → file for {n} module(s) \
-             because of file-scope per=\"scope\" fixtures ({mods}). Move the \
-             fixture into a describe() to keep group-level distribution.",
-            n = affected.len(),
-            mods = affected.join(", "),
-        ));
+        warnings.push(DiscoveryWarning {
+            file_path: PathBuf::new(),
+            kind: DiscoveryWarningKind::DistModeUpgrade,
+            message: format!(
+                "scheduler: upgrading --dist group → file for {n} module(s) \
+                 because of file-scope per=\"scope\" fixtures ({mods}). Move the \
+                 fixture into a describe() to keep group-level distribution.",
+                n = affected.len(),
+                mods = affected.join(", "),
+            ),
+        });
 
         let mut result = group_by_describe(free);
         result.extend(group_by_file(constrained));
@@ -203,7 +215,7 @@ pub fn partition_with_hooks(
 
 #[cfg(test)]
 mod tests {
-    use tryke_types::FixturePer;
+    use tryke_types::{DiscoveryWarningKind, FixturePer};
 
     use super::*;
 
@@ -459,9 +471,13 @@ mod tests {
         let result = partition_with_hooks(tests, &hooks, DistMode::Test);
         assert_eq!(result.warnings.len(), 1, "expected one upgrade warning");
         let w = &result.warnings[0];
-        assert!(w.contains("--dist test"), "warning text: {w}");
-        assert!(w.contains("→ file"), "warning text: {w}");
-        assert!(w.contains("(a)"), "warning should name module 'a': {w}");
+        assert_eq!(w.kind, DiscoveryWarningKind::DistModeUpgrade);
+        assert!(w.message.contains("--dist test"), "warning text: {w:?}");
+        assert!(w.message.contains("→ file"), "warning text: {w:?}");
+        assert!(
+            w.message.contains("(a)"),
+            "warning should name module 'a': {w:?}"
+        );
     }
 
     #[test]
@@ -474,8 +490,9 @@ mod tests {
         let result = partition_with_hooks(tests, &hooks, DistMode::Group);
         assert_eq!(result.warnings.len(), 1);
         let w = &result.warnings[0];
-        assert!(w.contains("--dist group"), "warning text: {w}");
-        assert!(w.contains("→ file"), "warning text: {w}");
+        assert_eq!(w.kind, DiscoveryWarningKind::DistModeUpgrade);
+        assert!(w.message.contains("--dist group"), "warning text: {w:?}");
+        assert!(w.message.contains("→ file"), "warning text: {w:?}");
     }
 
     #[test]

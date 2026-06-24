@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::io::{self, Write};
 
 use owo_colors::OwoColorize;
-use tryke_types::{RunSummary, TestItem, TestOutcome, TestResult};
+use tryke_types::{DiscoveryWarning, RunSummary, TestItem, TestOutcome, TestResult};
 
 use crate::Reporter;
 use crate::diagnostic::{render_assertions, render_error_message, render_failure_message};
@@ -368,9 +368,13 @@ impl<W: Write> Reporter for SugarReporter<W> {
         self.clear_armed = true;
     }
 
-    fn on_scheduler_warning(&mut self, message: &str) {
+    fn on_discovery_warning(&mut self, warning: &DiscoveryWarning) {
         self.flush_pending_header();
-        let line = format!("{} {message}", "warning:".yellow().bold());
+        let line = format!(
+            "{} {}",
+            "warning:".yellow().bold(),
+            warning.message.yellow()
+        );
         self.live.println(&mut self.writer, &line);
     }
 

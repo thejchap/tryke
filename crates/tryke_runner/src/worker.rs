@@ -58,6 +58,10 @@ pub struct WorkerProcess {
     /// — it's only here to give each request the unique id the JSON-RPC 2.0
     /// spec requires.
     next_id: u64,
+
+    /// Is this worker the special `debugpy` worker that debug tests get routed to.
+    #[expect(dead_code)]
+    is_debug: bool,
 }
 
 impl WorkerProcess {
@@ -128,6 +132,7 @@ impl WorkerProcess {
             stderr_buf,
             stderr_drainer: Some(stderr_drainer),
             next_id: 1,
+            is_debug: false,
         })
     }
 

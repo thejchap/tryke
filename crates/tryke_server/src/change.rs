@@ -5,9 +5,9 @@
 //!   1. ask `Discoverer::affected_modules` which Python modules the change
 //!      reaches
 //!   2. `rediscover_changed` to refresh the discovery cache for those files
-//!   3. compute `tests_for_changed` for the broadcast payload
+//!   3. compute `tests_for_changed` for the notification payload
 //!   4. mark the worker pool `dirty` (next `run` will drain → restart)
-//!   5. broadcast `discover_complete` so connected clients can refresh
+//!   5. enqueue `discover_complete` so the client can refresh
 //!
 //! Keeping these steps in one place guarantees the FS path and the RPC
 //! path stay semantically identical — important because the RPC path is
@@ -19,12 +19,14 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use bytes::Bytes;
 use log::debug;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, mpsc};
 use tryke_discovery::Discoverer;
 
-use crate::protocol::{DiscoverCompleteParams, Notification};
+use crate::{
+    handler::{NotificationError, send_notification},
+    protocol::{DiscoverCompleteParams, NotificationMethod},
+};
 
 /// Apply an accepted file-change batch to the shared discovery cache and
 /// signal that the worker pool needs to be restarted before the next
@@ -34,16 +36,16 @@ use crate::protocol::{DiscoverCompleteParams, Notification};
 /// `did_change`, once from the FS watcher a few ms later) is harmless —
 /// `rediscover_changed` re-reads the same files, the atomic store is a
 /// no-op when `dirty` is already `true`, and the second
-/// `discover_complete` broadcast is a duplicate that client-side
+/// `discover_complete` notification is a duplicate that client-side
 /// suppression can drop.
 pub(crate) async fn apply_change(
     disc: &Mutex<Discoverer>,
-    bcast_tx: &broadcast::Sender<Bytes>,
+    outbound_tx: &mpsc::Sender<bytes::Bytes>,
     dirty: &AtomicBool,
     paths: &[PathBuf],
-) {
+) -> Result<(), NotificationError> {
     if paths.is_empty() {
-        return;
+        return Ok(());
     }
 
     let (modules, tests) = {
@@ -73,7 +75,7 @@ pub(crate) async fn apply_change(
             .collect();
         if paths.is_empty() {
             debug!("apply_change: no eligible paths — skipping");
-            return;
+            return Ok(());
         }
         let modules = guard.affected_modules(&paths);
         guard.rediscover_changed(&paths);
@@ -105,13 +107,10 @@ pub(crate) async fn apply_change(
     }
 
     debug!("apply_change: {} affected tests", tests.len());
-    let notif = Notification {
-        jsonrpc: "2.0".to_string(),
-        method: "discover_complete".to_string(),
-        params: DiscoverCompleteParams { tests },
-    };
-    if let Ok(mut bytes) = serde_json::to_vec(&notif) {
-        bytes.push(b'\n');
-        let _ = bcast_tx.send(Bytes::from(bytes));
-    }
+    send_notification(
+        outbound_tx,
+        NotificationMethod::DiscoverComplete,
+        DiscoverCompleteParams { tests },
+    )
+    .await
 }

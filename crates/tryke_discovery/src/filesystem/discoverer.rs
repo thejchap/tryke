@@ -63,67 +63,24 @@ enum FileWork {
 }
 
 impl Discoverer {
+    /// Creates a discoverer with caller-provided roots, excludes, and cache location.
+    ///
+    /// `cache_dir` must already reflect CLI/config precedence. `None` selects
+    /// the default `<project-root>/.tryke/cache` location.
     #[must_use]
-    pub fn new(start: &Path) -> Self {
-        let config = tryke_config::load_effective_config(start);
-        Self::new_with_options_and_cache_dir(
-            start,
-            &config.discovery.exclude,
-            &config.discovery.src,
-            config.cache_dir.as_deref(),
-        )
-    }
-
-    #[must_use]
-    pub fn new_with_excludes(start: &Path, excludes: &[String]) -> Self {
-        let config = tryke_config::load_effective_config(start);
-        Self::new_with_options_and_cache_dir(
-            start,
-            excludes,
-            &config.discovery.src,
-            config.cache_dir.as_deref(),
-        )
-    }
-
-    #[must_use]
-    pub fn new_with_excludes_and_cache_dir(
-        start: &Path,
+    pub fn new(
+        root: &Path,
+        src_roots: Vec<PathBuf>,
         excludes: &[String],
         cache_dir: Option<&Path>,
     ) -> Self {
-        let config = tryke_config::load_effective_config(start);
-        let resolved_cache_dir = tryke_config::resolve_cache_dir(cache_dir, &config);
-        Self::new_with_options_and_cache_dir(
-            start,
-            excludes,
-            &config.discovery.src,
-            resolved_cache_dir.as_deref(),
-        )
-    }
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
 
-    #[must_use]
-    pub fn new_with_options(start: &Path, excludes: &[String], src: &[String]) -> Self {
-        Self::new_with_options_and_cache_dir(start, excludes, src, None)
-    }
-
-    #[must_use]
-    pub fn new_with_options_and_cache_dir(
-        start: &Path,
-        excludes: &[String],
-        src: &[String],
-        cache_dir: Option<&Path>,
-    ) -> Self {
-        let root = super::find_project_root(start).unwrap_or_else(|| start.to_path_buf());
-        let root = root.canonicalize().unwrap_or(root);
-        let src_roots = if src.is_empty() {
-            vec![root.clone()]
-        } else {
-            super::resolve_src_roots(&root, src)
-        };
         let cache = cache_dir.map_or_else(
             || DiskCache::load_in_state_dir(root.join(".tryke")),
             |dir| DiskCache::load_in_dir(dir.to_path_buf()),
         );
+
         Self {
             db: Database::default(),
             inputs: HashMap::new(),
@@ -136,6 +93,16 @@ impl Discoverer {
             cache,
             cache_keys_hit: HashMap::new(),
         }
+    }
+
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    #[must_use]
+    pub fn excludes(&self) -> &[String] {
+        &self.excludes
     }
 
     pub fn rediscover(&mut self) -> Vec<TestItem> {
@@ -711,11 +678,18 @@ mod tests {
         dir
     }
 
+    fn make_discoverer(root: &Path, excludes: &[String], cache_dir: Option<&Path>) -> Discoverer {
+        let src_roots = tryke_config::load_effective_config(root)
+            .discovery
+            .src_roots(root);
+        Discoverer::new(root, src_roots, excludes, cache_dir)
+    }
+
     #[test]
     fn tests_returns_same_results_as_prior_rediscover() {
         let source = "@test\ndef test_hello():\n    pass\n";
         let dir = make_project(&[("test_example.py", source)]);
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path(), &[], None);
         let mut from_rediscover = discoverer.rediscover();
         let mut from_tests = discoverer.tests();
         from_rediscover.sort_by(|a, b| a.name.cmp(&b.name));
@@ -731,7 +705,7 @@ mod tests {
     fn discoverer_returns_same_tests_as_discover_from() {
         let source = "@test\ndef test_hello():\n    pass\n";
         let dir = make_project(&[("test_example.py", source)]);
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path(), &[], None);
         let mut from_discoverer = discoverer.rediscover();
         let mut from_discover = discover_from(dir.path());
         from_discoverer.sort_by(|a, b| a.name.cmp(&b.name));
@@ -747,7 +721,7 @@ mod tests {
     fn discoverer_picks_up_file_changes() {
         let source_one = "@test\ndef test_one():\n    pass\n";
         let dir = make_project(&[("test_example.py", source_one)]);
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path(), &[], None);
         let first = discoverer.rediscover();
         assert_eq!(first.len(), 1);
         let source_two = "@test\ndef test_one():\n    pass\n\n@test\ndef test_two():\n    pass\n";
@@ -765,7 +739,7 @@ mod tests {
             .join("test_example.py")
             .canonicalize()
             .expect("canonicalize test file");
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path(), &[], None);
         crate::filesystem::db::count_discover_file_executions_for(path.clone());
 
         let first = discoverer.rediscover();
@@ -799,8 +773,7 @@ mod tests {
         let source = "@test\ndef test_hello():\n    pass\n";
         let dir = make_project(&[("test_example.py", source)]);
         let cache_dir = dir.path().join("custom-cache");
-        let mut discoverer =
-            Discoverer::new_with_excludes_and_cache_dir(dir.path(), &[], Some(&cache_dir));
+        let mut discoverer = make_discoverer(dir.path(), &[], Some(&cache_dir));
 
         discoverer.rediscover();
 
@@ -809,7 +782,7 @@ mod tests {
     }
 
     #[test]
-    fn discoverer_saves_cache_under_configured_cache_dir() {
+    fn discoverer_saves_cache_under_resolved_configured_cache_dir() {
         let source = "@test\ndef test_hello():\n    pass\n";
         let dir = make_project(&[("test_example.py", source)]);
         fs::write(
@@ -817,7 +790,9 @@ mod tests {
             "[tool.tryke]\ncache_dir = \"configured-cache\"\n",
         )
         .expect("write pyproject");
-        let mut discoverer = Discoverer::new(dir.path());
+        let config = tryke_config::load_effective_config(dir.path());
+        let cache_dir = tryke_config::resolve_cache_dir(None, &config);
+        let mut discoverer = make_discoverer(dir.path(), &[], cache_dir.as_deref());
 
         discoverer.rediscover();
 
@@ -834,7 +809,7 @@ mod tests {
         let source_a = "@test\ndef test_a():\n    pass\n";
         let source_b = "@test\ndef test_b():\n    pass\n";
         let dir = make_project(&[("test_a.py", source_a), ("test_b.py", source_b)]);
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path(), &[], None);
         let first = discoverer.rediscover();
         assert_eq!(first.len(), 2);
         fs::remove_file(dir.path().join("test_b.py")).expect("remove file");
@@ -848,7 +823,7 @@ mod tests {
         let src_a = "@test\ndef test_a():\n    pass\n";
         let src_b = "@test\ndef test_b():\n    pass\n";
         let dir = make_project(&[("test_a.py", src_a), ("test_b.py", src_b)]);
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path(), &[], None);
         let first = discoverer.rediscover();
         assert_eq!(first.len(), 2);
 
@@ -878,7 +853,7 @@ mod tests {
         let src_a = "@test\ndef test_a():\n    pass\n";
         let src_b = "@test\ndef test_b():\n    pass\n";
         let dir = make_project(&[("test_a.py", src_a), ("test_b.py", src_b)]);
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path(), &[], None);
         let first = discoverer.rediscover();
         assert_eq!(first.len(), 2);
 
@@ -894,7 +869,7 @@ mod tests {
     fn discoverer_changed_adds_new_file() {
         let src_a = "@test\ndef test_a():\n    pass\n";
         let dir = make_project(&[("test_a.py", src_a)]);
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path(), &[], None);
         let first = discoverer.rediscover();
         assert_eq!(first.len(), 1);
 
@@ -920,7 +895,7 @@ mod tests {
             ("test_bar.py", test_bar_src),
             ("test_baz.py", isolated_src),
         ]);
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path(), &[], None);
         discoverer.rediscover();
 
         let changed = vec![dir.path().join("utils.py")];
@@ -941,7 +916,7 @@ mod tests {
         let utils_src = "def helper(): pass\n";
         let test_foo_src = "from utils import helper\n@test\ndef test_foo():\n    pass\n";
         let dir = make_project(&[("utils.py", utils_src), ("test_foo.py", test_foo_src)]);
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path(), &[], None);
         discoverer.rediscover();
 
         let changed = vec![dir.path().join("utils.py")];
@@ -957,7 +932,7 @@ mod tests {
         let utils_src = "def helper(): pass\n";
         let test_foo_src = "from utils import helper\n@test\ndef test_foo():\n    pass\n";
         let dir = make_project(&[("utils.py", utils_src), ("test_foo.py", test_foo_src)]);
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path(), &[], None);
         discoverer.rediscover();
 
         let summary = discoverer.import_graph_summary();
@@ -993,7 +968,7 @@ mod tests {
             ("tests/test_auth.py", test_auth_src),
             ("tests/test_other.py", isolated_src),
         ]);
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path(), &[], None);
         discoverer.rediscover();
 
         let changed = vec![dir.path().join("src/services/auth.py")];
@@ -1023,7 +998,7 @@ mod tests {
                 "@test\ndef test_other():\n    pass\n",
             ),
         ]);
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path(), &[], None);
         discoverer.rediscover();
 
         let changed = vec![dir.path().join("pkg/helpers.py")];
@@ -1050,7 +1025,7 @@ mod tests {
             ("src/services/auth.py", auth_src),
             ("tests/test_auth.py", test_auth_src),
         ]);
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path(), &[], None);
         discoverer.rediscover();
 
         // Simulate canonical path (e.g. macOS /private/var vs /var, or watcher paths)
@@ -1077,7 +1052,7 @@ mod tests {
             ("test_foo.py", test_foo_src),
             ("test_isolated.py", isolated_src),
         ]);
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path(), &[], None);
         discoverer.rediscover();
 
         let summary = discoverer.import_graph_summary();
@@ -1101,7 +1076,7 @@ mod tests {
             ("test_static.py", static_src),
             ("utils.py", utils_src),
         ]);
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path(), &[], None);
         discoverer.rediscover();
 
         // Change only utils.py — test_dynamic should be included because it has dynamic imports
@@ -1126,7 +1101,7 @@ mod tests {
             ("test_dynamic.py", dynamic_src),
             ("test_static.py", static_src),
         ]);
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path(), &[], None);
         discoverer.rediscover();
 
         let files = discoverer.dynamic_import_files();
@@ -1149,7 +1124,7 @@ mod tests {
     fn dynamic_import_cleared_when_removed_from_source() {
         let dynamic_src = "import importlib\nmod = importlib.import_module('foo')\n@test\ndef test_dyn():\n    pass\n";
         let dir = make_project(&[("test_dynamic.py", dynamic_src)]);
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path(), &[], None);
         discoverer.rediscover();
 
         // Rewrite without dynamic import
@@ -1199,7 +1174,7 @@ mod tests {
         )
         .expect("write test_mod.py");
 
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path(), &[], None);
         discoverer.rediscover();
 
         let entries = discoverer.import_graph_summary();
@@ -1242,7 +1217,7 @@ mod tests {
         )
         .expect("write test_mod.py");
 
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path(), &[], None);
         discoverer.rediscover();
 
         let entries = discoverer.import_graph_summary();
@@ -1271,7 +1246,7 @@ mod tests {
             ("test_foo.py", test_foo_src),
             ("test_other.py", other_src),
         ]);
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path(), &[], None);
         let walk_roots = vec![dir.path().join("test_foo.py")];
         let tests = discoverer.rediscover_restricted(&walk_roots);
 
@@ -1296,7 +1271,7 @@ mod tests {
         // warnings still need to surface for the walked subset.
         let dynamic_src = "import importlib\nmod = importlib.import_module('os')\nfrom tryke import test\n@test\ndef test_dyn(): pass\n";
         let dir = make_project(&[("test_dyn.py", dynamic_src)]);
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path(), &[], None);
         let walk_roots = vec![dir.path().join("test_dyn.py")];
         discoverer.rediscover_restricted(&walk_roots);
 

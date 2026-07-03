@@ -58,28 +58,13 @@ pub fn spawn_watcher(
     Ok(debouncer)
 }
 
-/// Cheap content signature used to decide whether a watcher event
-/// represents a real change. We deliberately match what the discovery
-/// disk cache uses (`tryke_discovery::cache::FileKey`) so that any
-/// file the discovery layer would treat as "unchanged" is also
-/// treated as "unchanged" here.
-///
-/// Limitation: on filesystems with coarse mtime resolution
-/// (FAT32 ~2s, HFS+ ~1s), two distinct saves of the same byte
-/// length within one tick can collide on `(mtime, size)` and the
-/// second save will be silently dropped here. Source trees are
-/// virtually never hosted on those filesystems in practice
-/// (ext4/xfs/btrfs/APFS/NTFS all have ≥100ns resolution), and
-/// the discovery cache already accepts the same trade-off — a
-/// stronger key would have to be adopted in both layers together
-/// to remain consistent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FileSig {
+struct FileSignature {
     mtime_nanos: i128,
     size: u64,
 }
 
-impl FileSig {
+impl FileSignature {
     fn from_path(path: &Path) -> Option<Self> {
         let m = std::fs::metadata(path).ok()?;
         let mtime = m.modified().ok()?;
@@ -119,7 +104,7 @@ pub struct ChangeFilter {
     // be silently dropped (`current == prior == None`), and the user
     // would see no restart / no rediscovery for what is in fact a
     // real change.
-    last_seen: HashMap<PathBuf, Option<FileSig>>,
+    last_seen: HashMap<PathBuf, Option<FileSignature>>,
 }
 
 impl ChangeFilter {
@@ -140,7 +125,7 @@ impl ChangeFilter {
     pub fn filter(&mut self, paths: &[PathBuf]) -> Vec<PathBuf> {
         let mut out = Vec::with_capacity(paths.len());
         for path in paths {
-            let current = FileSig::from_path(path);
+            let current = FileSignature::from_path(path);
             let changed = match self.last_seen.get(path) {
                 None => true,
                 Some(prior) => *prior != current,
@@ -234,10 +219,10 @@ mod tests {
     /// resolution varies by platform (1ns on Linux ext4, 1µs on
     /// some macOS configs), so a `fs::write` immediately followed by
     /// another `fs::write` can produce identical mtimes.
-    fn bump_until_sig_changes(path: &Path, prior: FileSig) {
+    fn bump_until_sig_changes(path: &Path, prior: FileSignature) {
         for i in 0u32..100 {
             fs::write(path, format!("@test\ndef bumped_{i}(): pass\n# {i:08}\n")).expect("write");
-            if let Some(now) = FileSig::from_path(path)
+            if let Some(now) = FileSignature::from_path(path)
                 && now != prior
             {
                 return;
@@ -274,7 +259,7 @@ mod tests {
 
         let mut f = ChangeFilter::new();
         let _ = f.filter(std::slice::from_ref(&py));
-        let prior = FileSig::from_path(&py).expect("sig");
+        let prior = FileSignature::from_path(&py).expect("sig");
 
         bump_until_sig_changes(&py, prior);
 
@@ -368,7 +353,7 @@ mod tests {
         let mut f = ChangeFilter::new();
         let _ = f.filter(&[a.clone(), b.clone()]);
 
-        let prior_a = FileSig::from_path(&a).expect("sig a");
+        let prior_a = FileSignature::from_path(&a).expect("sig a");
         bump_until_sig_changes(&a, prior_a);
 
         let mixed = f.filter(&[a.clone(), b]);

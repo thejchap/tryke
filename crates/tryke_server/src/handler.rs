@@ -1,5 +1,7 @@
 use std::{
     collections::HashSet,
+    error::Error,
+    fmt,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -7,39 +9,50 @@ use std::{
     time::Instant,
 };
 
+use anyhow::Context as _;
 use bytes::Bytes;
 use log::debug;
+use serde::Serialize;
 use serde_json::Value;
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter},
-    sync::{Mutex, broadcast},
+    sync::{Mutex, mpsc},
 };
 use tokio_stream::StreamExt;
 use tryke_runner::{DistMode, WorkerPool, partition_with_hooks};
 use tryke_types::filter::TestFilter;
-use tryke_types::{RunSummary, TestOutcome};
+use tryke_types::{RunSummary, TestItem, TestOutcome};
 
 use crate::protocol::{
     DidChangeParams, DiscoverCompleteParams, DiscoverParams, ErrorResponse, INVALID_PARAMS,
-    METHOD_NOT_FOUND, Notification, Request, Response, RpcError, RunCompleteParams, RunParams,
-    RunResponse, RunStartParams, TestCompleteParams,
+    METHOD_NOT_FOUND, Notification, NotificationMethod, Request, RequestMethod, Response, RpcError,
+    RunCompleteParams, RunParams, RunResponse, RunStartParams, TestCompleteParams,
 };
 
+/// Manages communication with a client over the given reader/writer
 pub struct ConnectionHandler<R, W> {
+    /// Reader to read message off of.
     reader: R,
+
+    /// Writer to write messages back to the client.
     writer: W,
-    disc: Arc<tokio::sync::Mutex<tryke_discovery::Discoverer>>,
-    broadcast_rx: broadcast::Receiver<Bytes>,
-    broadcast_tx: broadcast::Sender<Bytes>,
-    pool: Arc<WorkerPool>,
+
+    /// Test discoverer.
+    discoverer: Arc<tokio::sync::Mutex<tryke_discovery::Discoverer>>,
+
+    /// Worker pool.
+    worker_pool: Arc<WorkerPool>,
+
+    /// Outbound message queue.
+    ///
+    /// Responses and asynchronous notifications share this queue.
+    outbound_rx: mpsc::Receiver<Bytes>,
+    outbound_tx: mpsc::Sender<Bytes>,
+
+    /// Serializes test runs that share the worker pool.
     run_lock: Arc<Mutex<()>>,
-    /// Set to `true` by the watcher whenever an accepted file-change
-    /// batch affects at least one module. `execute_run` swaps this to
-    /// `false` while holding `run_lock` and, if it was `true`, calls
-    /// `pool.restart_workers().await` before dispatching units. This
-    /// closes the race where a `run` request lands inside the watcher's
-    /// debounce window and would otherwise hit a worker whose cached
-    /// `sys.modules` predates the latest save.
+
+    /// Signals that workers must restart before the next run.
     dirty: Arc<AtomicBool>,
 }
 
@@ -48,163 +61,244 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    // Splitting the transport into reader + writer halves costs one
-    // argument over clippy's limit; the alternatives (a transport pair
-    // tuple or a context struct) just move the same values around.
     #[expect(clippy::too_many_arguments)]
     pub fn new(
         reader: R,
         writer: W,
-        disc: Arc<tokio::sync::Mutex<tryke_discovery::Discoverer>>,
-        broadcast_rx: broadcast::Receiver<Bytes>,
-        broadcast_tx: broadcast::Sender<Bytes>,
-        pool: Arc<WorkerPool>,
+        discoverer: Arc<tokio::sync::Mutex<tryke_discovery::Discoverer>>,
+        outbound_rx: mpsc::Receiver<Bytes>,
+        outbound_tx: mpsc::Sender<Bytes>,
+        worker_pool: Arc<WorkerPool>,
         run_lock: Arc<Mutex<()>>,
         dirty: Arc<AtomicBool>,
     ) -> Self {
         Self {
             reader,
             writer,
-            disc,
-            broadcast_rx,
-            broadcast_tx,
-            pool,
+            discoverer,
+            worker_pool,
+            outbound_rx,
+            outbound_tx,
             run_lock,
             dirty,
         }
     }
 
-    pub async fn run(self) {
-        let writer = Arc::new(Mutex::new(BufWriter::new(self.writer)));
+    /// Runs the server protocol until the client closes its input.
+    ///
+    /// Requests arrive as newline-delimited JSON-RPC messages. Responses and
+    /// asynchronous notifications share one outbound queue and one writer task.
+    ///
+    /// # Errors
+    /// Returns an error if reading a request, serializing a message, or
+    /// writing to the client fails.
+    pub async fn run(self) -> anyhow::Result<()> {
+        let Self {
+            reader,
+            writer,
+            discoverer,
+            worker_pool: pool,
+            outbound_rx,
+            outbound_tx,
+            run_lock,
+            dirty,
+        } = self;
 
-        let writer_for_notif = Arc::clone(&writer);
-        let mut bcast_rx = self.broadcast_rx;
-        let pump = tokio::spawn(async move {
-            loop {
-                match bcast_rx.recv().await {
-                    Ok(bytes) => {
-                        let mut w = writer_for_notif.lock().await;
-                        if w.write_all(&bytes).await.is_err() || w.flush().await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                    Err(broadcast::error::RecvError::Lagged(_)) => {}
-                }
+        // The writer task is the sole owner of the client output. Routing both
+        // responses and asynchronous notifications through it prevents
+        // concurrent writes from interleaving JSON-RPC messages.
+        let mut writer_task = tokio::spawn(async move {
+            let mut writer = BufWriter::new(writer);
+            let mut outbound_rx = outbound_rx;
+
+            while let Some(bytes) = outbound_rx.recv().await {
+                writer
+                    .write_all(&bytes)
+                    .await
+                    .context("failed to write to client")?;
+                writer.flush().await.context("failed to write to client")?;
             }
+
+            Ok::<(), anyhow::Error>(())
         });
 
-        let mut reader = BufReader::new(self.reader);
+        let mut reader = BufReader::new(reader);
         let mut line = String::new();
+
         loop {
             line.clear();
-            match reader.read_line(&mut line).await {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    let disc = Arc::clone(&self.disc);
-                    let bcast_tx = self.broadcast_tx.clone();
-                    let pool = Arc::clone(&self.pool);
-                    let run_lock = Arc::clone(&self.run_lock);
-                    let dirty = Arc::clone(&self.dirty);
-                    let line_owned = line.clone();
-                    let response =
-                        handle_request(&line_owned, &disc, &bcast_tx, &pool, &run_lock, &dirty)
-                            .await;
-                    if let Some(bytes) = response {
-                        let mut w = writer.lock().await;
-                        if w.write_all(&bytes).await.is_err() || w.flush().await.is_err() {
-                            break;
-                        }
-                    }
+
+            // A connection cannot make progress once its writer stops, so wait
+            // for either the next request or early writer termination.
+            let read_result = tokio::select! {
+                result = reader.read_line(&mut line) => result,
+                result = &mut writer_task => {
+                    return result.context("outbound writer task failed")?;
+                }
+            };
+
+            match read_result {
+                // EOF is the client's normal shutdown signal.
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(error) => {
+                    // A read failure makes further output irrelevant.
+                    writer_task.abort();
+                    let _ = writer_task.await;
+                    return Err(error.into());
                 }
             }
+
+            // Request handlers can enqueue notifications and optionally return
+            // a response. The response goes through the same queue so only the
+            // writer task ever touches the transport.
+            let response =
+                match handle_request(&line, &discoverer, &outbound_tx, &pool, &run_lock, &dirty)
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(_) if outbound_tx.is_closed() => {
+                        // The writer owns the useful transport error. Await it
+                        // instead of returning the secondary channel error.
+                        return writer_task.await.context("outbound writer task failed")?;
+                    }
+                    Err(error) => {
+                        // Stop the writer before returning a request-processing
+                        // error so it cannot outlive the connection.
+                        writer_task.abort();
+                        let _ = writer_task.await;
+                        return Err(error);
+                    }
+                };
+
+            if let Some(bytes) = response
+                && outbound_tx.send(bytes).await.is_err()
+            {
+                // A closed receiver means the writer has already stopped.
+                return writer_task.await.context("outbound writer task failed")?;
+            }
         }
-        // EOF on the session's input means the client is gone (LSP
-        // convention). Stop the notification pump so the server's run
-        // future can resolve instead of waiting on the broadcast channel.
-        pump.abort();
+
+        // Other server tasks retain outbound sender clones, so EOF alone does
+        // not close the queue. Cancel the writer explicitly; cancellation is
+        // therefore the expected successful shutdown result.
+        writer_task.abort();
+
+        match writer_task.await {
+            Err(error) if error.is_cancelled() => Ok(()),
+            result => result.context("outbound writer task failed")?,
+        }
     }
 }
 
-fn broadcast_notification<T: serde::Serialize>(
-    tx: &broadcast::Sender<Bytes>,
-    method: &str,
+#[derive(Debug)]
+pub(crate) enum NotificationError {
+    Serialize {
+        method: NotificationMethod,
+        source: serde_json::Error,
+    },
+    Closed {
+        method: NotificationMethod,
+    },
+}
+
+impl fmt::Display for NotificationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Serialize { method, source } => {
+                write!(f, "failed to serialize {method} notification: {source}")
+            }
+            Self::Closed { method } => {
+                write!(
+                    f,
+                    "outbound channel closed while sending {method} notification"
+                )
+            }
+        }
+    }
+}
+
+impl Error for NotificationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Serialize { source, .. } => Some(source),
+            Self::Closed { .. } => None,
+        }
+    }
+}
+
+pub(crate) async fn send_notification<T: Serialize>(
+    tx: &mpsc::Sender<Bytes>,
+    method: NotificationMethod,
     params: T,
-) {
-    let notif = Notification {
+) -> Result<(), NotificationError> {
+    let notification = Notification {
         jsonrpc: "2.0".to_string(),
-        method: method.to_string(),
+        method,
         params,
     };
-    if let Ok(mut bytes) = serde_json::to_vec(&notif) {
-        bytes.push(b'\n');
-        let _ = tx.send(Bytes::from(bytes));
-    }
+    let mut bytes = serde_json::to_vec(&notification)
+        .map_err(|source| NotificationError::Serialize { method, source })?;
+    bytes.push(b'\n');
+    tx.send(Bytes::from(bytes))
+        .await
+        .map_err(|_| NotificationError::Closed { method })
 }
 
-fn serialize_response<T: serde::Serialize>(id: Value, result: T) -> Option<Vec<u8>> {
+fn serialize_response<T: serde::Serialize>(id: Value, result: T) -> serde_json::Result<Bytes> {
     let resp = Response {
         jsonrpc: "2.0".to_string(),
         id,
         result,
     };
-    serde_json::to_vec(&resp).ok().map(|mut v| {
-        v.push(b'\n');
-        v
-    })
+    let mut bytes = serde_json::to_vec(&resp)?;
+    bytes.push(b'\n');
+    Ok(Bytes::from(bytes))
 }
 
-fn serialize_error(id: Option<Value>, code: i32, message: String) -> Option<Vec<u8>> {
+fn serialize_error(id: Option<Value>, code: i32, message: String) -> serde_json::Result<Bytes> {
     let resp = ErrorResponse {
         jsonrpc: "2.0".to_string(),
         id,
         error: RpcError { code, message },
     };
-    serde_json::to_vec(&resp).ok().map(|mut v| {
-        v.push(b'\n');
-        v
-    })
+    let mut bytes = serde_json::to_vec(&resp)?;
+    bytes.push(b'\n');
+    Ok(Bytes::from(bytes))
+}
+
+fn select_tests(run_params: &RunParams, all_tests: Vec<TestItem>) -> Vec<TestItem> {
+    let mut tests = match &run_params.tests {
+        Some(ids) => all_tests
+            .into_iter()
+            .filter(|test| ids.contains(&test.id()))
+            .collect(),
+        None => all_tests,
+    };
+    let paths = run_params.paths.as_deref().unwrap_or_default();
+    if let Ok(filter) = TestFilter::from_args(
+        paths,
+        run_params.filter.as_deref(),
+        run_params.markers.as_deref(),
+    ) {
+        tests = filter.apply(tests);
+    }
+    tests
 }
 
 async fn execute_run(
-    rp: RunParams,
-    disc: &tokio::sync::Mutex<tryke_discovery::Discoverer>,
-    bcast_tx: &broadcast::Sender<Bytes>,
+    run_params: RunParams,
+    discoverer: &tokio::sync::Mutex<tryke_discovery::Discoverer>,
+    outbound_tx: &mpsc::Sender<Bytes>,
     pool: &WorkerPool,
     run_lock: &Mutex<()>,
     dirty: &AtomicBool,
-) -> (String, RunSummary) {
-    let run_id = rp.run_id.clone();
-    // Serialize concurrent runs: only one run at a time may dispatch units
-    // onto the shared pool, so per-module fixture state (and test_complete
-    // notification ordering) is not interleaved across clients.
+) -> anyhow::Result<(String, RunSummary)> {
+    let run_id = run_params.run_id.clone();
     let _run_guard = run_lock.lock().await;
-
-    // Snapshot tests AND drain the dirty flag in the SAME disc.lock
-    // critical section. This pairs with `apply_change`'s
-    // `dirty.store(true)` (also done inside its disc.lock guard): the
-    // two operations cannot interleave, so a concurrent watcher /
-    // `did_change` task can't update discovery between our dirty check
-    // and our tests snapshot. Without this serialisation, a watcher
-    // mid-flight could (a) acquire disc.lock first, (b) update
-    // discovery, (c) release the lock, while we grab the *new* tests
-    // but observe stale `dirty=false` because the store hadn't
-    // happened yet — dispatching on workers whose `sys.modules` predates
-    // the change.
-    //
-    // The flag is set by:
-    //   - the FS watcher task (server.rs) on an accepted file-change
-    //     batch, for non-cooperating clients; and
-    //   - the `did_change` RPC handler (below), for cooperating clients
-    //     (neotest-tryke sends `did_change` on the same session
-    //     immediately before `run`).
-    // Cooperating clients are also guaranteed to see `dirty=true`
-    // because per-session reads are serial (handler.rs:72-92): the
-    // `did_change` handler's `apply_change` completes before the `run`
-    // line is even read off the stream.
     let discovery_start = Instant::now();
     let (dirty_was_set, all_tests, hooks) = {
-        let guard = disc.lock().await;
+        let guard = discoverer.lock().await;
         let was = dirty.swap(false, Ordering::AcqRel);
         (was, guard.tests(), guard.hooks())
     };
@@ -212,18 +306,7 @@ async fn execute_run(
         debug!("execute_run: dirty drained — restarting worker pool");
         pool.restart_workers().await;
     }
-    let mut tests = match &rp.tests {
-        Some(ids) => all_tests
-            .into_iter()
-            .filter(|t| ids.contains(&t.id()))
-            .collect::<Vec<_>>(),
-        None => all_tests,
-    };
-
-    let paths = rp.paths.unwrap_or_default();
-    if let Ok(tf) = TestFilter::from_args(&paths, rp.filter.as_deref(), rp.markers.as_deref()) {
-        tests = tf.apply(tests);
-    }
+    let tests = select_tests(&run_params, all_tests);
     let discovery_duration = discovery_start.elapsed();
 
     let file_count = tests
@@ -234,14 +317,15 @@ async fn execute_run(
 
     let start_time = chrono::Local::now().format("%H:%M:%S").to_string();
 
-    broadcast_notification(
-        bcast_tx,
-        "run_start",
+    send_notification(
+        outbound_tx,
+        NotificationMethod::RunStart,
         RunStartParams {
             run_id: run_id.clone(),
             tests: tests.clone(),
         },
-    );
+    )
+    .await?;
 
     let test_start = Instant::now();
     // Server uses test-level distribution by default.
@@ -249,7 +333,7 @@ async fn execute_run(
     for warning in &partition.warnings {
         log::warn!("{}", warning.message);
     }
-    let mut stream = pool.run(partition.units);
+    let mut stream = pool.submit(partition.units);
     let mut passed = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;
@@ -266,14 +350,15 @@ async fn execute_run(
             TestOutcome::XFailed { .. } => xfailed += 1,
             TestOutcome::Todo { .. } => todo += 1,
         }
-        broadcast_notification(
-            bcast_tx,
-            "test_complete",
+        send_notification(
+            outbound_tx,
+            NotificationMethod::TestComplete,
             TestCompleteParams {
                 run_id: run_id.clone(),
                 result: result.clone(),
             },
-        );
+        )
+        .await?;
     }
 
     let test_duration = test_start.elapsed();
@@ -291,81 +376,78 @@ async fn execute_run(
         start_time: Some(start_time),
         changed_selection: None,
     };
-    broadcast_notification(
-        bcast_tx,
-        "run_complete",
+    send_notification(
+        outbound_tx,
+        NotificationMethod::RunComplete,
         RunCompleteParams {
             run_id: run_id.clone(),
             summary: summary.clone(),
         },
-    );
+    )
+    .await?;
 
-    (run_id, summary)
+    Ok((run_id, summary))
 }
 
+/// Processes one newline-delimited JSON-RPC request.
+///
+/// # Errors
+/// Returns an error if an outbound message cannot be serialized or queued.
 pub async fn handle_request(
     line: &str,
-    disc: &tokio::sync::Mutex<tryke_discovery::Discoverer>,
-    bcast_tx: &broadcast::Sender<Bytes>,
+    discoverer: &tokio::sync::Mutex<tryke_discovery::Discoverer>,
+    outbound_tx: &mpsc::Sender<Bytes>,
     pool: &WorkerPool,
     run_lock: &Mutex<()>,
     dirty: &AtomicBool,
-) -> Option<Vec<u8>> {
-    let req: Request = serde_json::from_str(line.trim()).ok()?;
+) -> anyhow::Result<Option<Bytes>> {
+    let Ok(req) = serde_json::from_str::<Request>(line.trim()) else {
+        return Ok(None);
+    };
     let id = req.id.clone().unwrap_or(Value::Null);
 
-    match req.method.as_str() {
-        "ping" => serialize_response(id, "pong"),
-        "discover" => {
-            let _params: DiscoverParams = serde_json::from_value(req.params?).ok()?;
-            let tests = disc.lock().await.rediscover();
-            broadcast_notification(
-                bcast_tx,
-                "discover_complete",
+    let response = match &req.method {
+        RequestMethod::Ping => serialize_response(id, "pong")?,
+        RequestMethod::Discover => {
+            let Some(params) = req.params else {
+                return Ok(None);
+            };
+            let Ok(_params) = serde_json::from_value::<DiscoverParams>(params) else {
+                return Ok(None);
+            };
+            let tests = discoverer.lock().await.rediscover();
+            send_notification(
+                outbound_tx,
+                NotificationMethod::DiscoverComplete,
                 DiscoverCompleteParams {
                     tests: tests.clone(),
                 },
-            );
-            serialize_response(id, serde_json::json!({ "tests": tests }))
+            )
+            .await?;
+            serialize_response(id, serde_json::json!({ "tests": tests }))?
         }
-        "did_change" => {
-            // In-band signal from a cooperating client (e.g. neotest-tryke's
-            // BufWritePost autocmd) that the listed paths just changed on
-            // disk. Refresh discovery and mark `dirty` synchronously, so a
-            // subsequent `run` on the *same session* is guaranteed to
-            // drain a `true` flag and restart the worker pool before
-            // dispatch. See `crate::change::apply_change` for the shared
-            // body (also called by the FS watcher task).
+        RequestMethod::DidChange => {
             let Some(params) = req.params else {
-                return serialize_error(
+                return Ok(Some(serialize_error(
                     req.id,
                     INVALID_PARAMS,
                     "method 'did_change' requires params with paths".to_string(),
-                );
+                )?));
             };
             let dc = match serde_json::from_value::<DidChangeParams>(params) {
                 Ok(dc) => dc,
                 Err(e) => {
-                    return serialize_error(
+                    return Ok(Some(serialize_error(
                         req.id,
                         INVALID_PARAMS,
                         format!("invalid params for 'did_change': {e}"),
-                    );
+                    )?));
                 }
             };
             if dc.paths.is_empty() {
-                // Panic-button form: client doesn't know what changed.
-                // Full rediscover; broadcast the resulting test list so
-                // other connected clients see the refresh (matches the
-                // non-empty path through `apply_change`, which also
-                // broadcasts `discover_complete`).
                 let tests = {
-                    let mut guard = disc.lock().await;
+                    let mut guard = discoverer.lock().await;
                     let tests = guard.rediscover();
-                    // Set dirty inside the lock — pairs with the
-                    // drain inside `execute_run`'s disc.lock guard so
-                    // no run can read fresh tests without also
-                    // observing dirty=true.
                     dirty.store(true, Ordering::Release);
                     tests
                 };
@@ -373,59 +455,64 @@ pub async fn handle_request(
                     "did_change: empty paths — full rediscover, {} tests, dirty mark",
                     tests.len()
                 );
-                broadcast_notification(
-                    bcast_tx,
-                    "discover_complete",
+                send_notification(
+                    outbound_tx,
+                    NotificationMethod::DiscoverComplete,
                     DiscoverCompleteParams { tests },
-                );
+                )
+                .await?;
             } else {
-                // `Discoverer::rediscover_changed` (inside apply_change)
-                // already canonicalises and drops anything outside its
-                // project root, so we can pass client-supplied paths
-                // through without an extra filter. Pushing the root check
-                // into discovery keeps the guarantee in the single place
-                // that owns the project tree.
-                crate::change::apply_change(disc, bcast_tx, dirty, &dc.paths).await;
+                crate::change::apply_change(discoverer, outbound_tx, dirty, &dc.paths).await?;
             }
-            serialize_response(id, "ok")
+            serialize_response(id, "ok")?
         }
-        "run" => {
+        RequestMethod::Run => {
             let Some(params) = req.params else {
-                return serialize_error(
+                return Ok(Some(serialize_error(
                     req.id,
                     INVALID_PARAMS,
                     "method 'run' requires params with run_id".to_string(),
-                );
+                )?));
             };
             let rp = match serde_json::from_value::<RunParams>(params) {
                 Ok(rp) => rp,
                 Err(e) => {
-                    return serialize_error(
+                    return Ok(Some(serialize_error(
                         req.id,
                         INVALID_PARAMS,
                         format!("invalid params for 'run': {e}"),
-                    );
+                    )?));
                 }
             };
-            let (run_id, summary) = execute_run(rp, disc, bcast_tx, pool, run_lock, dirty).await;
-            serialize_response(id, RunResponse { run_id, summary })
+            let (run_id, summary) =
+                execute_run(rp, discoverer, outbound_tx, pool, run_lock, dirty).await?;
+            serialize_response(id, RunResponse { run_id, summary })?
         }
-        _ => serialize_error(
+        RequestMethod::Unknown(method) => serialize_error(
             req.id,
             METHOD_NOT_FOUND,
-            format!("method not found: {}", req.method),
-        ),
-    }
+            format!("method not found: {method}"),
+        )?,
+    };
+    Ok(Some(response))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, sync::Arc, time::Duration};
+    use std::{
+        fs, io,
+        path::Path,
+        pin::Pin,
+        sync::Arc,
+        task::{Context, Poll},
+        time::Duration,
+    };
 
     use bytes::Bytes;
     use log::LevelFilter;
+    use serde::Serializer;
     use tokio::{
-        sync::{Mutex, broadcast},
+        sync::{Mutex, mpsc},
         time,
     };
     use tryke_discovery::Discoverer;
@@ -434,19 +521,63 @@ mod tests {
 
     use super::*;
 
+    struct FailingParams;
+
+    impl Serialize for FailingParams {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            Err(serde::ser::Error::custom("intentional failure"))
+        }
+    }
+
+    struct DisconnectedWriter;
+
+    impl AsyncWrite for DisconnectedWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "client disconnected",
+            )))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
     fn make_root() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
         fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
         dir
     }
 
-    fn make_pool() -> Arc<WorkerPool> {
-        Arc::new(WorkerPool::new(
-            1,
-            &test_python_bin(),
-            std::path::Path::new("."),
-            LevelFilter::Off,
-        ))
+    fn make_discoverer(root: &Path, excludes: &[String]) -> Arc<Mutex<Discoverer>> {
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        Arc::new(Mutex::new(Discoverer::new(root, src_roots, excludes, None)))
+    }
+
+    async fn make_pool() -> Arc<WorkerPool> {
+        Arc::new(
+            WorkerPool::spawn(
+                1,
+                &test_python_bin(),
+                std::path::Path::new("."),
+                None,
+                LevelFilter::Off,
+                false,
+            )
+            .await,
+        )
     }
 
     fn make_run_lock() -> Arc<Mutex<()>> {
@@ -458,11 +589,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn notification_reports_serialization_errors() {
+        let (tx, _rx) = mpsc::channel(1);
+
+        let error = send_notification(&tx, NotificationMethod::TestComplete, FailingParams)
+            .await
+            .expect_err("serialization should fail");
+
+        assert!(matches!(
+            error,
+            NotificationError::Serialize {
+                method: NotificationMethod::TestComplete,
+                ..
+            }
+        ));
+        assert!(error.to_string().contains("intentional failure"));
+    }
+
+    #[tokio::test]
+    async fn notification_reports_closed_channels() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+
+        let error = send_notification(&tx, NotificationMethod::RunComplete, ())
+            .await
+            .expect_err("send should fail");
+
+        assert!(matches!(
+            error,
+            NotificationError::Closed {
+                method: NotificationMethod::RunComplete,
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn notification_waits_for_capacity_instead_of_dropping_messages() {
+        let (tx, mut rx) = mpsc::channel(1);
+        send_notification(&tx, NotificationMethod::DiscoverComplete, ())
+            .await
+            .unwrap();
+
+        let mut second = Box::pin(send_notification(&tx, NotificationMethod::RunStart, ()));
+        assert!(
+            time::timeout(Duration::from_millis(10), &mut second)
+                .await
+                .is_err(),
+            "second send should wait while the queue is full",
+        );
+
+        rx.recv().await.expect("first notification");
+        time::timeout(Duration::from_secs(1), second)
+            .await
+            .expect("second send should resume")
+            .unwrap();
+        let second = rx.recv().await.expect("second notification");
+        let value: serde_json::Value = serde_json::from_slice(&second).unwrap();
+        assert_eq!(value["method"], "run_start");
+    }
+
+    #[tokio::test]
     async fn ping_returns_pong() {
         let dir = make_root();
-        let (tx, _rx) = broadcast::channel(16);
-        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
-        let pool = make_pool();
+        let (tx, _rx) = mpsc::channel(16);
+        let disc = make_discoverer(dir.path(), &[]);
+        let pool = make_pool().await;
         let run_lock = make_run_lock();
         let dirty = make_dirty();
         let resp = handle_request(
@@ -474,7 +665,8 @@ mod tests {
             &dirty,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("request should return a response");
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(val["result"], "pong");
     }
@@ -484,9 +676,9 @@ mod tests {
         let dir = make_root();
         fs::write(dir.path().join("test_x.py"), "@test\ndef test_x(): pass\n")
             .expect("write test file");
-        let (tx, _rx) = broadcast::channel(16);
-        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
-        let pool = make_pool();
+        let (tx, _rx) = mpsc::channel(16);
+        let disc = make_discoverer(dir.path(), &[]);
+        let pool = make_pool().await;
         let run_lock = make_run_lock();
         let dirty = make_dirty();
         let resp = handle_request(
@@ -498,17 +690,18 @@ mod tests {
             &dirty,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("request should return a response");
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert!(val["result"]["tests"].is_array());
     }
 
     #[tokio::test]
-    async fn run_broadcasts_notifications() {
+    async fn run_enqueues_notifications() {
         let dir = make_root();
-        let (tx, mut rx) = broadcast::channel(64);
-        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
-        let pool = make_pool();
+        let (tx, mut rx) = mpsc::channel(64);
+        let disc = make_discoverer(dir.path(), &[]);
+        let pool = make_pool().await;
         let run_lock = make_run_lock();
         let dirty = make_dirty();
         handle_request(
@@ -519,7 +712,8 @@ mod tests {
             &run_lock,
             &dirty,
         )
-        .await;
+        .await
+        .unwrap();
 
         let mut methods = vec![];
         while let Ok(bytes) = rx.try_recv() {
@@ -535,9 +729,9 @@ mod tests {
     #[tokio::test]
     async fn run_without_run_id_returns_invalid_params() {
         let dir = make_root();
-        let (tx, _rx) = broadcast::channel(16);
-        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
-        let pool = make_pool();
+        let (tx, _rx) = mpsc::channel(16);
+        let disc = make_discoverer(dir.path(), &[]);
+        let pool = make_pool().await;
         let run_lock = make_run_lock();
         let dirty = make_dirty();
         let resp = handle_request(
@@ -549,17 +743,18 @@ mod tests {
             &dirty,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("request should return a response");
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(val["error"]["code"], INVALID_PARAMS);
     }
 
     #[tokio::test]
-    async fn run_broadcasts_include_run_id() {
+    async fn run_notifications_include_run_id() {
         let dir = make_root();
-        let (tx, mut rx) = broadcast::channel(64);
-        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
-        let pool = make_pool();
+        let (tx, mut rx) = mpsc::channel(64);
+        let disc = make_discoverer(dir.path(), &[]);
+        let pool = make_pool().await;
         let run_lock = make_run_lock();
         let dirty = make_dirty();
         let resp = handle_request(
@@ -571,7 +766,8 @@ mod tests {
             &dirty,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("request should return a response");
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(val["result"]["run_id"], "test-run-xyz");
 
@@ -592,11 +788,11 @@ mod tests {
         let dir = make_root();
         fs::write(dir.path().join("test_x.py"), "@test\ndef test_x(): pass\n")
             .expect("write initial file");
-        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        let disc = make_discoverer(dir.path(), &[]);
 
         // Populate cache via discover
-        let (tx, _rx) = broadcast::channel(64);
-        let pool = make_pool();
+        let (tx, _rx) = mpsc::channel(64);
+        let pool = make_pool().await;
         let run_lock = make_run_lock();
         let dirty = make_dirty();
         handle_request(
@@ -607,14 +803,15 @@ mod tests {
             &run_lock,
             &dirty,
         )
-        .await;
+        .await
+        .unwrap();
 
         // Write a new file to disk without calling discover again
         fs::write(dir.path().join("test_y.py"), "@test\ndef test_y(): pass\n")
             .expect("write second file");
 
         // Run should return only cached tests (test_x), not pick up test_y
-        let (tx2, mut rx2) = broadcast::channel(64);
+        let (tx2, mut rx2) = mpsc::channel(64);
         handle_request(
             r#"{"jsonrpc":"2.0","id":2,"method":"run","params":{"root":"/ignored","tests":null,"run_id":"r1"}}"#,
             &disc,
@@ -623,7 +820,8 @@ mod tests {
             &run_lock,
             &dirty,
         )
-        .await;
+        .await
+        .unwrap();
 
         let mut run_start_count = None;
         while let Ok(bytes) = rx2.try_recv() {
@@ -640,24 +838,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn did_change_sets_dirty_and_broadcasts() {
+    async fn did_change_sets_dirty_and_enqueues_notification() {
         // `did_change` is the in-band signal that makes server mode
         // race-free for cooperating clients. Verify the three observable
         // side-effects:
         //   1. It returns "ok"
         //   2. It flips `dirty` to true (which the subsequent `run`'s
         //      `execute_run` will drain into a `restart_workers`)
-        //   3. It broadcasts a `discover_complete` so other clients
-        //      refresh their UI
+        //   3. It enqueues a `discover_complete` so the client refreshes
+        //      its UI.
         let dir = make_root();
         let test_file = dir.path().join("test_x.py");
         fs::write(&test_file, "@test\ndef test_x(): pass\n").expect("write test file");
-        let (tx, mut rx) = broadcast::channel(16);
-        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        let (tx, mut rx) = mpsc::channel(16);
+        let disc = make_discoverer(dir.path(), &[]);
         // Populate discovery so `affected_modules` returns non-empty.
         disc.lock().await.rediscover();
 
-        let pool = make_pool();
+        let pool = make_pool().await;
         let run_lock = make_run_lock();
         let dirty = make_dirty();
 
@@ -673,7 +871,8 @@ mod tests {
         .unwrap();
         let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
             .await
-            .unwrap();
+            .unwrap()
+            .expect("request should return a response");
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(val["result"], "ok");
         assert!(
@@ -690,7 +889,7 @@ mod tests {
         }
         assert!(
             saw_discover_complete,
-            "did_change must broadcast a discover_complete notification",
+            "did_change must enqueue a discover_complete notification",
         );
     }
 
@@ -701,9 +900,9 @@ mod tests {
         let dir = make_root();
         fs::write(dir.path().join("test_y.py"), "@test\ndef test_y(): pass\n")
             .expect("write test file");
-        let (tx, _rx) = broadcast::channel(16);
-        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
-        let pool = make_pool();
+        let (tx, _rx) = mpsc::channel(16);
+        let disc = make_discoverer(dir.path(), &[]);
+        let pool = make_pool().await;
         let run_lock = make_run_lock();
         let dirty = make_dirty();
 
@@ -716,7 +915,8 @@ mod tests {
             &dirty,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("request should return a response");
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(val["result"], "ok");
         assert!(
@@ -728,9 +928,9 @@ mod tests {
     #[tokio::test]
     async fn did_change_without_params_returns_invalid_params() {
         let dir = make_root();
-        let (tx, _rx) = broadcast::channel(16);
-        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
-        let pool = make_pool();
+        let (tx, _rx) = mpsc::channel(16);
+        let disc = make_discoverer(dir.path(), &[]);
+        let pool = make_pool().await;
         let run_lock = make_run_lock();
         let dirty = make_dirty();
         let resp = handle_request(
@@ -742,7 +942,8 @@ mod tests {
             &dirty,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("request should return a response");
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(val["error"]["code"], INVALID_PARAMS);
     }
@@ -765,10 +966,10 @@ mod tests {
         fs::write(&inside_file, "@test\ndef test_inside(): pass\n").expect("write inside");
         fs::write(&outside_file, "@test\ndef test_outside(): pass\n").expect("write outside");
 
-        let (tx, _rx) = broadcast::channel(16);
-        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        let (tx, _rx) = mpsc::channel(16);
+        let disc = make_discoverer(dir.path(), &[]);
         disc.lock().await.rediscover();
-        let pool = make_pool();
+        let pool = make_pool().await;
         let run_lock = make_run_lock();
         let dirty = make_dirty();
 
@@ -782,7 +983,8 @@ mod tests {
         .unwrap();
         let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
             .await
-            .unwrap();
+            .unwrap()
+            .expect("request should return a response");
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(val["result"], "ok");
         // The inside path is a real module, so dirty MUST be set
@@ -810,13 +1012,10 @@ mod tests {
         let excluded_file = excluded_dir.join("test_vendored.py");
         fs::write(&excluded_file, "@test\ndef test_v(): pass\n").expect("write");
 
-        let (tx, _rx) = broadcast::channel(16);
-        let disc = Arc::new(Mutex::new(Discoverer::new_with_excludes(
-            dir.path(),
-            &["vendored/**".to_string()],
-        )));
+        let (tx, _rx) = mpsc::channel(16);
+        let disc = make_discoverer(dir.path(), &["vendored/**".to_string()]);
         disc.lock().await.rediscover();
-        let pool = make_pool();
+        let pool = make_pool().await;
         let run_lock = make_run_lock();
         let dirty = make_dirty();
 
@@ -829,7 +1028,8 @@ mod tests {
         .unwrap();
         let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
             .await
-            .unwrap();
+            .unwrap()
+            .expect("request should return a response");
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(val["result"], "ok");
         assert!(
@@ -852,10 +1052,10 @@ mod tests {
         let pyproject = dir.path().join("pyproject.toml"); // already exists from make_root
         fs::write(&readme, "# project\n").expect("write readme");
 
-        let (tx, _rx) = broadcast::channel(16);
-        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        let (tx, _rx) = mpsc::channel(16);
+        let disc = make_discoverer(dir.path(), &[]);
         disc.lock().await.rediscover();
-        let pool = make_pool();
+        let pool = make_pool().await;
         let run_lock = make_run_lock();
         let dirty = make_dirty();
 
@@ -868,7 +1068,8 @@ mod tests {
         .unwrap();
         let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
             .await
-            .unwrap();
+            .unwrap()
+            .expect("request should return a response");
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(val["result"], "ok");
         assert!(
@@ -886,9 +1087,9 @@ mod tests {
         let outside_file = outside.path().join("test_outside.py");
         fs::write(&outside_file, "@test\ndef test_outside(): pass\n").expect("write outside");
 
-        let (tx, _rx) = broadcast::channel(16);
-        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
-        let pool = make_pool();
+        let (tx, _rx) = mpsc::channel(16);
+        let disc = make_discoverer(dir.path(), &[]);
+        let pool = make_pool().await;
         let run_lock = make_run_lock();
         let dirty = make_dirty();
 
@@ -901,7 +1102,8 @@ mod tests {
         .unwrap();
         let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
             .await
-            .unwrap();
+            .unwrap()
+            .expect("request should return a response");
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(val["result"], "ok");
         assert!(
@@ -928,10 +1130,10 @@ mod tests {
         fs::write(&test_file, "x = 1\n").expect("write");
         fs::remove_file(&test_file).expect("rm");
 
-        let (tx, _rx) = broadcast::channel(16);
-        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        let (tx, _rx) = mpsc::channel(16);
+        let disc = make_discoverer(dir.path(), &[]);
         disc.lock().await.rediscover();
-        let pool = make_pool();
+        let pool = make_pool().await;
         let run_lock = make_run_lock();
         let dirty = make_dirty();
 
@@ -950,7 +1152,8 @@ mod tests {
         // P2 review feedback was about.
         let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
             .await
-            .unwrap();
+            .unwrap()
+            .expect("request should return a response");
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(
             val["result"], "ok",
@@ -959,18 +1162,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn did_change_empty_paths_broadcasts_discover_complete() {
+    async fn did_change_empty_paths_enqueues_discover_complete() {
         // P2: empty-paths form does a full rediscover; it MUST also
-        // broadcast `discover_complete` so connected clients see the
+        // enqueue `discover_complete` so the client sees the
         // refresh. Without this, the empty-paths path leaves clients
         // permanently stale until the FS watcher fires (which may
         // never happen if changes are still pending).
         let dir = make_root();
         fs::write(dir.path().join("test_x.py"), "@test\ndef test_x(): pass\n")
             .expect("write test file");
-        let (tx, mut rx) = broadcast::channel(16);
-        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
-        let pool = make_pool();
+        let (tx, mut rx) = mpsc::channel(16);
+        let disc = make_discoverer(dir.path(), &[]);
+        let pool = make_pool().await;
         let run_lock = make_run_lock();
         let dirty = make_dirty();
 
@@ -983,7 +1186,8 @@ mod tests {
             &dirty,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("request should return a response");
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(val["result"], "ok");
 
@@ -996,16 +1200,16 @@ mod tests {
         }
         assert!(
             saw_discover_complete,
-            "empty-paths did_change must broadcast discover_complete",
+            "empty-paths did_change must enqueue discover_complete",
         );
     }
 
     #[tokio::test]
     async fn unknown_method_returns_error() {
         let dir = make_root();
-        let (tx, _rx) = broadcast::channel(16);
-        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
-        let pool = make_pool();
+        let (tx, _rx) = mpsc::channel(16);
+        let disc = make_discoverer(dir.path(), &[]);
+        let pool = make_pool().await;
         let run_lock = make_run_lock();
         let dirty = make_dirty();
         let resp = handle_request(
@@ -1017,32 +1221,39 @@ mod tests {
             &dirty,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("request should return a response");
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(val["error"]["code"], METHOD_NOT_FOUND);
     }
 
     #[tokio::test]
-    async fn session_receives_broadcast_and_response() {
-        // A single session must see BOTH the run notifications (pumped
-        // from the broadcast channel) and the id-bearing response,
-        // interleaved on the same stream.
+    async fn session_receives_notifications_and_response() {
+        // A single session must see both the run notifications and the
+        // id-bearing response on the same stream.
         let dir = make_root();
-        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
-        let pool = make_pool();
-        let (bcast_tx, _) = broadcast::channel::<Bytes>(64);
+        let disc = make_discoverer(dir.path(), &[]);
+        let pool = make_pool().await;
+        let (outbound_tx, outbound_rx) = mpsc::channel::<Bytes>(64);
         let run_lock = make_run_lock();
         let dirty = make_dirty();
 
         let (client, server_side) = tokio::io::duplex(1 << 16);
         let (server_r, server_w) = tokio::io::split(server_side);
-        let bcast_rx = bcast_tx.subscribe();
         tokio::spawn(async move {
             ConnectionHandler::new(
-                server_r, server_w, disc, bcast_rx, bcast_tx, pool, run_lock, dirty,
+                server_r,
+                server_w,
+                disc,
+                outbound_rx,
+                outbound_tx,
+                pool,
+                run_lock,
+                dirty,
             )
             .run()
-            .await;
+            .await
+            .expect("connection handler should run");
         });
 
         let (client_r, mut client_w) = tokio::io::split(client);
@@ -1052,9 +1263,7 @@ mod tests {
             .await
             .unwrap();
 
-        // The response is written by the request path and notifications
-        // by the pump task; they share a writer lock but not an order.
-        // Keep reading until we've seen both.
+        // Keep reading until the writer task has delivered both.
         let mut reader = BufReader::new(client_r);
         let mut saw_notification = false;
         let mut response: Option<serde_json::Value> = None;
@@ -1076,6 +1285,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connection_handler_reports_writer_disconnect() {
+        let dir = make_root();
+        let discoverer = make_discoverer(dir.path(), &[]);
+        let pool = make_pool().await;
+        let (outbound_tx, outbound_rx) = mpsc::channel(1);
+        let run_lock = make_run_lock();
+        let dirty = make_dirty();
+        let (mut client, server_reader) = tokio::io::duplex(64);
+
+        let handler = ConnectionHandler::new(
+            server_reader,
+            DisconnectedWriter,
+            discoverer,
+            outbound_rx,
+            outbound_tx,
+            pool,
+            run_lock,
+            dirty,
+        );
+        client
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n")
+            .await
+            .unwrap();
+
+        let error = time::timeout(Duration::from_secs(1), handler.run())
+            .await
+            .expect("handler should stop after writer disconnect")
+            .expect_err("writer disconnect should be reported");
+        assert!(
+            error.to_string().contains("failed to write to client"),
+            "unexpected writer error: {error:#}",
+        );
+    }
+
+    #[tokio::test]
     async fn run_with_filter_restricts_tests() {
         let dir = make_root();
         fs::write(
@@ -1083,11 +1327,11 @@ mod tests {
             "@test\ndef test_alpha(): pass\n\n@test\ndef test_beta(): pass\n",
         )
         .expect("write test file");
-        let (tx, mut rx) = broadcast::channel(64);
-        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        let (tx, mut rx) = mpsc::channel(64);
+        let disc = make_discoverer(dir.path(), &[]);
         // Populate cache
         disc.lock().await.rediscover();
-        let pool = make_pool();
+        let pool = make_pool().await;
         let run_lock = make_run_lock();
         let dirty = make_dirty();
         handle_request(
@@ -1098,7 +1342,8 @@ mod tests {
             &run_lock,
             &dirty,
         )
-        .await;
+        .await
+        .unwrap();
 
         let mut run_start_count = None;
         while let Ok(bytes) = rx.try_recv() {
@@ -1126,10 +1371,10 @@ mod tests {
             "@test\ndef test_alpha(): pass\n\n@test\ndef test_beta(): pass\n",
         )
         .expect("write test file");
-        let (tx, mut rx) = broadcast::channel(256);
-        let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
+        let (tx, mut rx) = mpsc::channel(256);
+        let disc = make_discoverer(dir.path(), &[]);
         disc.lock().await.rediscover();
-        let pool = make_pool();
+        let pool = make_pool().await;
         let run_lock = make_run_lock();
         let dirty = make_dirty();
 
@@ -1147,7 +1392,8 @@ mod tests {
                 &run_lock_a,
                 &dirty_a,
             )
-            .await;
+            .await
+            .unwrap();
         });
         let handle_b = tokio::spawn(async move {
             handle_request(
@@ -1158,7 +1404,8 @@ mod tests {
                 &run_lock,
                 &dirty,
             )
-            .await;
+            .await
+            .unwrap();
         });
         handle_a.await.unwrap();
         handle_b.await.unwrap();

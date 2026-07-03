@@ -76,48 +76,61 @@ enum WorkerCtrl {
 }
 
 pub struct WorkerPool {
+    /// Sender channel for work units
+    ///
+    /// Workers claim individual units off of this
     work_tx: async_channel::Sender<WorkerMsg>,
+
+    /// Control channels
+    ///
+    /// One per-worker to distribute messages to all.
     ctrl_txs: Vec<mpsc::UnboundedSender<WorkerCtrl>>,
 }
 
 impl WorkerPool {
-    /// Build a pool whose workers receive `TRYKE_LOG=<log_level>` on spawn.
+    /// Spawns a pool whose workers receive `TRYKE_LOG=<log_level>`.
     ///
     /// Pass `LevelFilter::Off` to leave workers silent (the env var is
     /// then not set on the child, so the worker's
     /// `_configure_logging_from_env` no-ops). Production callers use
     /// `tryke_config::worker_log_level` to derive this from CLI flags
     /// + the `TRYKE_LOG` env var.
-    #[must_use]
-    pub fn new(size: usize, python_bin: &str, root: &Path, log_level: LevelFilter) -> Self {
-        let mut python_path = vec![root.to_path_buf()];
-        // pyproject.toml declares python-source = "python" — add it to
-        // PYTHONPATH so the tryke package is importable even without a venv.
-        let src_dir = root.join("python");
-        if src_dir.is_dir() {
-            python_path.push(src_dir);
-        }
-        Self::with_python_path(size, python_bin, root, &python_path, log_level)
-    }
-
-    #[must_use]
-    pub fn with_python_path(
+    ///
+    /// `python_path` overrides the default path of `root` plus its `python`
+    /// directory when present. If `warm` is true, this method also waits for
+    /// every Python subprocess to start before returning.
+    pub async fn spawn(
         size: usize,
         python_bin: &str,
         root: &Path,
-        python_path: &[PathBuf],
+        python_path: Option<&[PathBuf]>,
         log_level: LevelFilter,
+        warm: bool,
     ) -> Self {
         let size = size.max(1);
-        let python_path = python_path.to_vec();
+        let python_path = python_path.map_or_else(
+            || {
+                let mut paths = vec![root.to_path_buf()];
+                // pyproject.toml declares python-source = "python" — add it to
+                // PYTHONPATH so the tryke package is importable without a venv.
+                let src_dir = root.join("python");
+                if src_dir.is_dir() {
+                    paths.push(src_dir);
+                }
+                paths
+            },
+            <[PathBuf]>::to_vec,
+        );
         let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         let (work_tx, work_rx) = async_channel::unbounded();
         let mut ctrl_txs = Vec::with_capacity(size);
+
         for _ in 0..size {
             let bin = python_bin.to_owned();
             let work_rx = work_rx.clone();
             let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
             ctrl_txs.push(ctrl_tx);
+
             tokio::spawn(worker_task(
                 bin,
                 python_path.clone(),
@@ -127,10 +140,21 @@ impl WorkerPool {
                 ctrl_rx,
             ));
         }
-        Self { work_tx, ctrl_txs }
+
+        let pool = Self { work_tx, ctrl_txs };
+
+        if warm {
+            pool.warm().await;
+        }
+
+        pool
     }
 
-    pub fn run(&self, units: Vec<WorkUnit>) -> impl Stream<Item = TestResult> + use<> {
+    /// Submit any number of `WorkUnit`s to the worker pool
+    ///
+    /// A `WorkUnit` is an atomic group of tests to be run sequentially on a single worker
+    /// Returns a stream
+    pub fn submit(&self, units: Vec<WorkUnit>) -> impl Stream<Item = TestResult> + use<> {
         let (stream_tx, stream_rx) = mpsc::unbounded_channel();
 
         for unit in units {
@@ -179,7 +203,7 @@ impl WorkerPool {
 
     /// Pre-spawn all worker processes in parallel so Python startup
     /// latency is not on the critical path of the first tests.
-    pub async fn warm(&self) {
+    async fn warm(&self) {
         self.fanout_ctrl(WorkerCtrl::Ping).await;
     }
 
@@ -568,16 +592,18 @@ def test_third(n: int = Depends(counter)) -> None:
             hooks: vec![hook],
         };
 
-        let pool = WorkerPool::with_python_path(
+        let python_path = [dir.path().to_path_buf(), python_package_dir()];
+        let pool = WorkerPool::spawn(
             1,
             &test_python_bin(),
             dir.path(),
-            &[dir.path().to_path_buf(), python_package_dir()],
+            Some(&python_path),
             LevelFilter::Off,
-        );
-        pool.warm().await;
+            true,
+        )
+        .await;
 
-        let mut results: Vec<TestResult> = pool.run(vec![unit]).collect().await;
+        let mut results: Vec<TestResult> = pool.submit(vec![unit]).collect().await;
         results.sort_by_key(|r| r.test.name.clone());
 
         assert_eq!(results.len(), 3, "expected 3 results, got {results:?}");
@@ -653,16 +679,18 @@ def test_noop() -> None:
             hooks: vec![],
         };
 
-        let pool = WorkerPool::with_python_path(
+        let python_path = [dir.path().to_path_buf(), python_package_dir()];
+        let pool = WorkerPool::spawn(
             1,
             &test_python_bin(),
             dir.path(),
-            &[dir.path().to_path_buf(), python_package_dir()],
+            Some(&python_path),
             LevelFilter::Off,
-        );
-        pool.warm().await;
+            true,
+        )
+        .await;
 
-        let r1: Vec<TestResult> = pool.run(vec![make_unit()]).collect().await;
+        let r1: Vec<TestResult> = pool.submit(vec![make_unit()]).collect().await;
         assert_eq!(r1.len(), 1);
         assert!(
             matches!(r1[0].outcome, TestOutcome::Passed),
@@ -672,7 +700,7 @@ def test_noop() -> None:
 
         pool.restart_workers().await;
 
-        let r2: Vec<TestResult> = pool.run(vec![make_unit()]).collect().await;
+        let r2: Vec<TestResult> = pool.submit(vec![make_unit()]).collect().await;
         assert_eq!(r2.len(), 1);
         assert!(
             matches!(r2[0].outcome, TestOutcome::Passed),
@@ -759,15 +787,18 @@ def test_noop() -> None:
             hooks: vec![hook],
         };
 
-        let pool = WorkerPool::with_python_path(
+        let python_path = [dir.path().to_path_buf()];
+        let pool = WorkerPool::spawn(
             1,
             fake_python.to_str().expect("fake python path"),
             dir.path(),
-            &[dir.path().to_path_buf()],
+            Some(&python_path),
             LevelFilter::Off,
-        );
+            false,
+        )
+        .await;
 
-        let results: Vec<TestResult> = pool.run(vec![unit]).collect().await;
+        let results: Vec<TestResult> = pool.submit(vec![unit]).collect().await;
         assert_eq!(results.len(), 1);
         let message = match &results[0].outcome {
             TestOutcome::Error { message } => message.clone(),
@@ -804,14 +835,17 @@ def test_noop() -> None:
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
 
-        let pool = WorkerPool::with_python_path(
+        let python_path = [dir.path().to_path_buf(), python_package_dir()];
+        let pool = WorkerPool::spawn(
             2,
             &test_python_bin(),
             dir.path(),
-            &[dir.path().to_path_buf(), python_package_dir()],
+            Some(&python_path),
             LevelFilter::Off,
-        );
-        // No warm() — workers are not yet spawned.
+            false,
+        )
+        .await;
+        // Python subprocesses have not been warmed.
         let restarted =
             tokio::time::timeout(std::time::Duration::from_secs(10), pool.restart_workers()).await;
         assert!(restarted.is_ok(), "restart_workers must ack within timeout");

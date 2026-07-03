@@ -3,170 +3,149 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
-use bytes::Bytes;
-use log::{LevelFilter, debug};
+use log::debug;
 use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    sync::{Mutex, broadcast},
+    io::{AsyncRead, AsyncWrite, Stdin, Stdout},
+    sync::{Mutex, mpsc},
 };
 use tryke_discovery::Discoverer;
 use tryke_runner::WorkerPool;
 
 use crate::{change::apply_change, handler::ConnectionHandler, watcher::spawn_watcher};
 
-pub struct Server {
-    root: PathBuf,
-    excludes: Vec<String>,
-    cache_dir: Option<PathBuf>,
-    python: String,
-    log_level: LevelFilter,
+pub struct Server<R, W> {
+    reader: R,
+    writer: W,
+    worker_pool: WorkerPool,
+    discoverer: Discoverer,
 }
 
-impl Server {
+impl Server<Stdin, Stdout> {
     #[must_use]
-    pub fn new(
-        root: PathBuf,
-        excludes: Vec<String>,
-        python: String,
-        log_level: LevelFilter,
-        cache_dir: Option<PathBuf>,
+    pub fn new(worker_pool: WorkerPool, discoverer: Discoverer) -> Self {
+        Self::with_transport(
+            worker_pool,
+            discoverer,
+            tokio::io::stdin(),
+            tokio::io::stdout(),
+        )
+    }
+}
+
+impl<R, W> Server<R, W> {
+    fn with_transport(
+        worker_pool: WorkerPool,
+        discoverer: Discoverer,
+        reader: R,
+        writer: W,
     ) -> Self {
         Self {
-            root,
-            excludes,
-            cache_dir,
-            python,
-            log_level,
+            reader,
+            writer,
+            worker_pool,
+            discoverer,
         }
     }
+}
 
-    /// Run the server over the process's own stdin/stdout.
+impl<R, W> Server<R, W>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    /// Runs the server over its configured reader and writer.
     ///
-    /// The client (typically an editor plugin) spawns `tryke server` as a
-    /// child process and speaks newline-delimited JSON-RPC 2.0 over its
-    /// stdio, LSP-style. Closing stdin shuts the server down cleanly.
-    ///
-    /// # Errors
-    /// Returns an error if file watching cannot be initialized.
-    pub async fn run(self) -> anyhow::Result<()> {
-        self.run_on(tokio::io::stdin(), tokio::io::stdout()).await
-    }
-
-    /// Run the server over an arbitrary reader/writer pair.
+    /// `Server::new` configures process stdin/stdout for the normal
+    /// editor-child-process protocol. Closing the reader shuts the server down.
     ///
     /// # Errors
-    /// Returns an error if file watching cannot be initialized.
-    pub async fn run_on<R, W>(self, reader: R, writer: W) -> anyhow::Result<()>
-    where
-        R: AsyncRead + Unpin,
-        W: AsyncWrite + Unpin + Send + 'static,
-    {
-        let size = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
-        let pool = Arc::new(WorkerPool::new(
-            size,
-            &self.python,
-            &self.root,
-            self.log_level,
-        ));
-        pool.warm().await;
+    /// Returns an error if file watching cannot be initialized or the
+    /// client transport fails.
+    pub async fn serve(self) -> anyhow::Result<()> {
+        let Self {
+            reader,
+            writer,
+            worker_pool,
+            discoverer,
+        } = self;
 
-        // Held across the full duration of a single `run` so concurrent
-        // run requests don't interleave test execution on the shared pool.
+        let root = discoverer.root().to_path_buf();
+        let excludes = discoverer.excludes().to_vec();
+        let worker_pool = Arc::new(worker_pool);
         let run_lock = Arc::new(Mutex::new(()));
-
-        // Set by the watcher whenever a real file change is accepted;
-        // drained by `execute_run` under `run_lock` to force a worker pool
-        // restart before any unit is dispatched. Without this, a `run`
-        // request that arrives within the watcher's debounce window can
-        // be served by a worker whose cached `sys.modules` predates the
-        // on-disk content — the test then runs against stale module
-        // globals (the original symptom: server mode flakily honours a
-        // just-edited assertion).
         let dirty = Arc::new(AtomicBool::new(false));
 
-        let (bcast_tx, _) = broadcast::channel::<Bytes>(256);
-        let disc = Arc::new(Mutex::new(Discoverer::new_with_excludes_and_cache_dir(
-            &self.root,
-            &self.excludes,
-            self.cache_dir.as_deref(),
-        )));
-        disc.lock().await.rediscover();
+        // Everything sent to the client goes through this queue
+        let (outbound_tx, outbound_rx) = mpsc::channel(256);
+
+        // Initialize the discoverer and do its initial discovery/populate import graph/test cache
+        let discoverer = Arc::new(Mutex::new(discoverer));
+        discoverer.lock().await.rediscover();
 
         let (std_tx, std_rx) = std::sync::mpsc::channel::<Vec<std::path::PathBuf>>();
-        let debouncer = spawn_watcher(&self.root, &self.excludes, std_tx)?;
-
-        // Bridge blocking std receiver to async tokio channel
+        let debouncer = spawn_watcher(&root, &excludes, std_tx)?;
         let (watcher_tx, mut watcher_rx) = tokio::sync::mpsc::channel::<Vec<PathBuf>>(64);
         tokio::task::spawn_blocking(move || {
             while let Ok(paths) = std_rx.recv() {
-                let _ = watcher_tx.blocking_send(paths);
+                if watcher_tx.blocking_send(paths).is_err() {
+                    break;
+                }
             }
         });
-
-        let disc_for_watcher = Arc::clone(&disc);
-        let bcast_for_watcher = bcast_tx.clone();
+        let disc_for_watcher = Arc::clone(&discoverer);
+        let outbound_for_watcher = outbound_tx.clone();
         let dirty_for_watcher = Arc::clone(&dirty);
         let mut change_filter = crate::watcher::ChangeFilter::new();
         tokio::spawn(async move {
             while let Some(first) = watcher_rx.recv().await {
-                // Coalesce any additional batches already queued. A
-                // single editor save can produce events whose quiet
-                // windows straddle the watcher's debounce, yielding two
-                // back-to-back batches. Without this drain we would
-                // restart the worker pool twice for one save.
                 let mut paths = first;
                 while let Ok(more) = watcher_rx.try_recv() {
                     paths.extend(more);
                 }
                 paths.sort();
                 paths.dedup();
-
-                // Drop paths whose `(mtime, size)` hasn't actually
-                // moved since the last accepted batch. Drain handles
-                // simultaneously-queued batches; this handles tail
-                // events that arrive after the previous cycle.
                 let paths = change_filter.filter(&paths);
                 if paths.is_empty() {
                     debug!("server: file change batch had no real content changes — skipping");
                     continue;
                 }
-
-                // Shared with the `did_change` RPC handler (handler.rs)
-                // so the FS path and the in-band path stay semantically
-                // identical. The next `run` will drain `dirty` and
-                // restart the worker pool before dispatch.
-                apply_change(
+                if let Err(error) = apply_change(
                     &disc_for_watcher,
-                    &bcast_for_watcher,
+                    &outbound_for_watcher,
                     &dirty_for_watcher,
                     &paths,
                 )
-                .await;
+                .await
+                {
+                    debug!("server: stopping file-change notifications: {error}");
+                    break;
+                }
             }
         });
 
         debug!("server: session started");
-        ConnectionHandler::new(
+
+        // Initialize and run the connection handler
+        let handler = ConnectionHandler::new(
             reader,
             writer,
-            Arc::clone(&disc),
-            bcast_tx.subscribe(),
-            bcast_tx.clone(),
-            Arc::clone(&pool),
+            Arc::clone(&discoverer),
+            outbound_rx,
+            outbound_tx,
+            Arc::clone(&worker_pool),
             run_lock,
             dirty,
-        )
-        .run()
-        .await;
+        );
+
+        let handler_result = handler.run().await;
+
         debug!("server: session input closed — shutting down");
 
-        // Stop the FS watcher before tearing down the pool so no late
-        // change batch races the shutdown.
         drop(debouncer);
-        if let Ok(pool) = Arc::try_unwrap(pool) {
+        if let Ok(pool) = Arc::try_unwrap(worker_pool) {
             pool.shutdown();
         }
-        Ok(())
+        handler_result
     }
 }
 
@@ -195,12 +174,16 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
         let root = dir.path().to_path_buf();
+        let src_roots = vec![root.clone()];
         let python = test_python_bin();
         let (client, server_side) = tokio::io::duplex(1 << 16);
         let (server_r, server_w) = tokio::io::split(server_side);
         tokio::spawn(async move {
-            Server::new(root, vec![], python, LevelFilter::Off, None)
-                .run_on(server_r, server_w)
+            let worker_pool =
+                WorkerPool::spawn(1, &python, &root, None, LevelFilter::Off, true).await;
+            let discoverer = Discoverer::new(&root, src_roots, &[], None);
+            Server::with_transport(worker_pool, discoverer, server_r, server_w)
+                .serve()
                 .await
                 .expect("server run");
         });
@@ -215,9 +198,8 @@ mod tests {
             .await
             .unwrap();
         let mut line = String::new();
-        // Generous timeout: the response is gated behind `pool.warm()`
-        // (python worker startup) and initial discovery, which can be
-        // slow on loaded CI hosts.
+        // Generous timeout: the response is gated behind Python worker
+        // startup and initial discovery, which can be slow on loaded CI hosts.
         time::timeout(Duration::from_secs(30), r.read_line(&mut line))
             .await
             .unwrap()
@@ -231,12 +213,16 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
         let root = dir.path().to_path_buf();
+        let src_roots = vec![root.clone()];
         let python = test_python_bin();
         let (client, server_side) = tokio::io::duplex(1 << 16);
         let (server_r, server_w) = tokio::io::split(server_side);
         let handle = tokio::spawn(async move {
-            Server::new(root, vec![], python, LevelFilter::Off, None)
-                .run_on(server_r, server_w)
+            let worker_pool =
+                WorkerPool::spawn(1, &python, &root, None, LevelFilter::Off, true).await;
+            let discoverer = Discoverer::new(&root, src_roots, &[], None);
+            Server::with_transport(worker_pool, discoverer, server_r, server_w)
+                .serve()
                 .await
         });
         // Closing the client end delivers EOF on the server's input —

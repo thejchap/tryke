@@ -26,8 +26,7 @@ pub async fn run_tests(
     changed_selection: Option<ChangedSelectionSummary>,
 ) -> Result<RunSummary> {
     let pool_size = workers.unwrap_or_else(|| tests.len().min(worker_pool_size()));
-    let pool = WorkerPool::new(pool_size, python, root, log_level);
-    pool.warm().await;
+    let pool = WorkerPool::spawn(pool_size, python, root, None, log_level, true).await;
     let summary = report_cycle(
         reporter,
         tests,
@@ -141,7 +140,7 @@ pub async fn report_cycle(
     for warning in &partition.warnings {
         reporter.on_discovery_warning(warning);
     }
-    let mut stream = pool.run(partition.units);
+    let mut stream = pool.submit(partition.units);
     while let Some(result) = stream.next().await {
         match &result.outcome {
             TestOutcome::Passed => passed += 1,
@@ -313,15 +312,19 @@ mod tests {
             "from tryke import test\n\n@test\ndef test_x(): pass\n",
         )
         .expect("write test file");
-        let mut discoverer = Discoverer::new(dir.path());
+        let src_roots = tryke_config::DiscoveryConfig::default().src_roots(dir.path());
+        let mut discoverer = Discoverer::new(dir.path(), src_roots, &[], None);
         let mut reporter = TextReporter::new();
-        let pool = WorkerPool::with_python_path(
+        let python_path = [dir.path().to_path_buf(), python_dir];
+        let pool = WorkerPool::spawn(
             1,
             &test_python_bin(),
             dir.path(),
-            &[dir.path().to_path_buf(), python_dir],
+            Some(&python_path),
             LevelFilter::Off,
-        );
+            false,
+        )
+        .await;
         assert!(
             run_cycle(&mut reporter, &mut discoverer, &pool)
                 .await
@@ -333,9 +336,18 @@ mod tests {
     async fn run_cycle_with_json_reporter() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
-        let mut discoverer = Discoverer::new(dir.path());
+        let src_roots = tryke_config::DiscoveryConfig::default().src_roots(dir.path());
+        let mut discoverer = Discoverer::new(dir.path(), src_roots, &[], None);
         let mut reporter = JSONReporter::with_writer(Vec::new());
-        let pool = WorkerPool::new(1, &test_python_bin(), dir.path(), LevelFilter::Off);
+        let pool = WorkerPool::spawn(
+            1,
+            &test_python_bin(),
+            dir.path(),
+            None,
+            LevelFilter::Off,
+            false,
+        )
+        .await;
         assert!(
             run_cycle(&mut reporter, &mut discoverer, &pool)
                 .await
@@ -398,16 +410,18 @@ def test_failing():
         let tests = discover_tests(dir.path(), false, None, &[], None).tests;
         assert_eq!(tests.len(), 2);
 
-        let pool = WorkerPool::with_python_path(
+        let python_path = [dir.path().to_path_buf(), python_dir];
+        let pool = WorkerPool::spawn(
             1,
             &test_python_bin(),
             dir.path(),
-            &[dir.path().to_path_buf(), python_dir],
+            Some(&python_path),
             LevelFilter::Off,
-        );
-        pool.warm().await;
+            true,
+        )
+        .await;
         let units = partition_with_hooks(tests, &[], DistMode::Test).units;
-        let mut results: Vec<_> = pool.run(units).collect().await;
+        let mut results: Vec<_> = pool.submit(units).collect().await;
         results.sort_by(|a, b| a.test.name.cmp(&b.test.name));
 
         assert_eq!(results.len(), 2);
@@ -447,13 +461,16 @@ def test_failing():
         .expect("write test file");
         let tests = discover_tests(dir.path(), false, None, &[], None).tests;
         let mut reporter = TextReporter::with_writer(Vec::new());
-        let pool = WorkerPool::with_python_path(
+        let python_path = [dir.path().to_path_buf(), python_dir];
+        let pool = WorkerPool::spawn(
             1,
             &test_python_bin(),
             dir.path(),
-            &[dir.path().to_path_buf(), python_dir],
+            Some(&python_path),
             LevelFilter::Off,
-        );
+            false,
+        )
+        .await;
         let result = report_cycle(
             &mut reporter,
             tests,
@@ -486,13 +503,16 @@ def test_failing():
         .expect("write test file");
         let tests = discover_tests(dir.path(), false, None, &[], None).tests;
         let mut reporter = TextReporter::with_writer(Vec::new());
-        let pool = WorkerPool::with_python_path(
+        let python_path = [dir.path().to_path_buf(), python_dir];
+        let pool = WorkerPool::spawn(
             1,
             &test_python_bin(),
             dir.path(),
-            &[dir.path().to_path_buf(), python_dir],
+            Some(&python_path),
             LevelFilter::Off,
-        );
+            false,
+        )
+        .await;
         let summary = report_cycle(
             &mut reporter,
             tests,

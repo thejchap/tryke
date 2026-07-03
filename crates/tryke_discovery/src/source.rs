@@ -1791,14 +1791,6 @@ pub fn parse_tests_from_source(
     discover_file_from_source(root, src_roots, file, source).parsed
 }
 
-/// Resolve configured `src` entries (relative strings) into absolute
-/// source roots under `root` without touching the filesystem.
-#[cfg(not(feature = "filesystem"))]
-#[must_use]
-pub fn resolve_src_roots(root: &Path, src: &[String]) -> Vec<PathBuf> {
-    src.iter().map(|entry| root.join(entry)).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;

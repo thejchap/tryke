@@ -2,10 +2,16 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use anyhow::Result;
+use tryke_config::load_effective_config;
 use tryke_discovery::Discoverer;
 use tryke_types::HookItem;
 
 use crate::git::resolve_changed_files;
+
+fn make_discoverer(root: &Path, excludes: &[String], cache_dir: Option<&Path>) -> Discoverer {
+    let src_roots = load_effective_config(root).discovery.src_roots(root);
+    Discoverer::new(root, src_roots, excludes, cache_dir)
+}
 
 pub fn run_graph(
     root: Option<&Path>,
@@ -17,8 +23,7 @@ pub fn run_graph(
 ) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let root_path = root.unwrap_or(&cwd);
-    let mut discoverer =
-        Discoverer::new_with_excludes_and_cache_dir(root_path, excludes, cache_dir);
+    let mut discoverer = make_discoverer(root_path, excludes, cache_dir);
     discoverer.rediscover();
 
     let changed_files = if changed {
@@ -110,8 +115,7 @@ pub fn run_fixture_graph(
 ) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let root_path = root.unwrap_or(&cwd);
-    let mut discoverer =
-        Discoverer::new_with_excludes_and_cache_dir(root_path, excludes, cache_dir);
+    let mut discoverer = make_discoverer(root_path, excludes, cache_dir);
     discoverer.rediscover();
 
     let hooks = discoverer.hooks();

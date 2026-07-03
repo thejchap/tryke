@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{fmt, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -8,8 +8,50 @@ use tryke_types::{RunSummary, TestItem, TestResult};
 pub struct Request {
     pub jsonrpc: String,
     pub id: Option<Value>,
-    pub method: String,
+    pub method: RequestMethod,
     pub params: Option<Value>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(from = "String")]
+pub enum RequestMethod {
+    Ping,
+    Discover,
+    DidChange,
+    Run,
+    Unknown(String),
+}
+
+impl From<String> for RequestMethod {
+    fn from(method: String) -> Self {
+        match method.as_str() {
+            "ping" => Self::Ping,
+            "discover" => Self::Discover,
+            "did_change" => Self::DidChange,
+            "run" => Self::Run,
+            _ => Self::Unknown(method),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationMethod {
+    DiscoverComplete,
+    RunStart,
+    TestComplete,
+    RunComplete,
+}
+
+impl fmt::Display for NotificationMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DiscoverComplete => f.write_str("discover_complete"),
+            Self::RunStart => f.write_str("run_start"),
+            Self::TestComplete => f.write_str("test_complete"),
+            Self::RunComplete => f.write_str("run_complete"),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -17,16 +59,6 @@ pub struct DiscoverParams {
     pub root: PathBuf,
 }
 
-/// Params for the `did_change` RPC. Clients (notably neotest-tryke) call
-/// this on their `BufWritePost` autocmd, *before* sending the next `run`,
-/// so the server can refresh discovery and mark the worker pool dirty in
-/// the same session as the run — closing the race window that exists
-/// between an editor save and the FS watcher's debounce.
-///
-/// `paths` is the list of absolute file paths just modified by the
-/// client. An empty list is treated as "I don't know which files
-/// changed — please rediscover everything." Use that sparingly, it's a
-/// full tree walk.
 #[derive(Debug, Deserialize)]
 pub struct DidChangeParams {
     pub paths: Vec<PathBuf>,
@@ -38,11 +70,6 @@ pub struct RunParams {
     pub filter: Option<String>,
     pub paths: Option<Vec<String>>,
     pub markers: Option<String>,
-    /// Client-generated opaque identifier that the server echoes back in the
-    /// `run` RPC response and every `run_start` / `test_complete` /
-    /// `run_complete` notification. Required: clients use this to
-    /// demultiplex notifications when multiple runs share the broadcast
-    /// channel.
     pub run_id: String,
 }
 
@@ -69,7 +96,7 @@ pub struct RpcError {
 #[derive(Debug, Serialize)]
 pub struct Notification<T: Serialize> {
     pub jsonrpc: String,
-    pub method: String,
+    pub method: NotificationMethod,
     pub params: T,
 }
 
@@ -113,9 +140,16 @@ mod tests {
     fn deserializes_ping_request() {
         let json = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
         let req: Request = serde_json::from_str(json).unwrap();
-        assert_eq!(req.method, "ping");
+        assert_eq!(req.method, RequestMethod::Ping);
         assert!(req.id.is_some());
         assert!(req.params.is_none());
+    }
+
+    #[test]
+    fn deserializes_unknown_request_method() {
+        let json = r#"{"jsonrpc":"2.0","id":1,"method":"custom"}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        assert_eq!(req.method, RequestMethod::Unknown("custom".to_string()));
     }
 
     #[test]
@@ -176,7 +210,7 @@ mod tests {
     fn serializes_notification() {
         let notif = Notification {
             jsonrpc: "2.0".to_string(),
-            method: "discover_complete".to_string(),
+            method: NotificationMethod::DiscoverComplete,
             params: DiscoverCompleteParams { tests: vec![] },
         };
         let val: serde_json::Value =

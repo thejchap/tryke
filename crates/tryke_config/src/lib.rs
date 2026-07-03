@@ -24,6 +24,24 @@ impl Default for DiscoveryConfig {
     }
 }
 
+impl DiscoveryConfig {
+    /// Resolves configured source roots relative to `root`.
+    #[must_use]
+    pub fn src_roots(&self, root: &Path) -> Vec<PathBuf> {
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        if self.src.is_empty() {
+            return vec![root];
+        }
+        self.src
+            .iter()
+            .map(|entry| {
+                let joined = root.join(entry);
+                joined.canonicalize().unwrap_or(joined)
+            })
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TrykeConfig {
     pub discovery: DiscoveryConfig,
@@ -256,6 +274,39 @@ mod tests {
     fn src_defaults_to_project_root_when_unset() {
         let config = TrykeConfig::from_toml_str("[tool.tryke]\n").expect("some");
         assert_eq!(config.discovery.src, vec!["."]);
+    }
+
+    #[test]
+    fn src_roots_resolve_relative_to_project_root() {
+        let dir = tempdir();
+        let python = dir.path().join("python");
+        fs::create_dir(&python).expect("create python source root");
+        let config = DiscoveryConfig {
+            exclude: Vec::new(),
+            src: vec![".".into(), "python".into()],
+        };
+
+        assert_eq!(
+            config.src_roots(dir.path()),
+            vec![
+                dir.path().canonicalize().expect("canonical project root"),
+                python.canonicalize().expect("canonical python source root"),
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_src_roots_fall_back_to_project_root() {
+        let dir = tempdir();
+        let config = DiscoveryConfig {
+            exclude: Vec::new(),
+            src: Vec::new(),
+        };
+
+        assert_eq!(
+            config.src_roots(dir.path()),
+            vec![dir.path().canonicalize().expect("canonical project root")]
+        );
     }
 
     #[test]

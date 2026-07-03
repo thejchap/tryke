@@ -11,6 +11,7 @@ use std::{
 use anyhow::Result;
 use console::{Key, Term};
 use log::{LevelFilter, debug};
+use tryke_config::load_effective_config;
 use tryke_discovery::Discoverer;
 use tryke_reporter::{Reporter, reporter::WatchIdleInfo};
 use tryke_runner::{DistMode, WorkerPool};
@@ -203,11 +204,11 @@ pub async fn run_watch(
 ) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let root = root.unwrap_or(&cwd);
-    let mut discoverer = Discoverer::new_with_excludes_and_cache_dir(root, excludes, cache_dir);
+    let src_roots = load_effective_config(root).discovery.src_roots(root);
+    let mut discoverer = Discoverer::new(root, src_roots, excludes, cache_dir);
 
     let pool_size = workers.unwrap_or_else(worker_pool_size);
-    let pool = WorkerPool::new(pool_size, python, root, log_level);
-    pool.warm().await;
+    let pool = WorkerPool::spawn(pool_size, python, root, None, log_level, true).await;
 
     run_initial_cycle(
         reporter,
@@ -360,13 +361,16 @@ mod tests {
         .expect("write test file");
         let tests = discover_tests(dir.path(), false, None, &[], None).tests;
         let mut reporter = TextReporter::with_writer(Vec::new());
-        let pool = WorkerPool::with_python_path(
+        let python_path = [dir.path().to_path_buf(), python_dir];
+        let pool = WorkerPool::spawn(
             1,
             &test_python_bin(),
             dir.path(),
-            &[dir.path().to_path_buf(), python_dir],
+            Some(&python_path),
             LevelFilter::Off,
-        );
+            false,
+        )
+        .await;
         // Returns () — the important behavior is that it does NOT propagate the
         // underlying `report_cycle` Err that `tryke test` relies on for exit code.
         run_watch_cycle(&mut reporter, tests, &[], &pool, None, DistMode::Test, None).await;
@@ -406,15 +410,21 @@ mod tests {
             "from tryke import test, expect\n\n@test\ndef test_ok():\n    expect(1).to_equal(1)\n",
         )
         .expect("write test file");
-        let mut discoverer = Discoverer::new_with_excludes(dir.path(), &[]);
+        let src_roots = load_effective_config(dir.path())
+            .discovery
+            .src_roots(dir.path());
+        let mut discoverer = Discoverer::new(dir.path(), src_roots, &[], None);
         let test_filter = TestFilter::from_args(&[], None, None).expect("filter");
-        let pool = WorkerPool::with_python_path(
+        let python_path = [dir.path().to_path_buf(), python_dir];
+        let pool = WorkerPool::spawn(
             1,
             &test_python_bin(),
             dir.path(),
-            &[dir.path().to_path_buf(), python_dir],
+            Some(&python_path),
             LevelFilter::Off,
-        );
+            false,
+        )
+        .await;
         let mut reporter = CountingReporter::default();
         run_initial_cycle(
             &mut reporter,

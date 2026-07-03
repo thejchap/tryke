@@ -62,6 +62,11 @@ fn all_discovery_warnings(discoverer: &Discoverer) -> Vec<DiscoveryWarning> {
     warnings
 }
 
+fn make_discoverer(root: &Path, excludes: &[String], cache_dir: Option<&Path>) -> Discoverer {
+    let src_roots = load_effective_config(root).discovery.src_roots(root);
+    Discoverer::new(root, src_roots, excludes, cache_dir)
+}
+
 pub fn resolved_excludes(
     root: &Path,
     cli_excludes: &[String],
@@ -91,7 +96,7 @@ pub fn discover_tests(
     excludes: &[String],
     cache_dir: Option<&Path>,
 ) -> DiscoverySelection {
-    let mut discoverer = Discoverer::new_with_excludes_and_cache_dir(root, excludes, cache_dir);
+    let mut discoverer = make_discoverer(root, excludes, cache_dir);
     discoverer.rediscover();
     let warnings = all_discovery_warnings(&discoverer);
     let hooks = discoverer.hooks();
@@ -162,7 +167,7 @@ pub fn discover_tests_for_paths(
         }
     };
 
-    let mut discoverer = Discoverer::new_with_excludes_and_cache_dir(root, excludes, cache_dir);
+    let mut discoverer = make_discoverer(root, excludes, cache_dir);
     let tests = discoverer.rediscover_restricted(&walk_roots);
     let warnings = all_discovery_warnings(&discoverer);
     let hooks = discoverer.hooks();
@@ -232,7 +237,7 @@ pub fn discover_tests_changed_first(
     excludes: &[String],
     cache_dir: Option<&Path>,
 ) -> DiscoverySelection {
-    let mut discoverer = Discoverer::new_with_excludes_and_cache_dir(root, excludes, cache_dir);
+    let mut discoverer = make_discoverer(root, excludes, cache_dir);
     discoverer.rediscover();
     let warnings = all_discovery_warnings(&discoverer);
     let hooks = discoverer.hooks();

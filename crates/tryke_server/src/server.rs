@@ -1,7 +1,4 @@
-use std::{
-    path::PathBuf,
-    sync::{Arc, atomic::AtomicBool},
-};
+use std::sync::Arc;
 
 use log::debug;
 use tokio::{
@@ -10,8 +7,9 @@ use tokio::{
 };
 use tryke_discovery::Discoverer;
 use tryke_runner::WorkerPool;
+use tryke_watcher::FileWatcher;
 
-use crate::{change::apply_change, handler::ConnectionHandler, watcher::spawn_watcher};
+use crate::handler::{ConnectionHandler, apply_change};
 
 pub struct Server<R, W> {
     reader: R,
@@ -73,7 +71,6 @@ where
         let excludes = discoverer.excludes().to_vec();
         let worker_pool = Arc::new(worker_pool);
         let run_lock = Arc::new(Mutex::new(()));
-        let dirty = Arc::new(AtomicBool::new(false));
 
         // Everything sent to the client goes through this queue
         let (outbound_tx, outbound_rx) = mpsc::channel(256);
@@ -82,40 +79,24 @@ where
         let discoverer = Arc::new(Mutex::new(discoverer));
         discoverer.lock().await.rediscover();
 
-        let (std_tx, std_rx) = std::sync::mpsc::channel::<Vec<std::path::PathBuf>>();
-        let debouncer = spawn_watcher(&root, &excludes, std_tx)?;
-        let (watcher_tx, mut watcher_rx) = tokio::sync::mpsc::channel::<Vec<PathBuf>>(64);
-        tokio::task::spawn_blocking(move || {
-            while let Ok(paths) = std_rx.recv() {
-                if watcher_tx.blocking_send(paths).is_err() {
-                    break;
-                }
-            }
-        });
+        // Set up file watcher and channel handles that it will use.
+        let mut watcher = FileWatcher::spawn(&root, &excludes)?;
         let disc_for_watcher = Arc::clone(&discoverer);
         let outbound_for_watcher = outbound_tx.clone();
-        let dirty_for_watcher = Arc::clone(&dirty);
-        let mut change_filter = crate::watcher::ChangeFilter::new();
-        tokio::spawn(async move {
-            while let Some(first) = watcher_rx.recv().await {
-                let mut paths = first;
-                while let Ok(more) = watcher_rx.try_recv() {
-                    paths.extend(more);
-                }
-                paths.sort();
-                paths.dedup();
-                let paths = change_filter.filter(&paths);
-                if paths.is_empty() {
-                    debug!("server: file change batch had no real content changes — skipping");
-                    continue;
-                }
-                if let Err(error) = apply_change(
-                    &disc_for_watcher,
-                    &outbound_for_watcher,
-                    &dirty_for_watcher,
-                    &paths,
-                )
-                .await
+
+        // Watcher task - watches for changes
+        let watcher_task = tokio::spawn(async move {
+            loop {
+                let batch = match watcher.next_batch().await {
+                    Ok(Some(batch)) => batch,
+                    Ok(None) => break,
+                    Err(error) => {
+                        debug!("server: stopping file watcher: {error}");
+                        break;
+                    }
+                };
+                if let Err(error) =
+                    apply_change(&disc_for_watcher, &outbound_for_watcher, &batch.paths).await
                 {
                     debug!("server: stopping file-change notifications: {error}");
                     break;
@@ -134,14 +115,14 @@ where
             outbound_tx,
             Arc::clone(&worker_pool),
             run_lock,
-            dirty,
         );
 
         let handler_result = handler.run().await;
 
         debug!("server: session input closed — shutting down");
 
-        drop(debouncer);
+        watcher_task.abort();
+        let _ = watcher_task.await;
         if let Ok(pool) = Arc::try_unwrap(worker_pool) {
             pool.shutdown();
         }
@@ -180,7 +161,7 @@ mod tests {
         let (server_r, server_w) = tokio::io::split(server_side);
         tokio::spawn(async move {
             let worker_pool =
-                WorkerPool::spawn(1, &python, &root, None, LevelFilter::Off, true).await;
+                WorkerPool::spawn(1, &python, &root, None, LevelFilter::Off, false).await;
             let discoverer = Discoverer::new(&root, src_roots, &[], None);
             Server::with_transport(worker_pool, discoverer, server_r, server_w)
                 .serve()
@@ -219,7 +200,7 @@ mod tests {
         let (server_r, server_w) = tokio::io::split(server_side);
         let handle = tokio::spawn(async move {
             let worker_pool =
-                WorkerPool::spawn(1, &python, &root, None, LevelFilter::Off, true).await;
+                WorkerPool::spawn(1, &python, &root, None, LevelFilter::Off, false).await;
             let discoverer = Discoverer::new(&root, src_roots, &[], None);
             Server::with_transport(worker_pool, discoverer, server_r, server_w)
                 .serve()
@@ -312,12 +293,10 @@ mod tests {
     /// not the previous cycle's cache. Drives the same phase-1/phase-2
     /// shape that catches stale-cache leaks across 16 workers — but
     /// this time the client sends `did_change` first so the server can
-    /// flip `dirty` synchronously before the `run` line is read.
+    /// refresh discovery synchronously before the `run` line is read.
     ///
-    /// Without the `did_change` step (or without the conditional drain
-    /// in `execute_run`), phase 2 sees passing runs because workers
-    /// dispatched against their phase-1 cached "set" body even though
-    /// the file is now "st" on disk.
+    /// Without the `did_change` step, phase 2 can use stale discovery
+    /// metadata even though workers are fresh for every run.
     #[tokio::test]
     async fn run_after_did_change_uses_fresh_module() {
         let (mut w, mut r, dir) = start_server();
@@ -343,8 +322,8 @@ mod tests {
 
         // Phase 2 — flip to "st"; assertion stays "set", so every fresh
         // import must FAIL. A `passed=1` here means a worker served its
-        // phase-1 cached module: exactly the staleness `did_change` →
-        // `dirty` → drain is here to prevent.
+        // phase-1 cached module: exactly the stale-interpreter behavior
+        // that restarting workers at every run boundary prevents.
         for i in 0..16 {
             fs::write(&test_file, match_body("st")).unwrap();
             let resp = did_change_then_run(&mut w, &mut r, &test_file, &format!("st{i}")).await;
@@ -383,8 +362,8 @@ mod tests {
 
         fs::write(&test_file, match_body("st")).unwrap();
         // Give the FS watcher its debounce + a comfortable margin to
-        // process the change and mark dirty. Non-cooperating clients
-        // accept this latency.
+        // process the discovery change. Non-cooperating clients accept
+        // this latency.
         time::sleep(Duration::from_millis(300)).await;
         let resp = run_only(&mut w, &mut r, "after_save").await;
         let summary = &resp["result"]["summary"];
@@ -394,6 +373,46 @@ mod tests {
             passed == 0 && failed >= 1,
             "after FS-watcher debounce: 'st' body should fail the 'set' assertion — \
              got summary={summary}",
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_runs_reexecute_module_imports() {
+        let (mut w, mut r, dir) = start_server();
+        let test_file = dir.path().join("test_import.py");
+        let counter_file = dir.path().join("imports.txt");
+        let counter_literal = serde_json::to_string(&counter_file).expect("serialize counter path");
+        fs::write(
+            &test_file,
+            format!(
+                "from pathlib import Path\n\
+                 from tryke import test\n\
+                 \n\
+                 counter = Path({counter_literal})\n\
+                 previous = counter.read_text() if counter.exists() else \"\"\n\
+                 counter.write_text(previous + \"x\")\n\
+                 \n\
+                 @test\n\
+                 def test_import():\n\
+                 {INDENT}pass\n",
+                INDENT = "    ",
+            ),
+        )
+        .expect("write test file");
+
+        let first = did_change_then_run(&mut w, &mut r, &test_file, "first").await;
+        assert_eq!(first["result"]["summary"]["passed"], 1);
+        assert_eq!(
+            fs::read_to_string(&counter_file).expect("read import counter"),
+            "x",
+        );
+
+        let second = run_only(&mut w, &mut r, "second").await;
+        assert_eq!(second["result"]["summary"]["passed"], 1);
+        assert_eq!(
+            fs::read_to_string(&counter_file).expect("read import counter"),
+            "xx",
+            "each logical run must import test modules in a fresh Python process",
         );
     }
 }

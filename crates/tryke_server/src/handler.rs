@@ -1,13 +1,4 @@
-use std::{
-    collections::HashSet,
-    error::Error,
-    fmt,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Instant,
-};
+use std::{collections::HashSet, error::Error, fmt, path::PathBuf, sync::Arc, time::Instant};
 
 use anyhow::Context as _;
 use bytes::Bytes;
@@ -25,7 +16,7 @@ use tryke_types::{RunSummary, TestItem, TestOutcome};
 
 use crate::protocol::{
     DidChangeParams, DiscoverCompleteParams, DiscoverParams, ErrorResponse, INVALID_PARAMS,
-    METHOD_NOT_FOUND, Notification, NotificationMethod, Request, RequestMethod, Response, RpcError,
+    METHOD_NOT_FOUND, Notification, NotificationMethod, Request, RequestMethod, Response,
     RunCompleteParams, RunParams, RunResponse, RunStartParams, TestCompleteParams,
 };
 
@@ -51,9 +42,6 @@ pub struct ConnectionHandler<R, W> {
 
     /// Serializes test runs that share the worker pool.
     run_lock: Arc<Mutex<()>>,
-
-    /// Signals that workers must restart before the next run.
-    dirty: Arc<AtomicBool>,
 }
 
 impl<R, W> ConnectionHandler<R, W>
@@ -61,7 +49,6 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    #[expect(clippy::too_many_arguments)]
     pub fn new(
         reader: R,
         writer: W,
@@ -70,7 +57,6 @@ where
         outbound_tx: mpsc::Sender<Bytes>,
         worker_pool: Arc<WorkerPool>,
         run_lock: Arc<Mutex<()>>,
-        dirty: Arc<AtomicBool>,
     ) -> Self {
         Self {
             reader,
@@ -80,7 +66,6 @@ where
             outbound_rx,
             outbound_tx,
             run_lock,
-            dirty,
         }
     }
 
@@ -101,7 +86,6 @@ where
             outbound_rx,
             outbound_tx,
             run_lock,
-            dirty,
         } = self;
 
         // The writer task is the sole owner of the client output. Routing both
@@ -153,9 +137,7 @@ where
             // a response. The response goes through the same queue so only the
             // writer task ever touches the transport.
             let response =
-                match handle_request(&line, &discoverer, &outbound_tx, &pool, &run_lock, &dirty)
-                    .await
-                {
+                match handle_request(&line, &discoverer, &outbound_tx, &pool, &run_lock).await {
                     Ok(response) => response,
                     Err(_) if outbound_tx.is_closed() => {
                         // The writer owns the useful transport error. Await it
@@ -245,26 +227,34 @@ pub(crate) async fn send_notification<T: Serialize>(
         .map_err(|_| NotificationError::Closed { method })
 }
 
-fn serialize_response<T: serde::Serialize>(id: Value, result: T) -> serde_json::Result<Bytes> {
-    let resp = Response {
-        jsonrpc: "2.0".to_string(),
-        id,
-        result,
-    };
-    let mut bytes = serde_json::to_vec(&resp)?;
-    bytes.push(b'\n');
-    Ok(Bytes::from(bytes))
-}
+pub(crate) async fn apply_change(
+    discoverer: &Mutex<tryke_discovery::Discoverer>,
+    outbound_tx: &mpsc::Sender<Bytes>,
+    paths: &[PathBuf],
+) -> Result<(), NotificationError> {
+    if paths.is_empty() {
+        return Ok(());
+    }
 
-fn serialize_error(id: Option<Value>, code: i32, message: String) -> serde_json::Result<Bytes> {
-    let resp = ErrorResponse {
-        jsonrpc: "2.0".to_string(),
-        id,
-        error: RpcError { code, message },
-    };
-    let mut bytes = serde_json::to_vec(&resp)?;
-    bytes.push(b'\n');
-    Ok(Bytes::from(bytes))
+    let impact = discoverer.lock().await.apply_changes(paths);
+    if impact.paths.is_empty() {
+        debug!("apply_change: no eligible paths");
+        return Ok(());
+    }
+
+    debug!(
+        "apply_change: {} affected modules, {} affected tests",
+        impact.affected_modules.len(),
+        impact.affected_tests.len(),
+    );
+    send_notification(
+        outbound_tx,
+        NotificationMethod::DiscoverComplete,
+        DiscoverCompleteParams {
+            tests: impact.affected_tests,
+        },
+    )
+    .await
 }
 
 fn select_tests(run_params: &RunParams, all_tests: Vec<TestItem>) -> Vec<TestItem> {
@@ -292,20 +282,15 @@ async fn execute_run(
     outbound_tx: &mpsc::Sender<Bytes>,
     pool: &WorkerPool,
     run_lock: &Mutex<()>,
-    dirty: &AtomicBool,
 ) -> anyhow::Result<(String, RunSummary)> {
     let run_id = run_params.run_id.clone();
     let _run_guard = run_lock.lock().await;
+    pool.restart_workers().await;
     let discovery_start = Instant::now();
-    let (dirty_was_set, all_tests, hooks) = {
+    let (all_tests, hooks) = {
         let guard = discoverer.lock().await;
-        let was = dirty.swap(false, Ordering::AcqRel);
-        (was, guard.tests(), guard.hooks())
+        (guard.tests(), guard.hooks())
     };
-    if dirty_was_set {
-        debug!("execute_run: dirty drained — restarting worker pool");
-        pool.restart_workers().await;
-    }
     let tests = select_tests(&run_params, all_tests);
     let discovery_duration = discovery_start.elapsed();
 
@@ -393,13 +378,16 @@ async fn execute_run(
 ///
 /// # Errors
 /// Returns an error if an outbound message cannot be serialized or queued.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keeping JSON-RPC method dispatch together makes the protocol flow easier to audit."
+)]
 pub async fn handle_request(
     line: &str,
     discoverer: &tokio::sync::Mutex<tryke_discovery::Discoverer>,
     outbound_tx: &mpsc::Sender<Bytes>,
-    pool: &WorkerPool,
+    worker_pool: &WorkerPool,
     run_lock: &Mutex<()>,
-    dirty: &AtomicBool,
 ) -> anyhow::Result<Option<Bytes>> {
     let Ok(req) = serde_json::from_str::<Request>(line.trim()) else {
         return Ok(None);
@@ -407,7 +395,7 @@ pub async fn handle_request(
     let id = req.id.clone().unwrap_or(Value::Null);
 
     let response = match &req.method {
-        RequestMethod::Ping => serialize_response(id, "pong")?,
+        RequestMethod::Ping => Response::new(id, "pong").into_json_line()?,
         RequestMethod::Discover => {
             let Some(params) = req.params else {
                 return Ok(None);
@@ -424,35 +412,36 @@ pub async fn handle_request(
                 },
             )
             .await?;
-            serialize_response(id, serde_json::json!({ "tests": tests }))?
+            Response::new(id, serde_json::json!({ "tests": tests })).into_json_line()?
         }
         RequestMethod::DidChange => {
             let Some(params) = req.params else {
-                return Ok(Some(serialize_error(
-                    req.id,
-                    INVALID_PARAMS,
-                    "method 'did_change' requires params with paths".to_string(),
-                )?));
+                return Ok(Some(
+                    ErrorResponse::new(
+                        req.id,
+                        INVALID_PARAMS,
+                        "method 'did_change' requires params with paths".to_string(),
+                    )
+                    .into_json_line()?,
+                ));
             };
             let dc = match serde_json::from_value::<DidChangeParams>(params) {
                 Ok(dc) => dc,
                 Err(e) => {
-                    return Ok(Some(serialize_error(
-                        req.id,
-                        INVALID_PARAMS,
-                        format!("invalid params for 'did_change': {e}"),
-                    )?));
+                    return Ok(Some(
+                        ErrorResponse::new(
+                            req.id,
+                            INVALID_PARAMS,
+                            format!("invalid params for 'did_change': {e}"),
+                        )
+                        .into_json_line()?,
+                    ));
                 }
             };
             if dc.paths.is_empty() {
-                let tests = {
-                    let mut guard = discoverer.lock().await;
-                    let tests = guard.rediscover();
-                    dirty.store(true, Ordering::Release);
-                    tests
-                };
+                let tests = discoverer.lock().await.rediscover();
                 debug!(
-                    "did_change: empty paths — full rediscover, {} tests, dirty mark",
+                    "did_change: empty paths — full rediscover, {} tests",
                     tests.len()
                 );
                 send_notification(
@@ -462,37 +451,44 @@ pub async fn handle_request(
                 )
                 .await?;
             } else {
-                crate::change::apply_change(discoverer, outbound_tx, dirty, &dc.paths).await?;
+                apply_change(discoverer, outbound_tx, &dc.paths).await?;
             }
-            serialize_response(id, "ok")?
+            Response::new(id, "ok").into_json_line()?
         }
         RequestMethod::Run => {
             let Some(params) = req.params else {
-                return Ok(Some(serialize_error(
-                    req.id,
-                    INVALID_PARAMS,
-                    "method 'run' requires params with run_id".to_string(),
-                )?));
-            };
-            let rp = match serde_json::from_value::<RunParams>(params) {
-                Ok(rp) => rp,
-                Err(e) => {
-                    return Ok(Some(serialize_error(
+                return Ok(Some(
+                    ErrorResponse::new(
                         req.id,
                         INVALID_PARAMS,
-                        format!("invalid params for 'run': {e}"),
-                    )?));
+                        "method 'run' requires params with run_id".to_string(),
+                    )
+                    .into_json_line()?,
+                ));
+            };
+            let run_params = match serde_json::from_value::<RunParams>(params) {
+                Ok(rp) => rp,
+                Err(e) => {
+                    return Ok(Some(
+                        ErrorResponse::new(
+                            req.id,
+                            INVALID_PARAMS,
+                            format!("invalid params for 'run': {e}"),
+                        )
+                        .into_json_line()?,
+                    ));
                 }
             };
             let (run_id, summary) =
-                execute_run(rp, discoverer, outbound_tx, pool, run_lock, dirty).await?;
-            serialize_response(id, RunResponse { run_id, summary })?
+                execute_run(run_params, discoverer, outbound_tx, worker_pool, run_lock).await?;
+            Response::new(id, RunResponse { run_id, summary }).into_json_line()?
         }
-        RequestMethod::Unknown(method) => serialize_error(
+        RequestMethod::Unknown(method) => ErrorResponse::new(
             req.id,
             METHOD_NOT_FOUND,
             format!("method not found: {method}"),
-        )?,
+        )
+        .into_json_line()?,
     };
     Ok(Some(response))
 }
@@ -501,7 +497,6 @@ pub async fn handle_request(
 mod tests {
     use std::{
         fs, io,
-        path::Path,
         pin::Pin,
         sync::Arc,
         task::{Context, Poll},
@@ -561,11 +556,6 @@ mod tests {
         dir
     }
 
-    fn make_discoverer(root: &Path, excludes: &[String]) -> Arc<Mutex<Discoverer>> {
-        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
-        Arc::new(Mutex::new(Discoverer::new(root, src_roots, excludes, None)))
-    }
-
     async fn make_pool() -> Arc<WorkerPool> {
         Arc::new(
             WorkerPool::spawn(
@@ -582,10 +572,6 @@ mod tests {
 
     fn make_run_lock() -> Arc<Mutex<()>> {
         Arc::new(Mutex::new(()))
-    }
-
-    fn make_dirty() -> Arc<AtomicBool> {
-        Arc::new(AtomicBool::new(false))
     }
 
     #[tokio::test]
@@ -652,17 +638,17 @@ mod tests {
     async fn ping_returns_pong() {
         let dir = make_root();
         let (tx, _rx) = mpsc::channel(16);
-        let disc = make_discoverer(dir.path(), &[]);
+        let root = dir.path();
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
         let pool = make_pool().await;
         let run_lock = make_run_lock();
-        let dirty = make_dirty();
         let resp = handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#,
             &disc,
             &tx,
             &pool,
             &run_lock,
-            &dirty,
         )
         .await
         .unwrap()
@@ -677,17 +663,17 @@ mod tests {
         fs::write(dir.path().join("test_x.py"), "@test\ndef test_x(): pass\n")
             .expect("write test file");
         let (tx, _rx) = mpsc::channel(16);
-        let disc = make_discoverer(dir.path(), &[]);
+        let root = dir.path();
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
         let pool = make_pool().await;
         let run_lock = make_run_lock();
-        let dirty = make_dirty();
         let resp = handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"discover","params":{"root":"/ignored"}}"#,
             &disc,
             &tx,
             &pool,
             &run_lock,
-            &dirty,
         )
         .await
         .unwrap()
@@ -700,17 +686,17 @@ mod tests {
     async fn run_enqueues_notifications() {
         let dir = make_root();
         let (tx, mut rx) = mpsc::channel(64);
-        let disc = make_discoverer(dir.path(), &[]);
+        let root = dir.path();
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
         let pool = make_pool().await;
         let run_lock = make_run_lock();
-        let dirty = make_dirty();
         handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"root":"/ignored","tests":null,"run_id":"r1"}}"#,
             &disc,
             &tx,
             &pool,
             &run_lock,
-            &dirty,
         )
         .await
         .unwrap();
@@ -730,17 +716,17 @@ mod tests {
     async fn run_without_run_id_returns_invalid_params() {
         let dir = make_root();
         let (tx, _rx) = mpsc::channel(16);
-        let disc = make_discoverer(dir.path(), &[]);
+        let root = dir.path();
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
         let pool = make_pool().await;
         let run_lock = make_run_lock();
-        let dirty = make_dirty();
         let resp = handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"tests":null}}"#,
             &disc,
             &tx,
             &pool,
             &run_lock,
-            &dirty,
         )
         .await
         .unwrap()
@@ -753,17 +739,17 @@ mod tests {
     async fn run_notifications_include_run_id() {
         let dir = make_root();
         let (tx, mut rx) = mpsc::channel(64);
-        let disc = make_discoverer(dir.path(), &[]);
+        let root = dir.path();
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
         let pool = make_pool().await;
         let run_lock = make_run_lock();
-        let dirty = make_dirty();
         let resp = handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"run_id":"test-run-xyz","tests":null}}"#,
             &disc,
             &tx,
             &pool,
             &run_lock,
-            &dirty,
         )
         .await
         .unwrap()
@@ -788,20 +774,20 @@ mod tests {
         let dir = make_root();
         fs::write(dir.path().join("test_x.py"), "@test\ndef test_x(): pass\n")
             .expect("write initial file");
-        let disc = make_discoverer(dir.path(), &[]);
+        let root = dir.path();
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
 
         // Populate cache via discover
         let (tx, _rx) = mpsc::channel(64);
         let pool = make_pool().await;
         let run_lock = make_run_lock();
-        let dirty = make_dirty();
         handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"discover","params":{"root":"/ignored"}}"#,
             &disc,
             &tx,
             &pool,
             &run_lock,
-            &dirty,
         )
         .await
         .unwrap();
@@ -818,7 +804,6 @@ mod tests {
             &tx2,
             &pool,
             &run_lock,
-            &dirty,
         )
         .await
         .unwrap();
@@ -838,26 +823,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn did_change_sets_dirty_and_enqueues_notification() {
+    async fn did_change_updates_discovery_and_enqueues_notification() {
         // `did_change` is the in-band signal that makes server mode
-        // race-free for cooperating clients. Verify the three observable
+        // race-free for cooperating clients. Verify the two observable
         // side-effects:
         //   1. It returns "ok"
-        //   2. It flips `dirty` to true (which the subsequent `run`'s
-        //      `execute_run` will drain into a `restart_workers`)
-        //   3. It enqueues a `discover_complete` so the client refreshes
+        //   2. It enqueues a `discover_complete` so the client refreshes
         //      its UI.
         let dir = make_root();
         let test_file = dir.path().join("test_x.py");
         fs::write(&test_file, "@test\ndef test_x(): pass\n").expect("write test file");
         let (tx, mut rx) = mpsc::channel(16);
-        let disc = make_discoverer(dir.path(), &[]);
+        let root = dir.path();
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
         // Populate discovery so `affected_modules` returns non-empty.
         disc.lock().await.rediscover();
 
         let pool = make_pool().await;
         let run_lock = make_run_lock();
-        let dirty = make_dirty();
 
         // Build the request via serde so the path is JSON-escaped
         // (Windows backslashes are escape characters in JSON strings —
@@ -869,17 +853,12 @@ mod tests {
             "params": { "paths": [test_file] },
         }))
         .unwrap();
-        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
+        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock)
             .await
             .unwrap()
             .expect("request should return a response");
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(val["result"], "ok");
-        assert!(
-            dirty.load(std::sync::atomic::Ordering::Acquire),
-            "did_change must set dirty=true for an affected module",
-        );
-
         let mut saw_discover_complete = false;
         while let Ok(bytes) = rx.try_recv() {
             let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -896,15 +875,16 @@ mod tests {
     #[tokio::test]
     async fn did_change_empty_paths_triggers_full_rediscover() {
         // Panic-button form: client doesn't know which files changed.
-        // Server should re-scan everything and mark dirty.
+        // Server should re-scan everything.
         let dir = make_root();
         fs::write(dir.path().join("test_y.py"), "@test\ndef test_y(): pass\n")
             .expect("write test file");
         let (tx, _rx) = mpsc::channel(16);
-        let disc = make_discoverer(dir.path(), &[]);
+        let root = dir.path();
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
         let pool = make_pool().await;
         let run_lock = make_run_lock();
-        let dirty = make_dirty();
 
         let resp = handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"did_change","params":{"paths":[]}}"#,
@@ -912,34 +892,29 @@ mod tests {
             &tx,
             &pool,
             &run_lock,
-            &dirty,
         )
         .await
         .unwrap()
         .expect("request should return a response");
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(val["result"], "ok");
-        assert!(
-            dirty.load(std::sync::atomic::Ordering::Acquire),
-            "did_change with empty paths must still mark dirty",
-        );
     }
 
     #[tokio::test]
     async fn did_change_without_params_returns_invalid_params() {
         let dir = make_root();
         let (tx, _rx) = mpsc::channel(16);
-        let disc = make_discoverer(dir.path(), &[]);
+        let root = dir.path();
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
         let pool = make_pool().await;
         let run_lock = make_run_lock();
-        let dirty = make_dirty();
         let resp = handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"did_change"}"#,
             &disc,
             &tx,
             &pool,
             &run_lock,
-            &dirty,
         )
         .await
         .unwrap()
@@ -958,7 +933,7 @@ mod tests {
         // Setup: two tempdirs, one is the project root and contains a
         // test file, the other is "outside" and also contains a test
         // file. did_change sends both paths; only the in-root one
-        // should result in a dirty mark.
+        // should reach discovery.
         let dir = make_root();
         let outside = tempfile::tempdir().expect("outside tempdir");
         let inside_file = dir.path().join("test_inside.py");
@@ -967,11 +942,12 @@ mod tests {
         fs::write(&outside_file, "@test\ndef test_outside(): pass\n").expect("write outside");
 
         let (tx, _rx) = mpsc::channel(16);
-        let disc = make_discoverer(dir.path(), &[]);
+        let root = dir.path();
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
         disc.lock().await.rediscover();
         let pool = make_pool().await;
         let run_lock = make_run_lock();
-        let dirty = make_dirty();
 
         // Both paths in the request; only inside_file should survive.
         let req = serde_json::to_string(&serde_json::json!({
@@ -981,18 +957,12 @@ mod tests {
             "params": { "paths": [outside_file, inside_file] },
         }))
         .unwrap();
-        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
+        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock)
             .await
             .unwrap()
             .expect("request should return a response");
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(val["result"], "ok");
-        // The inside path is a real module, so dirty MUST be set
-        // (proves the filter didn't drop everything).
-        assert!(
-            dirty.load(std::sync::atomic::Ordering::Acquire),
-            "in-root path should still trigger dirty mark",
-        );
     }
 
     #[tokio::test]
@@ -1013,11 +983,15 @@ mod tests {
         fs::write(&excluded_file, "@test\ndef test_v(): pass\n").expect("write");
 
         let (tx, _rx) = mpsc::channel(16);
-        let disc = make_discoverer(dir.path(), &["vendored/**".to_string()]);
+        let root = dir.path();
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        let excludes = vec!["vendored/**".to_string()];
+        let disc = Arc::new(Mutex::new(Discoverer::new(
+            root, src_roots, &excludes, None,
+        )));
         disc.lock().await.rediscover();
         let pool = make_pool().await;
         let run_lock = make_run_lock();
-        let dirty = make_dirty();
 
         let req = serde_json::to_string(&serde_json::json!({
             "jsonrpc": "2.0",
@@ -1026,38 +1000,31 @@ mod tests {
             "params": { "paths": [excluded_file] },
         }))
         .unwrap();
-        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
+        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock)
             .await
             .unwrap()
             .expect("request should return a response");
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(val["result"], "ok");
-        assert!(
-            !dirty.load(std::sync::atomic::Ordering::Acquire),
-            "excluded path must not mark the pool dirty",
-        );
+        assert!(disc.lock().await.tests().is_empty());
     }
 
     #[tokio::test]
-    async fn did_change_non_py_paths_do_not_mark_dirty() {
+    async fn did_change_non_py_paths_are_ignored() {
         // A `did_change` for non-Python files (README.md, pyproject.toml,
-        // config dotfiles) must NOT mark the pool dirty — those changes
-        // can't affect any imported module, so triggering a worker
-        // restart on the next run is pure waste. Pre-fix:
-        // `affected_modules` happily turned `README.md` into a "README"
-        // module name (the wrapper at lib.rs:106-108 unwraps None to
-        // empty), making `modules.is_empty()` false and setting dirty.
+        // config dotfiles) must not enter discovery.
         let dir = make_root();
         let readme = dir.path().join("README.md");
         let pyproject = dir.path().join("pyproject.toml"); // already exists from make_root
         fs::write(&readme, "# project\n").expect("write readme");
 
         let (tx, _rx) = mpsc::channel(16);
-        let disc = make_discoverer(dir.path(), &[]);
+        let root = dir.path();
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
         disc.lock().await.rediscover();
         let pool = make_pool().await;
         let run_lock = make_run_lock();
-        let dirty = make_dirty();
 
         let req = serde_json::to_string(&serde_json::json!({
             "jsonrpc": "2.0",
@@ -1066,32 +1033,29 @@ mod tests {
             "params": { "paths": [readme, pyproject] },
         }))
         .unwrap();
-        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
+        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock)
             .await
             .unwrap()
             .expect("request should return a response");
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(val["result"], "ok");
-        assert!(
-            !dirty.load(std::sync::atomic::Ordering::Acquire),
-            "non-.py did_change must not mark dirty (would force a needless worker restart)",
-        );
+        assert!(disc.lock().await.tests().is_empty());
     }
 
     #[tokio::test]
     async fn did_change_all_paths_outside_root_is_noop() {
-        // The opposite of the above: when EVERY path is outside root,
-        // dirty must NOT be set and we must not mutate discovery.
+        // When every path is outside root, discovery must not change.
         let dir = make_root();
         let outside = tempfile::tempdir().expect("outside tempdir");
         let outside_file = outside.path().join("test_outside.py");
         fs::write(&outside_file, "@test\ndef test_outside(): pass\n").expect("write outside");
 
         let (tx, _rx) = mpsc::channel(16);
-        let disc = make_discoverer(dir.path(), &[]);
+        let root = dir.path();
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
         let pool = make_pool().await;
         let run_lock = make_run_lock();
-        let dirty = make_dirty();
 
         let req = serde_json::to_string(&serde_json::json!({
             "jsonrpc": "2.0",
@@ -1100,16 +1064,13 @@ mod tests {
             "params": { "paths": [outside_file] },
         }))
         .unwrap();
-        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
+        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock)
             .await
             .unwrap()
             .expect("request should return a response");
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
         assert_eq!(val["result"], "ok");
-        assert!(
-            !dirty.load(std::sync::atomic::Ordering::Acquire),
-            "all-outside-root did_change must not mark dirty",
-        );
+        assert!(disc.lock().await.tests().is_empty());
     }
 
     #[tokio::test]
@@ -1131,11 +1092,12 @@ mod tests {
         fs::remove_file(&test_file).expect("rm");
 
         let (tx, _rx) = mpsc::channel(16);
-        let disc = make_discoverer(dir.path(), &[]);
+        let root = dir.path();
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
         disc.lock().await.rediscover();
         let pool = make_pool().await;
         let run_lock = make_run_lock();
-        let dirty = make_dirty();
 
         let req = serde_json::to_string(&serde_json::json!({
             "jsonrpc": "2.0",
@@ -1150,7 +1112,7 @@ mod tests {
         // in production via the server). But here we want to verify the
         // filter survives a non-existent leaf, which is the bug the
         // P2 review feedback was about.
-        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock, &dirty)
+        let resp = handle_request(&req, &disc, &tx, &pool, &run_lock)
             .await
             .unwrap()
             .expect("request should return a response");
@@ -1172,10 +1134,11 @@ mod tests {
         fs::write(dir.path().join("test_x.py"), "@test\ndef test_x(): pass\n")
             .expect("write test file");
         let (tx, mut rx) = mpsc::channel(16);
-        let disc = make_discoverer(dir.path(), &[]);
+        let root = dir.path();
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
         let pool = make_pool().await;
         let run_lock = make_run_lock();
-        let dirty = make_dirty();
 
         let resp = handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"did_change","params":{"paths":[]}}"#,
@@ -1183,7 +1146,6 @@ mod tests {
             &tx,
             &pool,
             &run_lock,
-            &dirty,
         )
         .await
         .unwrap()
@@ -1208,17 +1170,17 @@ mod tests {
     async fn unknown_method_returns_error() {
         let dir = make_root();
         let (tx, _rx) = mpsc::channel(16);
-        let disc = make_discoverer(dir.path(), &[]);
+        let root = dir.path();
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
         let pool = make_pool().await;
         let run_lock = make_run_lock();
-        let dirty = make_dirty();
         let resp = handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"unknown_method"}"#,
             &disc,
             &tx,
             &pool,
             &run_lock,
-            &dirty,
         )
         .await
         .unwrap()
@@ -1232,11 +1194,12 @@ mod tests {
         // A single session must see both the run notifications and the
         // id-bearing response on the same stream.
         let dir = make_root();
-        let disc = make_discoverer(dir.path(), &[]);
+        let root = dir.path();
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
         let pool = make_pool().await;
         let (outbound_tx, outbound_rx) = mpsc::channel::<Bytes>(64);
         let run_lock = make_run_lock();
-        let dirty = make_dirty();
 
         let (client, server_side) = tokio::io::duplex(1 << 16);
         let (server_r, server_w) = tokio::io::split(server_side);
@@ -1249,7 +1212,6 @@ mod tests {
                 outbound_tx,
                 pool,
                 run_lock,
-                dirty,
             )
             .run()
             .await
@@ -1287,11 +1249,12 @@ mod tests {
     #[tokio::test]
     async fn connection_handler_reports_writer_disconnect() {
         let dir = make_root();
-        let discoverer = make_discoverer(dir.path(), &[]);
+        let root = dir.path();
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        let discoverer = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
         let pool = make_pool().await;
         let (outbound_tx, outbound_rx) = mpsc::channel(1);
         let run_lock = make_run_lock();
-        let dirty = make_dirty();
         let (mut client, server_reader) = tokio::io::duplex(64);
 
         let handler = ConnectionHandler::new(
@@ -1302,7 +1265,6 @@ mod tests {
             outbound_tx,
             pool,
             run_lock,
-            dirty,
         );
         client
             .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n")
@@ -1328,19 +1290,19 @@ mod tests {
         )
         .expect("write test file");
         let (tx, mut rx) = mpsc::channel(64);
-        let disc = make_discoverer(dir.path(), &[]);
+        let root = dir.path();
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
         // Populate cache
         disc.lock().await.rediscover();
         let pool = make_pool().await;
         let run_lock = make_run_lock();
-        let dirty = make_dirty();
         handle_request(
             r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"filter":"alpha","run_id":"r1"}}"#,
             &disc,
             &tx,
             &pool,
             &run_lock,
-            &dirty,
         )
         .await
         .unwrap();
@@ -1372,17 +1334,17 @@ mod tests {
         )
         .expect("write test file");
         let (tx, mut rx) = mpsc::channel(256);
-        let disc = make_discoverer(dir.path(), &[]);
+        let root = dir.path();
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
         disc.lock().await.rediscover();
         let pool = make_pool().await;
         let run_lock = make_run_lock();
-        let dirty = make_dirty();
 
         let disc_a = Arc::clone(&disc);
         let tx_a = tx.clone();
         let pool_a = Arc::clone(&pool);
         let run_lock_a = Arc::clone(&run_lock);
-        let dirty_a = Arc::clone(&dirty);
         let handle_a = tokio::spawn(async move {
             handle_request(
                 r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"run_id":"A","tests":null}}"#,
@@ -1390,7 +1352,6 @@ mod tests {
                 &tx_a,
                 &pool_a,
                 &run_lock_a,
-                &dirty_a,
             )
             .await
             .unwrap();
@@ -1402,7 +1363,6 @@ mod tests {
                 &tx,
                 &pool,
                 &run_lock,
-                &dirty,
             )
             .await
             .unwrap();

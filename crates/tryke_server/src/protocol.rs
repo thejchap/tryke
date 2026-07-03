@@ -1,5 +1,6 @@
 use std::{fmt, path::PathBuf};
 
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tryke_types::{RunSummary, TestItem, TestResult};
@@ -80,11 +81,53 @@ pub struct Response<T: Serialize> {
     pub result: T,
 }
 
+impl<T: Serialize> Response<T> {
+    #[must_use]
+    pub fn new(id: Value, result: T) -> Self {
+        Self {
+            jsonrpc: "2.0".to_string(),
+            id,
+            result,
+        }
+    }
+
+    /// Serializes the response as one newline-delimited JSON-RPC message.
+    ///
+    /// # Errors
+    /// Returns an error if the response payload cannot be serialized.
+    pub fn into_json_line(self) -> serde_json::Result<Bytes> {
+        let mut bytes = serde_json::to_vec(&self)?;
+        bytes.push(b'\n');
+        Ok(Bytes::from(bytes))
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
     pub jsonrpc: String,
     pub id: Option<Value>,
     pub error: RpcError,
+}
+
+impl ErrorResponse {
+    #[must_use]
+    pub fn new(id: Option<Value>, code: i32, message: String) -> Self {
+        Self {
+            jsonrpc: "2.0".to_string(),
+            id,
+            error: RpcError { code, message },
+        }
+    }
+
+    /// Serializes the error as one newline-delimited JSON-RPC message.
+    ///
+    /// # Errors
+    /// Returns an error if the error response cannot be serialized.
+    pub fn into_json_line(self) -> serde_json::Result<Bytes> {
+        let mut bytes = serde_json::to_vec(&self)?;
+        bytes.push(b'\n');
+        Ok(Bytes::from(bytes))
+    }
 }
 
 #[derive(Debug, Serialize)]

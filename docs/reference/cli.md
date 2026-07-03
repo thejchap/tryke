@@ -6,7 +6,7 @@
 
 A Rust-based Python test runner with a Jest-style API.
 
-Tryke discovers tests by walking the project's import graph, runs them across a pool of pre-warmed worker processes, and streams results through a pluggable reporter. It can also run as a long-lived server that keeps workers warm between file changes for sub-second feedback in editors.
+Tryke discovers tests by walking the project's import graph, runs them across a pool of pre-warmed worker processes, and streams results through a pluggable reporter. Its watch and server modes cache discovery while starting fresh workers for each logical run.
 
 Running `tryke` with no subcommand starts watch mode. Run `tryke <command> --help` to see detailed help for a subcommand.
 
@@ -153,7 +153,7 @@ tryke graph [OPTIONS]
 
 Start a persistent worker server speaking JSON-RPC over stdio.
 
-Spawns and pre-warms the worker pool, runs initial discovery, then reads newline-delimited JSON-RPC 2.0 requests from stdin and writes responses and notifications to stdout, LSP-style. Editor plugins spawn `tryke server` as a child process and own its stdio; closing stdin shuts the server down. The server also watches the filesystem and emits `discover_complete` notifications when the test list changes.
+Prepares the worker pool, runs initial discovery, then reads newline-delimited JSON-RPC 2.0 requests from stdin and writes responses and notifications to stdout, LSP-style. Each run uses fresh worker processes. Editor plugins spawn `tryke server` as a child process and own its stdio; closing stdin shuts the server down. The server also watches the filesystem and emits `discover_complete` notifications when the test list changes.
 
 **Usage:**
 
@@ -368,7 +368,7 @@ tryke test [OPTIONS] [PATHS]...
 
   Watch the project and rerun affected tests on each change.
 
-  Enters an interactive loop: tryke watches all `.py` files (respecting `.gitignore`), and on each save it walks the import graph from the modified file forward to find affected tests, restarts the worker pool, and reruns just those tests. Press `q` to quit, `enter` to run all tests, or `c` to clear results.
+  Enters an interactive loop: tryke watches all `.py` files (respecting `.gitignore`), and on each save it walks the import graph from the modified file forward to find affected tests, starts fresh workers, and reruns just those tests. Press `q` to quit, `enter` to run all tests, or `c` to clear results.
 
 - `-j`, `--workers` `<WORKERS>`
 

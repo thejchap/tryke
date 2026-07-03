@@ -13,7 +13,7 @@ mod discoverer;
 pub(crate) mod import_graph;
 
 pub use cache::{CleanCacheReport, clean_project_cache};
-pub use discoverer::Discoverer;
+pub use discoverer::{ChangeImpact, Discoverer};
 
 pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
     start

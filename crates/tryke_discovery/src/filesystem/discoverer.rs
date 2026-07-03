@@ -45,6 +45,13 @@ pub struct Discoverer {
     cache_keys_hit: HashMap<PathBuf, FileKey>,
 }
 
+#[derive(Debug, Default)]
+pub struct ChangeImpact {
+    pub paths: Vec<PathBuf>,
+    pub affected_modules: Vec<String>,
+    pub affected_tests: Vec<TestItem>,
+}
+
 /// Result of the parallel stat-and-maybe-read phase of `rediscover`.
 enum FileWork {
     Hit {
@@ -477,6 +484,29 @@ impl Discoverer {
             .is_ignore()
     }
 
+    /// Applies eligible project-local Python changes and returns their impact.
+    pub fn apply_changes(&mut self, paths: &[PathBuf]) -> ChangeImpact {
+        let ignore = super::build_change_set_ignore(&self.root, &self.excludes);
+        let paths = self
+            .filter_in_root(paths)
+            .into_iter()
+            .filter(|path| path.extension().is_some_and(|extension| extension == "py"))
+            .filter(|path| !ignore.matched_path_or_any_parents(path, false).is_ignore())
+            .collect::<Vec<_>>();
+        if paths.is_empty() {
+            return ChangeImpact::default();
+        }
+
+        let affected_modules = self.affected_modules(&paths);
+        self.rediscover_changed(&paths);
+        let affected_tests = self.tests_for_changed(&paths);
+        ChangeImpact {
+            paths,
+            affected_modules,
+            affected_tests,
+        }
+    }
+
     pub fn rediscover_changed(&mut self, changed: &[PathBuf]) -> Vec<TestItem> {
         let changed = Self::canonicalize_paths(changed);
         debug!(
@@ -728,6 +758,21 @@ mod tests {
         fs::write(dir.path().join("test_example.py"), source_two).expect("overwrite file");
         let second = discoverer.rediscover();
         assert_eq!(second.len(), 2);
+    }
+
+    #[test]
+    fn apply_changes_updates_discovery_and_reports_impact() {
+        let dir = make_project(&[("test_example.py", "@test\ndef test_one(): pass\n")]);
+        let path = dir.path().join("test_example.py");
+        let mut discoverer = make_discoverer(dir.path(), &[], None);
+        discoverer.rediscover();
+        fs::write(&path, "@test\ndef test_two(): pass\n").expect("update test");
+
+        let impact = discoverer.apply_changes(&[path]);
+
+        assert_eq!(impact.affected_modules, vec!["test_example"]);
+        assert_eq!(impact.affected_tests.len(), 1);
+        assert_eq!(impact.affected_tests[0].name, "test_two");
     }
 
     #[test]

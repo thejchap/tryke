@@ -1,10 +1,5 @@
 use std::{
-    path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-        mpsc::RecvTimeoutError,
-    },
+    path::Path,
     time::{Duration, Instant},
 };
 
@@ -16,22 +11,9 @@ use tryke_discovery::Discoverer;
 use tryke_reporter::{Reporter, reporter::WatchIdleInfo};
 use tryke_runner::{DistMode, WorkerPool};
 use tryke_types::{DiscoveryWarning, DiscoveryWarningKind, HookItem, filter::TestFilter};
+use tryke_watcher::{FileChangeBatch, FileWatcher};
 
 use crate::execution::{report_cycle, worker_pool_size};
-
-/// How often the watch loop wakes up to check the quit flag while
-/// waiting for file events. Short enough that `q` feels responsive,
-/// long enough to avoid burning CPU on a tight poll.
-const QUIT_POLL_INTERVAL: Duration = Duration::from_millis(150);
-
-/// Atomic flags driven by the keyboard listener thread; the watch
-/// loop polls these alongside the file-change channel.
-#[derive(Default)]
-struct WatchKeys {
-    quit: AtomicBool,
-    run_all: AtomicBool,
-    clear_results: AtomicBool,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WatchKeyAction {
@@ -39,6 +21,12 @@ enum WatchKeyAction {
     RunAll,
     ClearResults,
     Ignore,
+}
+
+enum WatchLoopEvent {
+    Command(WatchKeyAction),
+    Files(FileChangeBatch),
+    WatcherClosed,
 }
 
 fn watch_key_action(key: Key) -> WatchKeyAction {
@@ -50,41 +38,36 @@ fn watch_key_action(key: Key) -> WatchKeyAction {
     }
 }
 
-/// Spawn a thread that reads single keypresses from stdin and flips
-/// `keys` accordingly: `q`/`Q`/Escape sets `quit`; Enter sets
-/// `run_all` (consumed once by the watch loop to trigger an explicit
-/// full-suite run); `c`/`C` sets `clear_results` (consumed once by
-/// the watch loop to clear the displayed run output). No-op when
-/// stdin isn't a TTY (CI, piped input).
-fn spawn_key_listener(keys: Arc<WatchKeys>) {
+/// Spawns a thread that forwards terminal commands to the async watch loop.
+fn spawn_key_listener() -> tokio::sync::mpsc::UnboundedReceiver<WatchKeyAction> {
     use std::io::IsTerminal;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     if !std::io::stdin().is_terminal() {
-        return;
+        return rx;
     }
     let term = Term::stdout();
     std::thread::spawn(move || {
         while let Ok(key) = term.read_key() {
-            match watch_key_action(key) {
+            let action = watch_key_action(key);
+            match action {
                 WatchKeyAction::Quit => {
-                    keys.quit.store(true, Ordering::SeqCst);
+                    let _ = tx.send(action);
                     break;
                 }
-                WatchKeyAction::RunAll => {
-                    keys.run_all.store(true, Ordering::SeqCst);
-                }
-                WatchKeyAction::ClearResults => {
-                    keys.clear_results.store(true, Ordering::SeqCst);
+                WatchKeyAction::RunAll | WatchKeyAction::ClearResults => {
+                    let _ = tx.send(action);
                 }
                 WatchKeyAction::Ignore => continue,
             }
         }
     });
+    rx
 }
 
 fn emit_discovery_warnings(reporter: &mut dyn Reporter, discoverer: &Discoverer) {
     for path in discoverer.dynamic_import_files() {
         let message = format!(
-            "{} — dynamic imports found; will always re-run and may serve stale module state in watch mode",
+            "{} — dynamic imports found; will always re-run in watch mode",
             path.display()
         );
         reporter.on_discovery_warning(&DiscoveryWarning {
@@ -127,6 +110,7 @@ async fn run_watch_cycle(
     dist: DistMode,
     discovery_duration: Option<Duration>,
 ) {
+    pool.restart_workers().await;
     if let Err(e) = report_cycle(
         reporter,
         tests,
@@ -208,7 +192,7 @@ pub async fn run_watch(
     let mut discoverer = Discoverer::new(root, src_roots, excludes, cache_dir);
 
     let pool_size = workers.unwrap_or_else(worker_pool_size);
-    let pool = WorkerPool::spawn(pool_size, python, root, None, log_level, true).await;
+    let pool = WorkerPool::spawn(pool_size, python, root, None, log_level, false).await;
 
     run_initial_cycle(
         reporter,
@@ -221,68 +205,40 @@ pub async fn run_watch(
     )
     .await;
 
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
-    let _debouncer = tryke_server::watcher::spawn_watcher(root, excludes, tx)?;
-    let mut change_filter = tryke_server::watcher::ChangeFilter::new();
-
-    let keys = Arc::new(WatchKeys::default());
-    spawn_key_listener(Arc::clone(&keys));
+    let mut watcher = FileWatcher::spawn(root, excludes)?;
+    let mut commands = spawn_key_listener();
 
     loop {
-        if keys.quit.load(Ordering::SeqCst) {
-            break;
-        }
-        // Explicit "run all tests" beats any queued file events:
-        // drain the channel so we don't fire a duplicate cycle right
-        // after, then run the full discovered set against fresh
-        // workers.
-        if keys.run_all.swap(false, Ordering::SeqCst) {
-            keys.clear_results.store(false, Ordering::SeqCst);
-            while rx.try_recv().is_ok() {}
-            pool.restart_workers().await;
-            reporter.arm_clear();
-            let disc_start = Instant::now();
-            discoverer.rediscover();
-            let raw_tests = discoverer.tests();
-            let tests = test_filter.apply(raw_tests);
-            let hooks = discoverer.hooks();
-            let disc_dur = Some(disc_start.elapsed());
-            emit_discovery_warnings(reporter, &discoverer);
-            run_watch_cycle(reporter, tests, &hooks, &pool, maxfail, dist, disc_dur).await;
-            continue;
-        }
-        if keys.clear_results.swap(false, Ordering::SeqCst) {
-            clear_watch_results(reporter);
-            continue;
-        }
-        let first = match rx.recv_timeout(QUIT_POLL_INTERVAL) {
-            Ok(paths) => paths,
-            Err(RecvTimeoutError::Timeout) => continue,
-            Err(RecvTimeoutError::Disconnected) => break,
+        let event = tokio::select! {
+            batch = watcher.next_batch() => match batch? {
+                Some(batch) => WatchLoopEvent::Files(batch),
+                None => WatchLoopEvent::WatcherClosed,
+            },
+            Some(command) = commands.recv() => WatchLoopEvent::Command(command),
         };
-        // Coalesce any additional batches the watcher has already
-        // queued. A single editor save can produce events whose
-        // intermediate quiet windows fall just outside the watcher's
-        // debounce — so two batches arrive back-to-back. Without this
-        // drain, each batch triggers its own restart + test cycle,
-        // which the user perceives as a double-restart.
-        let mut paths = first;
-        while let Ok(more) = rx.try_recv() {
-            paths.extend(more);
-        }
-        paths.sort();
-        paths.dedup();
 
-        // Drop paths whose `(mtime, size)` is unchanged since the
-        // last batch we accepted. This is the deterministic answer
-        // to "did the file actually change" — drain only catches
-        // batches queued together; this catches tail events that
-        // arrive after the previous cycle has finished.
-        let paths = change_filter.filter(&paths);
-        if paths.is_empty() {
-            debug!("watch: file change batch had no real content changes — skipping");
-            continue;
-        }
+        let paths = match event {
+            WatchLoopEvent::Command(WatchKeyAction::Quit) | WatchLoopEvent::WatcherClosed => break,
+            WatchLoopEvent::Command(WatchKeyAction::RunAll) => {
+                watcher.discard_pending();
+                reporter.arm_clear();
+                let disc_start = Instant::now();
+                discoverer.rediscover();
+                let raw_tests = discoverer.tests();
+                let tests = test_filter.apply(raw_tests);
+                let hooks = discoverer.hooks();
+                let disc_dur = Some(disc_start.elapsed());
+                emit_discovery_warnings(reporter, &discoverer);
+                run_watch_cycle(reporter, tests, &hooks, &pool, maxfail, dist, disc_dur).await;
+                continue;
+            }
+            WatchLoopEvent::Command(WatchKeyAction::ClearResults) => {
+                clear_watch_results(reporter);
+                continue;
+            }
+            WatchLoopEvent::Command(WatchKeyAction::Ignore) => continue,
+            WatchLoopEvent::Files(batch) => batch.paths,
+        };
 
         debug!(
             "watch: file change batch — {} path(s) changed: {}",
@@ -293,17 +249,6 @@ pub async fn run_watch(
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        let modules = discoverer.affected_modules(&paths);
-        if modules.is_empty() {
-            debug!("watch: no modules affected by change — skipping worker restart");
-        } else {
-            debug!(
-                "watch: restarting worker pool to pick up changes in {} module(s): {}",
-                modules.len(),
-                modules.join(", ")
-            );
-            pool.restart_workers().await;
-        }
         // Arm before the heavy rediscover so the previous cycle's
         // output stays on screen while discovery + worker warmup
         // happens. The reporter clears at the moment new content is
@@ -314,7 +259,12 @@ pub async fn run_watch(
         // expensive part on large suites, so it has to be inside the
         // measured window for `disc_dur` to mean anything.
         let disc_start = Instant::now();
-        discoverer.rediscover_changed(&paths);
+        let impact = discoverer.apply_changes(&paths);
+        let disc_dur = Some(disc_start.elapsed());
+        if impact.paths.is_empty() {
+            debug!("watch: no eligible paths after discovery filtering");
+            continue;
+        }
         // When `--all` is set, rerun the full test set on every change instead
         // of restricting to tests transitively affected by the changed files.
         // Useful when the import graph misses dependencies (dynamic imports,
@@ -323,11 +273,10 @@ pub async fn run_watch(
         let raw_tests = if all_tests {
             discoverer.tests()
         } else {
-            discoverer.tests_for_changed(&paths)
+            impact.affected_tests
         };
         let tests = test_filter.apply(raw_tests);
         let hooks = discoverer.hooks();
-        let disc_dur = Some(disc_start.elapsed());
         emit_discovery_warnings(reporter, &discoverer);
         run_watch_cycle(reporter, tests, &hooks, &pool, maxfail, dist, disc_dur).await;
     }

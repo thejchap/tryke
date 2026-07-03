@@ -1,6 +1,6 @@
 # Client/server mode
 
-Tryke can run as a persistent server that keeps Python workers warm between file changes and caches test discovery. A client — typically an editor plugin — spawns `tryke server` as a child process and speaks JSON-RPC over its stdin/stdout, the same model language servers use.
+Tryke can run as a persistent server that caches test discovery while using fresh Python worker processes for each logical run. A client — typically an editor plugin — spawns `tryke server` as a child process and speaks JSON-RPC over its stdin/stdout, the same model language servers use.
 
 ## Starting the server
 
@@ -10,7 +10,7 @@ tryke server
 
 On startup, the server:
 
-1. Spawns and pre-warms the worker pool
+1. Prepares the worker pool
 2. Runs initial test discovery
 3. Starts watching the filesystem for changes
 
@@ -64,10 +64,9 @@ The server watches all `.py` files in the project (respecting `.gitignore`) with
 
 1. The batch is dedup'd against each path's last-seen `(mtime, size)` so editor tail events that don't actually change the file (metadata fsync, swap-file cleanup, format-on-save with identical output) are dropped before any work happens
 2. The import graph is incrementally updated
-3. The worker subprocesses are restarted so the next run loads fresh code in a brand-new Python interpreter (no `importlib.reload`)
-4. A `discover_complete` notification is emitted
+3. A `discover_complete` notification is emitted
 
-This means editors can keep their test explorer up to date in real time without spurious double-restarts on a single save.
+File changes only update discovery. Every `run` request starts fresh worker subprocesses regardless of whether source files changed, so repeated runs also re-execute import-time code in brand-new Python interpreters.
 
 ## Editor integration
 
@@ -91,5 +90,5 @@ See the [editor integration guide](../guides/editor-integration.md) for setup in
 
 Without the server, every `tryke test` invocation pays for Python startup and test discovery. With a long-lived server:
 
-- **Worker processes stay warm between file changes** — no Python startup per run; on a file change, workers are restarted and immediately re-warmed in parallel so the next run is still on warm interpreters
+- **Every run is isolated** — fresh Python processes re-execute imports and cannot leak module state from an earlier run
 - **Discovery is cached** — only changed files are re-scanned

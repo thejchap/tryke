@@ -9,7 +9,7 @@ pub use source::{
 
 #[cfg(feature = "filesystem")]
 pub use filesystem::{
-    CleanCacheReport, Discoverer, build_change_set_ignore, clean_project_cache,
+    ChangeImpact, CleanCacheReport, Discoverer, build_change_set_ignore, clean_project_cache,
     configured_excludes, discover, discover_from, discover_from_with_excludes,
     discover_from_with_options,
 };

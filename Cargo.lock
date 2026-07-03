@@ -2020,7 +2020,6 @@ dependencies = [
  "env_logger",
  "insta",
  "log",
- "notify-debouncer-mini",
  "serde_json",
  "tempfile",
  "tokio",
@@ -2032,6 +2031,7 @@ dependencies = [
  "tryke_server",
  "tryke_testing",
  "tryke_types",
+ "tryke_watcher",
 ]
 
 [[package]]
@@ -2110,10 +2110,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "chrono",
- "ignore",
  "log",
- "notify",
- "notify-debouncer-mini",
  "serde",
  "serde_json",
  "tempfile",
@@ -2124,6 +2121,7 @@ dependencies = [
  "tryke_runner",
  "tryke_testing",
  "tryke_types",
+ "tryke_watcher",
 ]
 
 [[package]]
@@ -2153,6 +2151,19 @@ dependencies = [
  "tryke_reporter",
  "tryke_types",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "tryke_watcher"
+version = "0.0.29"
+dependencies = [
+ "anyhow",
+ "log",
+ "notify",
+ "notify-debouncer-mini",
+ "tempfile",
+ "tokio",
+ "tryke_discovery",
 ]
 
 [[package]]

@@ -245,7 +245,7 @@ fn main() -> Result<()> {
                     &root_path,
                     None,
                     worker_log,
-                    true,
+                    false,
                 )
                 .await;
 

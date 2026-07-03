@@ -7,15 +7,26 @@ use tokio::{
 };
 use tryke_discovery::Discoverer;
 use tryke_runner::WorkerPool;
+#[cfg(test)]
+use tryke_watcher::FileChangeBatch;
 use tryke_watcher::FileWatcher;
 
 use crate::handler::{ConnectionHandler, apply_change};
+
+enum WatchMode {
+    Filesystem,
+    #[cfg(test)]
+    Disabled,
+    #[cfg(test)]
+    Manual(mpsc::UnboundedReceiver<FileChangeBatch>),
+}
 
 pub struct Server<R, W> {
     reader: R,
     writer: W,
     worker_pool: WorkerPool,
     discoverer: Discoverer,
+    watch_mode: WatchMode,
 }
 
 impl Server<Stdin, Stdout> {
@@ -42,7 +53,23 @@ impl<R, W> Server<R, W> {
             writer,
             worker_pool,
             discoverer,
+            watch_mode: WatchMode::Filesystem,
         }
+    }
+
+    #[cfg(test)]
+    fn without_file_watcher(mut self) -> Self {
+        self.watch_mode = WatchMode::Disabled;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_manual_file_watcher(
+        mut self,
+        changes: mpsc::UnboundedReceiver<FileChangeBatch>,
+    ) -> Self {
+        self.watch_mode = WatchMode::Manual(changes);
+        self
     }
 }
 
@@ -65,6 +92,7 @@ where
             writer,
             worker_pool,
             discoverer,
+            watch_mode,
         } = self;
 
         let root = discoverer.root().to_path_buf();
@@ -79,30 +107,48 @@ where
         let discoverer = Arc::new(Mutex::new(discoverer));
         discoverer.lock().await.rediscover();
 
-        // Set up file watcher and channel handles that it will use.
-        let mut watcher = FileWatcher::spawn(&root, &excludes)?;
         let disc_for_watcher = Arc::clone(&discoverer);
         let outbound_for_watcher = outbound_tx.clone();
-
-        // Watcher task - watches for changes
-        let watcher_task = tokio::spawn(async move {
-            loop {
-                let batch = match watcher.next_batch().await {
-                    Ok(Some(batch)) => batch,
-                    Ok(None) => break,
-                    Err(error) => {
-                        debug!("server: stopping file watcher: {error}");
+        let watcher_task = match watch_mode {
+            WatchMode::Filesystem => {
+                let mut watcher = FileWatcher::spawn(&root, &excludes)?;
+                Some(tokio::spawn(async move {
+                    loop {
+                        let batch = match watcher.next_batch().await {
+                            Ok(Some(batch)) => batch,
+                            Ok(None) => break,
+                            Err(error) => {
+                                debug!("server: stopping file watcher: {error}");
+                                break;
+                            }
+                        };
+                        if let Err(error) =
+                            apply_change(&disc_for_watcher, &outbound_for_watcher, &batch.paths)
+                                .await
+                        {
+                            debug!("server: stopping file-change notifications: {error}");
+                            break;
+                        }
+                    }
+                }))
+            }
+            #[cfg(test)]
+            WatchMode::Disabled => None,
+            #[cfg(test)]
+            WatchMode::Manual(mut changes) => Some(tokio::spawn(async move {
+                loop {
+                    let Some(batch) = changes.recv().await else {
+                        break;
+                    };
+                    if let Err(error) =
+                        apply_change(&disc_for_watcher, &outbound_for_watcher, &batch.paths).await
+                    {
+                        debug!("server: stopping file-change notifications: {error}");
                         break;
                     }
-                };
-                if let Err(error) =
-                    apply_change(&disc_for_watcher, &outbound_for_watcher, &batch.paths).await
-                {
-                    debug!("server: stopping file-change notifications: {error}");
-                    break;
                 }
-            }
-        });
+            })),
+        };
 
         debug!("server: session started");
 
@@ -121,8 +167,10 @@ where
 
         debug!("server: session input closed — shutting down");
 
-        watcher_task.abort();
-        let _ = watcher_task.await;
+        if let Some(watcher_task) = watcher_task {
+            watcher_task.abort();
+            let _ = watcher_task.await;
+        }
         if let Ok(pool) = Arc::try_unwrap(worker_pool) {
             pool.shutdown();
         }
@@ -152,6 +200,23 @@ mod tests {
     /// halves of the session, mirroring how an editor owns the stdio of a
     /// spawned `tryke server` child.
     fn start_server() -> (ClientWriter, ClientReader, tempfile::TempDir) {
+        start_server_inner(None)
+    }
+
+    fn start_server_with_manual_file_watcher() -> (
+        ClientWriter,
+        ClientReader,
+        tempfile::TempDir,
+        mpsc::UnboundedSender<FileChangeBatch>,
+    ) {
+        let (changes_tx, changes_rx) = mpsc::unbounded_channel();
+        let (writer, reader, directory) = start_server_inner(Some(changes_rx));
+        (writer, reader, directory, changes_tx)
+    }
+
+    fn start_server_inner(
+        manual_changes: Option<mpsc::UnboundedReceiver<FileChangeBatch>>,
+    ) -> (ClientWriter, ClientReader, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
         let root = dir.path().to_path_buf();
@@ -163,10 +228,12 @@ mod tests {
             let worker_pool =
                 WorkerPool::spawn(1, &python, &root, None, LevelFilter::Off, false).await;
             let discoverer = Discoverer::new(&root, src_roots, &[], None);
-            Server::with_transport(worker_pool, discoverer, server_r, server_w)
-                .serve()
-                .await
-                .expect("server run");
+            let server = Server::with_transport(worker_pool, discoverer, server_r, server_w);
+            let server = match manual_changes {
+                Some(changes) => server.with_manual_file_watcher(changes),
+                None => server.without_file_watcher(),
+            };
+            server.serve().await.expect("server run");
         });
         let (client_r, client_w) = tokio::io::split(client);
         (client_w, BufReader::new(client_r), dir)
@@ -203,6 +270,7 @@ mod tests {
                 WorkerPool::spawn(1, &python, &root, None, LevelFilter::Off, false).await;
             let discoverer = Discoverer::new(&root, src_roots, &[], None);
             Server::with_transport(worker_pool, discoverer, server_r, server_w)
+                .without_file_watcher()
                 .serve()
                 .await
         });
@@ -250,6 +318,24 @@ mod tests {
         }
     }
 
+    async fn read_notification(r: &mut ClientReader, method: &str) -> serde_json::Value {
+        loop {
+            let mut line = String::new();
+            time::timeout(Duration::from_secs(30), r.read_line(&mut line))
+                .await
+                .unwrap()
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+            if value["method"] == method {
+                return value;
+            }
+            assert!(
+                value.get("id").is_none(),
+                "received unexpected response while waiting for {method}: {value}",
+            );
+        }
+    }
+
     /// Send `did_change` then `run` on the SAME session — the invariant
     /// that makes the in-band approach race-free.
     async fn did_change_then_run(
@@ -290,10 +376,9 @@ mod tests {
 
     /// Regression: a `run` issued *immediately* after a save (no sleep
     /// to let the FS watcher catch up) must see fresh `sys.modules`,
-    /// not the previous cycle's cache. Drives the same phase-1/phase-2
-    /// shape that catches stale-cache leaks across 16 workers — but
-    /// this time the client sends `did_change` first so the server can
-    /// refresh discovery synchronously before the `run` line is read.
+    /// not the previous cycle's cache. The client sends `did_change`
+    /// first so the server refreshes discovery synchronously before
+    /// the `run` line is read.
     ///
     /// Without the `did_change` step, phase 2 can use stale discovery
     /// metadata even though workers are fresh for every run.
@@ -303,55 +388,49 @@ mod tests {
         let test_file = dir.path().join("test_match.py");
 
         fs::write(&test_file, match_body("set")).unwrap();
-        // One settling pause so the *initial* discovery picks up the
-        // file. After this, every iteration uses `did_change` and does
-        // not wait.
-        time::sleep(Duration::from_millis(300)).await;
+        let resp = did_change_then_run(&mut w, &mut r, &test_file, "set").await;
+        let summary = &resp["result"]["summary"];
+        assert_eq!(
+            summary["passed"].as_u64().unwrap_or(0),
+            1,
+            "'set' baseline must pass — got summary={summary}",
+        );
 
-        // Phase 1 — every worker imports the "set" body.
-        for i in 0..16 {
-            fs::write(&test_file, match_body("set")).unwrap();
-            let resp = did_change_then_run(&mut w, &mut r, &test_file, &format!("set{i}")).await;
-            let summary = &resp["result"]["summary"];
-            let passed = summary["passed"].as_u64().unwrap_or(0);
-            assert_eq!(
-                passed, 1,
-                "phase 1 iter {i}: 'set' baseline must pass — got summary={summary}",
-            );
-        }
-
-        // Phase 2 — flip to "st"; assertion stays "set", so every fresh
-        // import must FAIL. A `passed=1` here means a worker served its
-        // phase-1 cached module: exactly the stale-interpreter behavior
-        // that restarting workers at every run boundary prevents.
-        for i in 0..16 {
-            fs::write(&test_file, match_body("st")).unwrap();
-            let resp = did_change_then_run(&mut w, &mut r, &test_file, &format!("st{i}")).await;
-            let summary = &resp["result"]["summary"];
-            let passed = summary["passed"].as_u64().unwrap_or(0);
-            let failed = summary["failed"].as_u64().unwrap_or(0);
-            let errors = summary["errors"].as_u64().unwrap_or(0);
-            assert!(
-                passed == 0 && (failed + errors) >= 1,
-                "phase 2 iter {i}: file has match()->\"st\" but the run \
-                 reported passed={passed}; a worker served the stale \
-                 phase-1 cache. summary={summary}",
-            );
-        }
+        // Flip to "st"; the assertion stays "set", so a fresh import must
+        // fail. A pass means the worker served its phase-1 cached module.
+        fs::write(&test_file, match_body("st")).unwrap();
+        let resp = did_change_then_run(&mut w, &mut r, &test_file, "st").await;
+        let summary = &resp["result"]["summary"];
+        let passed = summary["passed"].as_u64().unwrap_or(0);
+        let failed = summary["failed"].as_u64().unwrap_or(0);
+        let errors = summary["errors"].as_u64().unwrap_or(0);
+        assert!(
+            passed == 0 && (failed + errors) >= 1,
+            "file has match()->\"st\" but the run reported passed={passed}; \
+             the worker served the stale phase-1 cache. summary={summary}",
+        );
     }
 
-    /// Companion to the test above: a non-cooperating client (just
-    /// sends `run`, no `did_change`) still eventually gets correct
-    /// results once the FS watcher's 50 ms debounce expires. This
-    /// documents the fallback path and ensures we haven't accidentally
-    /// removed it.
+    /// A file-change event refreshes discovery for clients that do not send
+    /// `did_change`. The event is injected after the platform watcher boundary
+    /// so the test remains deterministic across operating systems.
     #[tokio::test]
-    async fn run_only_falls_back_to_fs_watcher() {
-        let (mut w, mut r, dir) = start_server();
+    async fn manually_triggered_file_change_refreshes_discovery() {
+        let (mut w, mut r, dir, changes) = start_server_with_manual_file_watcher();
         let test_file = dir.path().join("test_match.py");
 
+        w.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"ping\"}\n")
+            .await
+            .unwrap();
+        let _ = read_response(&mut r).await;
+
         fs::write(&test_file, match_body("set")).unwrap();
-        time::sleep(Duration::from_millis(300)).await;
+        changes
+            .send(FileChangeBatch {
+                paths: vec![test_file.clone()],
+            })
+            .expect("send initial file change");
+        let _ = read_notification(&mut r, "discover_complete").await;
         let resp = run_only(&mut w, &mut r, "warm").await;
         assert_eq!(
             resp["result"]["summary"]["passed"].as_u64().unwrap_or(0),
@@ -361,17 +440,19 @@ mod tests {
         );
 
         fs::write(&test_file, match_body("st")).unwrap();
-        // Give the FS watcher its debounce + a comfortable margin to
-        // process the discovery change. Non-cooperating clients accept
-        // this latency.
-        time::sleep(Duration::from_millis(300)).await;
+        changes
+            .send(FileChangeBatch {
+                paths: vec![test_file],
+            })
+            .expect("send updated file change");
+        let _ = read_notification(&mut r, "discover_complete").await;
         let resp = run_only(&mut w, &mut r, "after_save").await;
         let summary = &resp["result"]["summary"];
         let passed = summary["passed"].as_u64().unwrap_or(0);
         let failed = summary["failed"].as_u64().unwrap_or(0);
         assert!(
             passed == 0 && failed >= 1,
-            "after FS-watcher debounce: 'st' body should fail the 'set' assertion — \
+            "after the file-change event: 'st' body should fail the 'set' assertion — \
              got summary={summary}",
         );
     }

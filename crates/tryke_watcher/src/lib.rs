@@ -6,7 +6,7 @@ use std::{
 
 use log::debug;
 use notify::RecommendedWatcher;
-use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
+use notify_debouncer_mini::{DebounceEventResult, DebouncedEvent, Debouncer, new_debouncer};
 use tokio::sync::mpsc;
 use tryke_discovery::build_change_set_ignore;
 
@@ -22,69 +22,24 @@ enum WatchEvent {
     Error(String),
 }
 
-/// Watches a project for meaningful Python file changes.
-///
-/// This type owns the underlying OS watcher and normalizes its raw events into
-/// coalesced, deduplicated batches suitable for async consumers.
-pub struct FileWatcher {
-    _debouncer: Debouncer<RecommendedWatcher>,
+struct ChangeQueue {
     rx: mpsc::UnboundedReceiver<WatchEvent>,
     change_filter: ChangeFilter,
 }
 
-impl FileWatcher {
-    /// Starts a recursive watcher for Python files under `root`.
-    ///
-    /// # Errors
-    /// Returns an error if the watcher cannot be created or subscribed to
-    /// `root`.
-    pub fn spawn(root: &Path, excludes: &[String]) -> anyhow::Result<Self> {
-        let gitignore = build_change_set_ignore(root, excludes);
+impl ChangeQueue {
+    fn channel() -> (mpsc::UnboundedSender<WatchEvent>, Self) {
         let (tx, rx) = mpsc::unbounded_channel();
-        let mut debouncer = new_debouncer(DEBOUNCE_DELAY, move |result: DebounceEventResult| {
-            let event = match result {
-                Ok(events) => {
-                    let paths = events
-                        .into_iter()
-                        .filter(|event| {
-                            event
-                                .path
-                                .extension()
-                                .is_some_and(|extension| extension == "py")
-                        })
-                        .filter(|event| {
-                            !gitignore
-                                .matched_path_or_any_parents(&event.path, false)
-                                .is_ignore()
-                        })
-                        .map(|event| event.path)
-                        .collect::<Vec<_>>();
-                    WatchEvent::Paths(paths)
-                }
-                Err(error) => WatchEvent::Error(format!("{error:?}")),
-            };
-            let _ = tx.send(event);
-        })?;
-        debouncer
-            .watcher()
-            .watch(root, notify::RecursiveMode::Recursive)?;
-
-        Ok(Self {
-            _debouncer: debouncer,
-            rx,
-            change_filter: ChangeFilter::default(),
-        })
+        (
+            tx,
+            Self {
+                rx,
+                change_filter: ChangeFilter::default(),
+            },
+        )
     }
 
-    /// Returns the next non-empty batch of meaningful file changes.
-    ///
-    /// Events already queued together are coalesced before content signatures
-    /// are checked, preventing a single editor save from producing duplicate
-    /// consumer work.
-    ///
-    /// # Errors
-    /// Returns an error reported by the underlying filesystem watcher.
-    pub async fn next_batch(&mut self) -> anyhow::Result<Option<FileChangeBatch>> {
+    async fn next_batch(&mut self) -> anyhow::Result<Option<FileChangeBatch>> {
         loop {
             let Some(first) = self.rx.recv().await else {
                 return Ok(None);
@@ -114,9 +69,79 @@ impl FileWatcher {
         }
     }
 
+    fn discard_pending(&mut self) {
+        while self.rx.try_recv().is_ok() {}
+    }
+}
+
+fn relevant_paths(events: Vec<DebouncedEvent>, is_ignored: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+    events
+        .into_iter()
+        .filter(|event| {
+            event
+                .path
+                .extension()
+                .is_some_and(|extension| extension == "py")
+        })
+        .filter(|event| !is_ignored(&event.path))
+        .map(|event| event.path)
+        .collect()
+}
+
+/// Watches a project for meaningful Python file changes.
+///
+/// This type owns the underlying OS watcher and normalizes its raw events into
+/// coalesced, deduplicated batches suitable for async consumers.
+pub struct FileWatcher {
+    _debouncer: Debouncer<RecommendedWatcher>,
+    changes: ChangeQueue,
+}
+
+impl FileWatcher {
+    /// Starts a recursive watcher for Python files under `root`.
+    ///
+    /// # Errors
+    /// Returns an error if the watcher cannot be created or subscribed to
+    /// `root`.
+    pub fn spawn(root: &Path, excludes: &[String]) -> anyhow::Result<Self> {
+        let gitignore = build_change_set_ignore(root, excludes);
+        let (tx, changes) = ChangeQueue::channel();
+        let mut debouncer = new_debouncer(DEBOUNCE_DELAY, move |result: DebounceEventResult| {
+            let event = match result {
+                Ok(events) => WatchEvent::Paths(relevant_paths(events, |path| {
+                    gitignore
+                        .matched_path_or_any_parents(path, false)
+                        .is_ignore()
+                })),
+                Err(error) => WatchEvent::Error(format!("{error:?}")),
+            };
+            let _ = tx.send(event);
+        })?;
+        debouncer
+            .watcher()
+            .watch(root, notify::RecursiveMode::Recursive)?;
+
+        Ok(Self {
+            _debouncer: debouncer,
+            changes,
+        })
+    }
+
+    /// Returns the next non-empty batch of meaningful file changes.
+    ///
+    /// Events already queued together are coalesced before content signatures
+    /// are checked, preventing a single editor save from producing duplicate
+    /// consumer work.
+    ///
+    /// # Errors
+    /// Returns an error reported by the underlying filesystem watcher.
+    pub async fn next_batch(&mut self) -> anyhow::Result<Option<FileChangeBatch>> {
+        self.changes.next_batch().await
+    }
+
     /// Discards batches that are already queued.
     pub fn discard_pending(&mut self) {
-        while self.rx.try_recv().is_ok() {}
+        self.changes.discard_pending();
     }
 }
 
@@ -166,9 +191,10 @@ impl ChangeFilter {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, time::Duration};
+    use std::fs;
 
     use super::*;
+    use notify_debouncer_mini::DebouncedEventKind;
 
     #[test]
     fn change_filter_drops_unchanged_paths() {
@@ -219,54 +245,54 @@ mod tests {
         assert_eq!(filter.filter(std::slice::from_ref(&path)), vec![path]);
     }
 
-    #[tokio::test]
-    async fn watcher_emits_python_file_changes() {
+    #[test]
+    fn relevant_paths_filters_non_python_and_ignored_files() {
         let directory = tempfile::tempdir().expect("tempdir");
-        let path = directory.path().join("test_example.py");
-        fs::write(&path, "x = 1").expect("write");
-        let mut watcher = FileWatcher::spawn(directory.path(), &[]).expect("spawn watcher");
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        let python = directory.path().join("test_example.py");
+        let ignored = directory.path().join("ignored.py");
+        let text = directory.path().join("notes.txt");
+        let event = |path| DebouncedEvent {
+            path,
+            kind: DebouncedEventKind::Any,
+        };
 
-        let batch = tokio::time::timeout(Duration::from_secs(5), async {
-            for value in 2..=10 {
-                fs::write(&path, format!("x = {value}")).expect("update");
-                if let Ok(batch) =
-                    tokio::time::timeout(Duration::from_millis(500), watcher.next_batch()).await
-                {
-                    return batch;
-                }
-            }
-            panic!("watcher did not observe a file change");
-        })
-        .await
-        .expect("watcher timeout")
-        .expect("watcher error")
-        .expect("watcher closed");
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
-        assert!(
-            batch
-                .paths
-                .iter()
-                .any(|changed| changed == &path || changed == &canonical),
-            "expected {} in {:?}",
-            path.display(),
-            batch.paths,
+        let paths = relevant_paths(
+            vec![event(python.clone()), event(ignored.clone()), event(text)],
+            |path| path == ignored,
         );
+
+        assert_eq!(paths, vec![python]);
     }
 
     #[tokio::test]
-    async fn watcher_ignores_non_python_files() {
+    async fn change_queue_coalesces_manually_triggered_events() {
         let directory = tempfile::tempdir().expect("tempdir");
-        let mut watcher = FileWatcher::spawn(directory.path(), &[]).expect("spawn watcher");
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        let path = directory.path().join("test_example.py");
+        fs::write(&path, "x = 1").expect("write");
+        let (events, mut changes) = ChangeQueue::channel();
 
-        fs::write(directory.path().join("notes.txt"), "notes").expect("write text file");
+        events
+            .send(WatchEvent::Paths(vec![path.clone(), path.clone()]))
+            .expect("send initial event");
+        let batch = changes
+            .next_batch()
+            .await
+            .expect("queue error")
+            .expect("queue closed");
+        assert_eq!(batch.paths, vec![path.clone()]);
 
-        assert!(
-            tokio::time::timeout(Duration::from_millis(500), watcher.next_batch())
-                .await
-                .is_err(),
-            "non-Python changes must not produce a batch",
-        );
+        fs::write(&path, "x = 222").expect("update");
+        events
+            .send(WatchEvent::Paths(Vec::new()))
+            .expect("send empty event");
+        events
+            .send(WatchEvent::Paths(vec![path.clone()]))
+            .expect("send changed event");
+        let batch = changes
+            .next_batch()
+            .await
+            .expect("queue error")
+            .expect("queue closed");
+        assert_eq!(batch.paths, vec![path]);
     }
 }

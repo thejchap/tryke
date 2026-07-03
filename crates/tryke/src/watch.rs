@@ -255,7 +255,7 @@ pub async fn run_watch(
         // about to land (warning, error, or run start), eliminating
         // the blank-screen gap that's painful on large suites.
         reporter.arm_clear();
-        // Time the full discovery work — `rediscover_changed` is the
+        // Time the full discovery work — `apply_changes` is the
         // expensive part on large suites, so it has to be inside the
         // measured window for `disc_dur` to mean anything.
         let disc_start = Instant::now();

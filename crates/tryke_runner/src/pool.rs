@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use log::{LevelFilter, debug, trace};
+use log::{LevelFilter, debug, trace, warn};
 
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::Stream;
@@ -205,7 +205,10 @@ impl WorkerPool {
             .fanout_ctrl_with_timeout(build, WORKER_CONTROL_TIMEOUT)
             .await
         {
-            debug!(
+            // A control timeout means at least one worker did not ack a
+            // restart/warm, undermining the "fresh workers each run"
+            // guarantee — surface it at warn so it's visible by default.
+            warn!(
                 "worker control operation '{operation}' timed out after {WORKER_CONTROL_TIMEOUT:?}"
             );
         }

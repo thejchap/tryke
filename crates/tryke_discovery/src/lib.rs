@@ -11,7 +11,7 @@ pub use source::{
 pub use filesystem::{
     ChangeImpact, CleanCacheReport, Discoverer, build_change_set_ignore, clean_project_cache,
     configured_excludes, discover, discover_from, discover_from_with_excludes,
-    discover_from_with_options,
+    discover_from_with_options, resolve_project_root,
 };
 
 #[cfg(feature = "filesystem")]

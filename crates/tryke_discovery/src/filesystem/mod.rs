@@ -15,11 +15,21 @@ pub(crate) mod import_graph;
 pub use cache::{CleanCacheReport, clean_project_cache};
 pub use discoverer::{ChangeImpact, Discoverer};
 
-pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
+fn find_project_root(start: &Path) -> Option<PathBuf> {
     start
         .ancestors()
         .find(|dir| dir.join("pyproject.toml").exists())
         .map(Path::to_path_buf)
+}
+
+/// Resolves the project root from `start`.
+///
+/// The nearest ancestor containing `pyproject.toml` wins. If no project
+/// marker exists, `start` itself is used.
+#[must_use]
+pub fn resolve_project_root(start: &Path) -> PathBuf {
+    let root = find_project_root(start).unwrap_or_else(|| start.to_path_buf());
+    root.canonicalize().unwrap_or(root)
 }
 
 #[must_use]
@@ -141,7 +151,7 @@ fn parse_tests_from_file(root: &Path, src_roots: &[PathBuf], file: &Path) -> Par
 #[must_use]
 pub fn discover_from(start: &Path) -> Vec<TestItem> {
     let config = tryke_config::load_effective_config(start);
-    let root = find_project_root(start).unwrap_or_else(|| start.to_path_buf());
+    let root = resolve_project_root(start);
     let src_roots = config.discovery.src_roots(&root);
     discover_from_with_options(&root, &config.discovery.exclude, &src_roots)
 }
@@ -149,7 +159,7 @@ pub fn discover_from(start: &Path) -> Vec<TestItem> {
 #[must_use]
 pub fn discover_from_with_excludes(start: &Path, excludes: &[String]) -> Vec<TestItem> {
     let config = tryke_config::load_effective_config(start);
-    let root = find_project_root(start).unwrap_or_else(|| start.to_path_buf());
+    let root = resolve_project_root(start);
     let src_roots = config.discovery.src_roots(&root);
     discover_from_with_options(&root, excludes, &src_roots)
 }

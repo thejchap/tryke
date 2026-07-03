@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use log::{debug, warn};
 use tryke_config::load_effective_config;
-use tryke_discovery::Discoverer;
+use tryke_discovery::{Discoverer, resolve_project_root};
 use tryke_types::filter::PathSpec;
 use tryke_types::{DiscoveryWarning, DiscoveryWarningKind, HookItem};
 
@@ -91,14 +91,15 @@ pub fn discover_tests(
     excludes: &[String],
     cache_dir: Option<&Path>,
 ) -> DiscoverySelection {
-    let src_roots = load_effective_config(root).discovery.src_roots(root);
-    let mut discoverer = Discoverer::new(root, src_roots, excludes, cache_dir);
+    let root = resolve_project_root(root);
+    let src_roots = load_effective_config(&root).discovery.src_roots(&root);
+    let mut discoverer = Discoverer::new(&root, src_roots, excludes, cache_dir);
     discoverer.rediscover();
     let warnings = all_discovery_warnings(&discoverer);
     let hooks = discoverer.hooks();
 
     if changed {
-        match resolve_changed_files(root, base_branch) {
+        match resolve_changed_files(&root, base_branch) {
             Some(changed_files) if !changed_files.is_empty() => {
                 debug!("--changed: {} git-changed files", changed_files.len());
                 DiscoverySelection {
@@ -155,16 +156,17 @@ pub fn discover_tests_for_paths(
     excludes: &[String],
     cache_dir: Option<&Path>,
 ) -> DiscoverySelection {
-    let walk_roots = match resolve_walk_roots(root, path_specs) {
+    let root = resolve_project_root(root);
+    let walk_roots = match resolve_walk_roots(&root, path_specs) {
         Some(roots) => roots,
         None => {
             debug!("discover_tests_for_paths: falling back to full discovery");
-            return discover_tests(root, false, None, excludes, cache_dir);
+            return discover_tests(&root, false, None, excludes, cache_dir);
         }
     };
 
-    let src_roots = load_effective_config(root).discovery.src_roots(root);
-    let mut discoverer = Discoverer::new(root, src_roots, excludes, cache_dir);
+    let src_roots = load_effective_config(&root).discovery.src_roots(&root);
+    let mut discoverer = Discoverer::new(&root, src_roots, excludes, cache_dir);
     let tests = discoverer.rediscover_restricted(&walk_roots);
     let warnings = all_discovery_warnings(&discoverer);
     let hooks = discoverer.hooks();
@@ -234,12 +236,13 @@ pub fn discover_tests_changed_first(
     excludes: &[String],
     cache_dir: Option<&Path>,
 ) -> DiscoverySelection {
-    let src_roots = load_effective_config(root).discovery.src_roots(root);
-    let mut discoverer = Discoverer::new(root, src_roots, excludes, cache_dir);
+    let root = resolve_project_root(root);
+    let src_roots = load_effective_config(&root).discovery.src_roots(&root);
+    let mut discoverer = Discoverer::new(&root, src_roots, excludes, cache_dir);
     discoverer.rediscover();
     let warnings = all_discovery_warnings(&discoverer);
     let hooks = discoverer.hooks();
-    let changed_files = resolve_changed_files(root, base_branch);
+    let changed_files = resolve_changed_files(&root, base_branch);
     let all_tests = discoverer.tests();
     match changed_files {
         Some(cf) if !cf.is_empty() => {

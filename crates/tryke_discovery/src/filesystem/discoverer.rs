@@ -76,12 +76,22 @@ impl Discoverer {
     /// the default `<project-root>/.tryke/cache` location.
     #[must_use]
     pub fn new(
-        root: &Path,
+        start: &Path,
         src_roots: Vec<PathBuf>,
         excludes: &[String],
         cache_dir: Option<&Path>,
     ) -> Self {
-        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let start = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
+        let root = super::resolve_project_root(&start);
+        let src_roots = src_roots
+            .into_iter()
+            .map(|src_root| {
+                let reanchored = src_root
+                    .strip_prefix(&start)
+                    .map_or(src_root.clone(), |relative| root.join(relative));
+                reanchored.canonicalize().unwrap_or(reanchored)
+            })
+            .collect();
 
         let cache = cache_dir.map_or_else(
             || DiskCache::load_in_state_dir(root.join(".tryke")),
@@ -729,6 +739,48 @@ mod tests {
             assert_eq!(a.name, b.name);
             assert_eq!(a.module_path, b.module_path);
         }
+    }
+
+    #[test]
+    fn discoverer_resolves_project_and_source_roots_from_child_directory() {
+        let dir = make_project(&[
+            ("src/package/util.py", "VALUE = 1\n"),
+            (
+                "src/package/test_root.py",
+                "from package.util import VALUE\n@test\ndef test_root(): pass\n",
+            ),
+            (
+                "src/package/nested/test_child.py",
+                "from package.util import VALUE\n@test\ndef test_child(): pass\n",
+            ),
+        ]);
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.tryke]\nsrc = [\"src\"]\n",
+        )
+        .expect("write pyproject");
+        let child = dir.path().join("src/package/nested");
+        let mut discoverer = make_discoverer(&child, &[], None);
+
+        let tests = discoverer.rediscover();
+
+        assert_eq!(
+            discoverer.root(),
+            dir.path()
+                .canonicalize()
+                .expect("canonicalize project root")
+        );
+        assert_eq!(tests.len(), 2);
+        let affected = discoverer.tests_for_changed(&[dir.path().join("src/package/util.py")]);
+        assert_eq!(
+            affected.len(),
+            2,
+            "configured source roots must be anchored to the discovered project root"
+        );
+        assert!(
+            dir.path().join(".tryke/cache/discovery-v1.bin").exists(),
+            "default cache must be stored under the discovered project root"
+        );
     }
 
     #[test]

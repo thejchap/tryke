@@ -211,7 +211,7 @@ impl WorkerPool {
         }
     }
 
-    /// Kill every worker subprocess so the next unit starts a fresh one.
+    /// Replace every worker subprocess with a fresh, responsive process.
     ///
     /// This is how watch and server mode pick up code changes: rather than
     /// trying to mutate a live interpreter with `importlib.reload` (which is
@@ -222,6 +222,7 @@ impl WorkerPool {
     /// working — same path as crash recovery.
     pub async fn restart_workers(&self) {
         self.fanout_ctrl("restart", WorkerCtrl::Restart).await;
+        self.warm().await;
     }
 
     /// Pre-spawn all worker processes in parallel so Python startup
@@ -460,9 +461,6 @@ async fn handle_ctrl(
             if let Some(mut w) = state.process.take() {
                 w.shutdown().await;
             }
-            // Respawn lazily when this worker next receives a unit. Eagerly
-            // respawning every CPU-sized pool member made a single blocked
-            // process spawn hold the entire restart fan-out open.
             let _ = ack_tx.send(());
         }
     }
@@ -875,8 +873,8 @@ def test_noop() -> None:
         pool.shutdown();
     }
 
-    /// `restart_workers` on a pool that has not been warmed (no
-    /// processes spawned yet) must still ack. This matters because the file
+    /// `restart_workers` on a cold pool must start every process and
+    /// acknowledge within the control timeout. This matters because the file
     /// watcher can fire before the user triggers any test run.
     #[tokio::test]
     async fn restart_workers_with_no_live_processes_acks() {
@@ -893,7 +891,6 @@ def test_noop() -> None:
             false,
         )
         .await;
-        // Python subprocesses have not been warmed.
         let restarted =
             tokio::time::timeout(std::time::Duration::from_secs(10), pool.restart_workers()).await;
         assert!(restarted.is_ok(), "restart_workers must ack within timeout");

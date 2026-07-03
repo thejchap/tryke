@@ -7,7 +7,7 @@ use anyhow::Result;
 use console::{Key, Term};
 use log::{LevelFilter, debug};
 use tryke_config::load_effective_config;
-use tryke_discovery::Discoverer;
+use tryke_discovery::{Discoverer, resolve_project_root};
 use tryke_reporter::{Reporter, reporter::WatchIdleInfo};
 use tryke_runner::{DistMode, WorkerPool};
 use tryke_types::{DiscoveryWarning, DiscoveryWarningKind, HookItem, filter::TestFilter};
@@ -187,12 +187,12 @@ pub async fn run_watch(
     cache_dir: Option<&Path>,
 ) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let root = root.unwrap_or(&cwd);
-    let src_roots = load_effective_config(root).discovery.src_roots(root);
-    let mut discoverer = Discoverer::new(root, src_roots, excludes, cache_dir);
+    let root = resolve_project_root(root.unwrap_or(&cwd));
+    let src_roots = load_effective_config(&root).discovery.src_roots(&root);
+    let mut discoverer = Discoverer::new(&root, src_roots, excludes, cache_dir);
 
     let pool_size = workers.unwrap_or_else(worker_pool_size);
-    let pool = WorkerPool::spawn(pool_size, python, root, None, log_level, false).await;
+    let pool = WorkerPool::spawn(pool_size, python, &root, None, log_level, false).await;
 
     run_initial_cycle(
         reporter,
@@ -205,7 +205,7 @@ pub async fn run_watch(
     )
     .await;
 
-    let mut watcher = FileWatcher::spawn(root, excludes)?;
+    let mut watcher = FileWatcher::spawn(&root, excludes)?;
     let mut commands = spawn_key_listener();
 
     loop {

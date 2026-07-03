@@ -246,8 +246,8 @@ mod tests {
             .await
             .unwrap();
         let mut line = String::new();
-        // Generous timeout: the response is gated behind Python worker
-        // startup and initial discovery, which can be slow on loaded CI hosts.
+        // Generous timeout for loaded CI hosts. The worker pool starts cold,
+        // so ping itself does not wait for Python subprocess startup.
         time::timeout(Duration::from_secs(30), r.read_line(&mut line))
             .await
             .unwrap()

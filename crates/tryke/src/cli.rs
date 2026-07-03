@@ -284,6 +284,13 @@ pub enum Commands {
         /// `PATH`. See the `Configuration` guide for the full rules.
         #[arg(long)]
         python: Option<String>,
+
+        /// Number of worker processes.
+        ///
+        /// Defaults to the CPU count. Set to `1` to run tests in a single
+        /// worker, which is useful when debugging concurrency issues.
+        #[arg(short = 'j', long = "workers")]
+        workers: Option<usize>,
     },
 
     /// Remove tryke's persistent discovery cache.

@@ -8,6 +8,11 @@
 
 - Add configurable discovery cache directory (#128)
 - Add clean cache command (#129)
+- Add `--workers` to `tryke server`
+
+### Bug Fixes
+
+- Prevent watch and server runs from hanging while restarting worker processes
 
 ### Contributors
 

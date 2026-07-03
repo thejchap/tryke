@@ -14,7 +14,7 @@ The pool size depends on the context:
 |---------|---------|
 | `tryke test` | `min(test_count, cpu_count)` |
 | `tryke` / `tryke test --watch` | `cpu_count` |
-| `tryke server` | `cpu_count` |
+| `tryke server` | `cpu_count` (override with `--workers` / `-j`) |
 
 If CPU detection fails, the fallback is 4 workers. Override with `-j` / `--workers`:
 

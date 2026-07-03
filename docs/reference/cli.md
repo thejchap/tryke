@@ -201,6 +201,12 @@ tryke server [OPTIONS]
 
   Increase logging verbosity
 
+- `-j`, `--workers` `<WORKERS>`
+
+  Number of worker processes.
+
+  Defaults to the CPU count. Set to `1` to run tests in a single worker, which is useful when debugging concurrency issues.
+
 ### `tryke test`
 
 Collect and run tests.

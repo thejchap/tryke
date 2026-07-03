@@ -229,6 +229,7 @@ fn main() -> Result<()> {
             exclude,
             include,
             python,
+            workers,
         } => {
             let root_path = root.clone().unwrap_or(env::current_dir()?);
             let excludes = resolved_excludes(&root_path, exclude, include);
@@ -239,7 +240,7 @@ fn main() -> Result<()> {
 
             runtime.block_on(async move {
                 let worker_pool = WorkerPool::spawn(
-                    worker_pool_size(),
+                    workers.unwrap_or_else(worker_pool_size),
                     &resolved_python,
                     &root_path,
                     None,
@@ -667,6 +668,18 @@ mod tests {
                 python: Some(p),
                 ..
             } if p == "/usr/bin/python3.13"
+        ));
+    }
+
+    #[test]
+    fn server_workers_flag_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "server", "--workers", "2"]).unwrap();
+        assert!(matches!(
+            command(&cli),
+            Commands::Server {
+                workers: Some(2),
+                ..
+            }
         ));
     }
 

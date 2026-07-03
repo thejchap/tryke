@@ -192,7 +192,7 @@ pub async fn run_watch(
     let mut discoverer = Discoverer::new(root, src_roots, excludes, cache_dir);
 
     let pool_size = workers.unwrap_or_else(worker_pool_size);
-    let pool = WorkerPool::spawn(pool_size, python, root, None, log_level, false).await;
+    let pool = WorkerPool::spawn(pool_size, python, root, None, log_level, true).await;
 
     run_initial_cycle(
         reporter,

@@ -215,7 +215,10 @@ mod tests {
             .await
             .unwrap();
         let mut line = String::new();
-        time::timeout(Duration::from_secs(2), r.read_line(&mut line))
+        // Generous timeout: the response is gated behind `pool.warm()`
+        // (python worker startup) and initial discovery, which can be
+        // slow on loaded CI hosts.
+        time::timeout(Duration::from_secs(30), r.read_line(&mut line))
             .await
             .unwrap()
             .unwrap();

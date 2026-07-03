@@ -110,13 +110,6 @@ tryke test --reporter json
 
 See the [reporters guide](reporters.md) for all available formats.
 
-## Connecting to a server
+## Server mode
 
-If you have a [tryke server](../concepts/client-server.md) running, connect to it for faster runs:
-
-```bash
-tryke test --port
-tryke test --port 2337
-```
-
-The server keeps Python workers warm between file changes and caches test discovery, so subsequent runs skip startup overhead. When a watched file changes, the workers are restarted (so the new code loads in a fresh interpreter) and immediately re-warmed in parallel.
+Editor plugins get warm workers and cached discovery by spawning a persistent [tryke server](../concepts/client-server.md) and speaking JSON-RPC over its stdio. See the client/server concept doc for the protocol and integration model.

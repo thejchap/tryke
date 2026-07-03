@@ -51,7 +51,7 @@ pub(crate) async fn apply_change(
         // Three filters on the way in. All three are no-ops for the
         // FS watcher caller (it filters upstream); they're a
         // correctness fix for the `did_change` caller, which takes
-        // client-supplied paths over TCP and must defend itself.
+        // client-supplied paths and must defend itself.
         //   1. In-root. Stops `/etc/passwd` and similar from reaching
         //      discovery, where `path_to_module` would otherwise turn
         //      it into a phantom module entry.

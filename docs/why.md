@@ -44,7 +44,7 @@ def create_user():
 
 ### Client/server mode
 
-`tryke server` keeps Python workers alive between runs. Subsequent `tryke test --port 2337` calls skip startup overhead, giving near-instant feedback during development.
+`tryke server` keeps Python workers alive between runs. Editor plugins spawn it as a child process and drive it over stdio JSON-RPC, skipping startup overhead for near-instant feedback during development.
 
 ### Changed-files mode
 

@@ -116,7 +116,6 @@ fn main() -> Result<()> {
             markers,
             reporter,
             root,
-            port,
             changed,
             changed_first,
             base_branch,
@@ -168,27 +167,6 @@ fn main() -> Result<()> {
                     resolved_cache_dir.as_deref(),
                 ));
             }
-            if let Some(p) = port {
-                if cache_dir.is_some() {
-                    return Err(anyhow::anyhow!(
-                        "--cache-dir is not supported with --port; start the server with --cache-dir instead"
-                    ));
-                }
-                if !exclude.is_empty() {
-                    return Err(anyhow::anyhow!(
-                        "--exclude is not supported with --port; start the server with --exclude instead"
-                    ));
-                }
-                let root_path = root.clone().unwrap_or(env::current_dir()?);
-                return tryke_server::Client::new(
-                    *p,
-                    filter.clone(),
-                    paths.clone(),
-                    markers.clone(),
-                )
-                .run(&root_path, &mut *rep);
-            }
-
             let cwd = env::current_dir()?;
             let root_path = root.as_deref().unwrap_or(&cwd);
             let excludes = resolved_excludes(root_path, exclude, include);
@@ -263,7 +241,6 @@ fn main() -> Result<()> {
             }
         }
         Commands::Server {
-            port,
             root,
             exclude,
             include,
@@ -275,7 +252,6 @@ fn main() -> Result<()> {
             let resolved_python = tryke_config::resolve_python(python.as_deref(), &config);
             let resolved_cache_dir = tryke_config::resolve_cache_dir(cache_dir.as_deref(), &config);
             let server = tryke_server::Server::new(
-                *port,
                 root_path,
                 excludes,
                 resolved_python,
@@ -633,12 +609,6 @@ mod tests {
     }
 
     #[test]
-    fn watch_conflicts_with_port() {
-        let result = Cli::try_parse_from(["tryke", "test", "--watch", "--port", "2337"]);
-        assert!(result.is_err(), "--watch and --port should conflict");
-    }
-
-    #[test]
     fn watch_conflicts_with_paths() {
         let result = Cli::try_parse_from(["tryke", "test", "--watch", "tests/foo.py"]);
         assert!(
@@ -664,14 +634,17 @@ mod tests {
 
     #[test]
     fn server_subcommand_parsed() {
-        let cli = Cli::try_parse_from(["tryke", "server", "--port", "9000"]).unwrap();
-        assert!(matches!(command(&cli), Commands::Server { port: 9000, .. }));
+        let cli = Cli::try_parse_from(["tryke", "server"]).unwrap();
+        assert!(matches!(command(&cli), Commands::Server { .. }));
     }
 
     #[test]
-    fn server_default_port() {
-        let cli = Cli::try_parse_from(["tryke", "server"]).unwrap();
-        assert!(matches!(command(&cli), Commands::Server { port: 2337, .. }));
+    fn server_port_flag_removed() {
+        let result = Cli::try_parse_from(["tryke", "server", "--port", "9000"]);
+        assert!(
+            result.is_err(),
+            "`tryke server --port` should no longer exist (server speaks stdio)"
+        );
     }
 
     #[test]
@@ -694,16 +667,6 @@ mod tests {
     }
 
     #[test]
-    fn test_python_conflicts_with_port() {
-        let result =
-            Cli::try_parse_from(["tryke", "test", "--python", "/usr/bin/python3", "--port"]);
-        assert!(
-            result.is_err(),
-            "--python and --port should conflict (server has its own python)"
-        );
-    }
-
-    #[test]
     fn server_python_flag_parsed() {
         let cli =
             Cli::try_parse_from(["tryke", "server", "--python", "/usr/bin/python3.13"]).unwrap();
@@ -717,27 +680,12 @@ mod tests {
     }
 
     #[test]
-    fn test_port_flag_parsed() {
-        let cli = Cli::try_parse_from(["tryke", "test", "--port", "2337"]).unwrap();
-        assert!(matches!(
-            command(&cli),
-            Commands::Test {
-                port: Some(2337),
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_port_flag_defaults_to_2337() {
-        let cli = Cli::try_parse_from(["tryke", "test", "--port"]).unwrap();
-        assert!(matches!(
-            command(&cli),
-            Commands::Test {
-                port: Some(2337),
-                ..
-            }
-        ));
+    fn test_port_flag_removed() {
+        let result = Cli::try_parse_from(["tryke", "test", "--port", "2337"]);
+        assert!(
+            result.is_err(),
+            "`tryke test --port` should no longer exist (server speaks stdio)"
+        );
     }
 
     #[test]

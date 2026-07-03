@@ -6,7 +6,7 @@ use std::{
 use bytes::Bytes;
 use log::{LevelFilter, debug};
 use tokio::{
-    net::TcpListener,
+    io::{AsyncRead, AsyncWrite},
     sync::{Mutex, broadcast},
 };
 use tryke_discovery::Discoverer;
@@ -15,7 +15,6 @@ use tryke_runner::WorkerPool;
 use crate::{change::apply_change, handler::ConnectionHandler, watcher::spawn_watcher};
 
 pub struct Server {
-    port: u16,
     root: PathBuf,
     excludes: Vec<String>,
     cache_dir: Option<PathBuf>,
@@ -26,7 +25,6 @@ pub struct Server {
 impl Server {
     #[must_use]
     pub fn new(
-        port: u16,
         root: PathBuf,
         excludes: Vec<String>,
         python: String,
@@ -34,7 +32,6 @@ impl Server {
         cache_dir: Option<PathBuf>,
     ) -> Self {
         Self {
-            port,
             root,
             excludes,
             cache_dir,
@@ -43,22 +40,27 @@ impl Server {
         }
     }
 
-    /// Bind the server to its configured localhost port and run it.
+    /// Run the server over the process's own stdin/stdout.
+    ///
+    /// The client (typically an editor plugin) spawns `tryke server` as a
+    /// child process and speaks newline-delimited JSON-RPC 2.0 over its
+    /// stdio, LSP-style. Closing stdin shuts the server down cleanly.
     ///
     /// # Errors
-    /// Returns an error if binding the TCP listener fails or if the listener
-    /// loop exits with an error.
+    /// Returns an error if file watching cannot be initialized.
     pub async fn run(self) -> anyhow::Result<()> {
-        let listener = TcpListener::bind(("127.0.0.1", self.port)).await?;
-        self.run_on_listener(listener).await
+        self.run_on(tokio::io::stdin(), tokio::io::stdout()).await
     }
 
-    /// Run the server on an existing listener.
+    /// Run the server over an arbitrary reader/writer pair.
     ///
     /// # Errors
-    /// Returns an error if file watching cannot be initialized or if accepting
-    /// a TCP connection fails.
-    pub async fn run_on_listener(self, listener: TcpListener) -> anyhow::Result<()> {
+    /// Returns an error if file watching cannot be initialized.
+    pub async fn run_on<R, W>(self, reader: R, writer: W) -> anyhow::Result<()>
+    where
+        R: AsyncRead + Unpin,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
         let size = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
         let pool = Arc::new(WorkerPool::new(
             size,
@@ -69,7 +71,7 @@ impl Server {
         pool.warm().await;
 
         // Held across the full duration of a single `run` so concurrent
-        // clients don't interleave test execution on the shared pool.
+        // run requests don't interleave test execution on the shared pool.
         let run_lock = Arc::new(Mutex::new(()));
 
         // Set by the watcher whenever a real file change is accepted;
@@ -91,7 +93,7 @@ impl Server {
         disc.lock().await.rediscover();
 
         let (std_tx, std_rx) = std::sync::mpsc::channel::<Vec<std::path::PathBuf>>();
-        let _debouncer = spawn_watcher(&self.root, &self.excludes, std_tx)?;
+        let debouncer = spawn_watcher(&self.root, &self.excludes, std_tx)?;
 
         // Bridge blocking std receiver to async tokio channel
         let (watcher_tx, mut watcher_rx) = tokio::sync::mpsc::channel::<Vec<PathBuf>>(64);
@@ -143,29 +145,28 @@ impl Server {
             }
         });
 
-        loop {
-            let (stream, addr) = listener.accept().await?;
-            debug!("accepted connection from {addr}");
-            let bcast_rx = bcast_tx.subscribe();
-            let bcast_tx_conn = bcast_tx.clone();
-            let disc_conn = Arc::clone(&disc);
-            let pool_conn = Arc::clone(&pool);
-            let run_lock_conn = Arc::clone(&run_lock);
-            let dirty_conn = Arc::clone(&dirty);
-            tokio::spawn(async move {
-                ConnectionHandler::new(
-                    stream,
-                    disc_conn,
-                    bcast_rx,
-                    bcast_tx_conn,
-                    pool_conn,
-                    run_lock_conn,
-                    dirty_conn,
-                )
-                .run()
-                .await;
-            });
+        debug!("server: session started");
+        ConnectionHandler::new(
+            reader,
+            writer,
+            Arc::clone(&disc),
+            bcast_tx.subscribe(),
+            bcast_tx.clone(),
+            Arc::clone(&pool),
+            run_lock,
+            dirty,
+        )
+        .run()
+        .await;
+        debug!("server: session input closed — shutting down");
+
+        // Stop the FS watcher before tearing down the pool so no late
+        // change batch races the shutdown.
+        drop(debouncer);
+        if let Ok(pool) = Arc::try_unwrap(pool) {
+            pool.shutdown();
         }
+        Ok(())
     }
 }
 
@@ -177,41 +178,44 @@ mod tests {
 
     use log::LevelFilter;
     use tokio::{
-        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-        net::{TcpListener, TcpStream},
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, ReadHalf, WriteHalf},
         time,
     };
     use tryke_testing::python_bin as test_python_bin;
 
     use super::*;
 
-    async fn start_server() -> (u16, tempfile::TempDir) {
+    type ClientWriter = WriteHalf<DuplexStream>;
+    type ClientReader = BufReader<ReadHalf<DuplexStream>>;
+
+    /// Spawn a server over an in-memory duplex pipe and return the client
+    /// halves of the session, mirroring how an editor owns the stdio of a
+    /// spawned `tryke server` child.
+    fn start_server() -> (ClientWriter, ClientReader, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
         let root = dir.path().to_path_buf();
         let python = test_python_bin();
+        let (client, server_side) = tokio::io::duplex(1 << 16);
+        let (server_r, server_w) = tokio::io::split(server_side);
         tokio::spawn(async move {
-            Server::new(port, root, vec![], python, LevelFilter::Off, None)
-                .run_on_listener(listener)
+            Server::new(root, vec![], python, LevelFilter::Off, None)
+                .run_on(server_r, server_w)
                 .await
-                .unwrap();
+                .expect("server run");
         });
-        (port, dir)
+        let (client_r, client_w) = tokio::io::split(client);
+        (client_w, BufReader::new(client_r), dir)
     }
 
     #[tokio::test]
     async fn ping_pong() {
-        let (port, _dir) = start_server().await;
-        let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-        stream
-            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n")
+        let (mut w, mut r, _dir) = start_server();
+        w.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n")
             .await
             .unwrap();
-        let mut reader = BufReader::new(&mut stream);
         let mut line = String::new();
-        time::timeout(Duration::from_secs(2), reader.read_line(&mut line))
+        time::timeout(Duration::from_secs(2), r.read_line(&mut line))
             .await
             .unwrap()
             .unwrap();
@@ -220,23 +224,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multi_client_both_receive_broadcast() {
-        let (port, _dir) = start_server().await;
-
-        let mut c1 = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-        let mut c2 = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-
-        let run_req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"run\",\"params\":{\"root\":\"/ignored\",\"tests\":null,\"run_id\":\"r1\"}}\n";
-        c1.write_all(run_req.as_bytes()).await.unwrap();
-
-        let mut r2 = BufReader::new(&mut c2);
-        let mut line2 = String::new();
-        time::timeout(Duration::from_secs(5), r2.read_line(&mut line2))
+    async fn stdin_eof_shuts_server_down() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        let root = dir.path().to_path_buf();
+        let python = test_python_bin();
+        let (client, server_side) = tokio::io::duplex(1 << 16);
+        let (server_r, server_w) = tokio::io::split(server_side);
+        let handle = tokio::spawn(async move {
+            Server::new(root, vec![], python, LevelFilter::Off, None)
+                .run_on(server_r, server_w)
+                .await
+        });
+        // Closing the client end delivers EOF on the server's input —
+        // the LSP-style shutdown signal.
+        drop(client);
+        let result = time::timeout(Duration::from_secs(30), handle)
             .await
-            .unwrap()
-            .unwrap();
-        let v2: serde_json::Value = serde_json::from_str(line2.trim()).unwrap();
-        assert!(v2.get("method").is_some(), "c2 should receive a broadcast");
+            .expect("server must shut down after EOF")
+            .expect("server task must not panic");
+        assert!(
+            result.is_ok(),
+            "server must exit cleanly on EOF: {result:?}"
+        );
     }
 
     fn match_body(value: &str) -> String {
@@ -256,7 +266,7 @@ mod tests {
 
     /// Read JSON-RPC lines from `r` until one with an `id` field (the
     /// response — notifications have no `id`).
-    async fn read_response(r: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -> serde_json::Value {
+    async fn read_response(r: &mut ClientReader) -> serde_json::Value {
         loop {
             let mut line = String::new();
             time::timeout(Duration::from_secs(30), r.read_line(&mut line))
@@ -270,17 +280,14 @@ mod tests {
         }
     }
 
-    /// Send `did_change` then `run` on the SAME TCP connection — the
-    /// invariant that makes the in-band approach race-free.
+    /// Send `did_change` then `run` on the SAME session — the invariant
+    /// that makes the in-band approach race-free.
     async fn did_change_then_run(
-        port: u16,
+        w: &mut ClientWriter,
+        r: &mut ClientReader,
         file: &std::path::Path,
         rid: &str,
     ) -> serde_json::Value {
-        let s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-        let (read, mut write) = s.into_split();
-        let mut r = BufReader::new(read);
-
         // serde_json::to_string handles JSON escaping (Windows
         // backslashes in the path would otherwise produce invalid JSON).
         let mut dc = serde_json::to_string(&serde_json::json!({
@@ -291,27 +298,24 @@ mod tests {
         }))
         .unwrap();
         dc.push('\n');
-        write.write_all(dc.as_bytes()).await.unwrap();
-        let _dc_resp = read_response(&mut r).await;
+        w.write_all(dc.as_bytes()).await.unwrap();
+        let _dc_resp = read_response(r).await;
 
         let run = format!(
             "{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"run\",\"params\":{{\"run_id\":\"{rid}\"}}}}\n"
         );
-        write.write_all(run.as_bytes()).await.unwrap();
-        read_response(&mut r).await
+        w.write_all(run.as_bytes()).await.unwrap();
+        read_response(r).await
     }
 
     /// Send `run` only (no `did_change`) — simulates a non-cooperating
     /// client. Used to verify the FS-watcher fallback path.
-    async fn run_only(port: u16, rid: &str) -> serde_json::Value {
-        let s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-        let (read, mut write) = s.into_split();
-        let mut r = BufReader::new(read);
+    async fn run_only(w: &mut ClientWriter, r: &mut ClientReader, rid: &str) -> serde_json::Value {
         let run = format!(
             "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"run\",\"params\":{{\"run_id\":\"{rid}\"}}}}\n"
         );
-        write.write_all(run.as_bytes()).await.unwrap();
-        read_response(&mut r).await
+        w.write_all(run.as_bytes()).await.unwrap();
+        read_response(r).await
     }
 
     /// Regression: a `run` issued *immediately* after a save (no sleep
@@ -327,7 +331,7 @@ mod tests {
     /// the file is now "st" on disk.
     #[tokio::test]
     async fn run_after_did_change_uses_fresh_module() {
-        let (port, dir) = start_server().await;
+        let (mut w, mut r, dir) = start_server();
         let test_file = dir.path().join("test_match.py");
 
         fs::write(&test_file, match_body("set")).unwrap();
@@ -339,7 +343,7 @@ mod tests {
         // Phase 1 — every worker imports the "set" body.
         for i in 0..16 {
             fs::write(&test_file, match_body("set")).unwrap();
-            let resp = did_change_then_run(port, &test_file, &format!("set{i}")).await;
+            let resp = did_change_then_run(&mut w, &mut r, &test_file, &format!("set{i}")).await;
             let summary = &resp["result"]["summary"];
             let passed = summary["passed"].as_u64().unwrap_or(0);
             assert_eq!(
@@ -354,7 +358,7 @@ mod tests {
         // `dirty` → drain is here to prevent.
         for i in 0..16 {
             fs::write(&test_file, match_body("st")).unwrap();
-            let resp = did_change_then_run(port, &test_file, &format!("st{i}")).await;
+            let resp = did_change_then_run(&mut w, &mut r, &test_file, &format!("st{i}")).await;
             let summary = &resp["result"]["summary"];
             let passed = summary["passed"].as_u64().unwrap_or(0);
             let failed = summary["failed"].as_u64().unwrap_or(0);
@@ -375,12 +379,12 @@ mod tests {
     /// removed it.
     #[tokio::test]
     async fn run_only_falls_back_to_fs_watcher() {
-        let (port, dir) = start_server().await;
+        let (mut w, mut r, dir) = start_server();
         let test_file = dir.path().join("test_match.py");
 
         fs::write(&test_file, match_body("set")).unwrap();
         time::sleep(Duration::from_millis(300)).await;
-        let resp = run_only(port, "warm").await;
+        let resp = run_only(&mut w, &mut r, "warm").await;
         assert_eq!(
             resp["result"]["summary"]["passed"].as_u64().unwrap_or(0),
             1,
@@ -393,7 +397,7 @@ mod tests {
         // process the change and mark dirty. Non-cooperating clients
         // accept this latency.
         time::sleep(Duration::from_millis(300)).await;
-        let resp = run_only(port, "after_save").await;
+        let resp = run_only(&mut w, &mut r, "after_save").await;
         let summary = &resp["result"]["summary"];
         let passed = summary["passed"].as_u64().unwrap_or(0);
         let failed = summary["failed"].as_u64().unwrap_or(0);

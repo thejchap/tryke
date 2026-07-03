@@ -11,8 +11,7 @@ use bytes::Bytes;
 use log::debug;
 use serde_json::Value;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
-    net::TcpStream,
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter},
     sync::{Mutex, broadcast},
 };
 use tokio_stream::StreamExt;
@@ -26,8 +25,9 @@ use crate::protocol::{
     RunResponse, RunStartParams, TestCompleteParams,
 };
 
-pub struct ConnectionHandler {
-    stream: TcpStream,
+pub struct ConnectionHandler<R, W> {
+    reader: R,
+    writer: W,
     disc: Arc<tokio::sync::Mutex<tryke_discovery::Discoverer>>,
     broadcast_rx: broadcast::Receiver<Bytes>,
     broadcast_tx: broadcast::Sender<Bytes>,
@@ -43,9 +43,18 @@ pub struct ConnectionHandler {
     dirty: Arc<AtomicBool>,
 }
 
-impl ConnectionHandler {
+impl<R, W> ConnectionHandler<R, W>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    // Splitting the transport into reader + writer halves costs one
+    // argument over clippy's limit; the alternatives (a transport pair
+    // tuple or a context struct) just move the same values around.
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
-        stream: TcpStream,
+        reader: R,
+        writer: W,
         disc: Arc<tokio::sync::Mutex<tryke_discovery::Discoverer>>,
         broadcast_rx: broadcast::Receiver<Bytes>,
         broadcast_tx: broadcast::Sender<Bytes>,
@@ -54,7 +63,8 @@ impl ConnectionHandler {
         dirty: Arc<AtomicBool>,
     ) -> Self {
         Self {
-            stream,
+            reader,
+            writer,
             disc,
             broadcast_rx,
             broadcast_tx,
@@ -65,12 +75,11 @@ impl ConnectionHandler {
     }
 
     pub async fn run(self) {
-        let (read_half, write_half) = self.stream.into_split();
-        let writer = Arc::new(Mutex::new(BufWriter::new(write_half)));
+        let writer = Arc::new(Mutex::new(BufWriter::new(self.writer)));
 
         let writer_for_notif = Arc::clone(&writer);
         let mut bcast_rx = self.broadcast_rx;
-        tokio::spawn(async move {
+        let pump = tokio::spawn(async move {
             loop {
                 match bcast_rx.recv().await {
                     Ok(bytes) => {
@@ -85,7 +94,7 @@ impl ConnectionHandler {
             }
         });
 
-        let mut reader = BufReader::new(read_half);
+        let mut reader = BufReader::new(self.reader);
         let mut line = String::new();
         loop {
             line.clear();
@@ -110,6 +119,10 @@ impl ConnectionHandler {
                 }
             }
         }
+        // EOF on the session's input means the client is gone (LSP
+        // convention). Stop the notification pump so the server's run
+        // future can resolve instead of waiting on the broadcast channel.
+        pump.abort();
     }
 }
 
@@ -183,12 +196,12 @@ async fn execute_run(
     //   - the FS watcher task (server.rs) on an accepted file-change
     //     batch, for non-cooperating clients; and
     //   - the `did_change` RPC handler (below), for cooperating clients
-    //     (neotest-tryke sends `did_change` on the same TCP connection
+    //     (neotest-tryke sends `did_change` on the same session
     //     immediately before `run`).
     // Cooperating clients are also guaranteed to see `dirty=true`
-    // because per-connection reads are serial (handler.rs:72-92): the
+    // because per-session reads are serial (handler.rs:72-92): the
     // `did_change` handler's `apply_change` completes before the `run`
-    // line is even read off the socket.
+    // line is even read off the stream.
     let discovery_start = Instant::now();
     let (dirty_was_set, all_tests, hooks) = {
         let guard = disc.lock().await;
@@ -319,8 +332,8 @@ pub async fn handle_request(
             // In-band signal from a cooperating client (e.g. neotest-tryke's
             // BufWritePost autocmd) that the listed paths just changed on
             // disk. Refresh discovery and mark `dirty` synchronously, so a
-            // subsequent `run` on the *same TCP connection* is guaranteed
-            // to drain a `true` flag and restart the worker pool before
+            // subsequent `run` on the *same session* is guaranteed to
+            // drain a `true` flag and restart the worker pool before
             // dispatch. See `crate::change::apply_change` for the shared
             // body (also called by the FS watcher task).
             let Some(params) = req.params else {
@@ -369,11 +382,9 @@ pub async fn handle_request(
                 // `Discoverer::rediscover_changed` (inside apply_change)
                 // already canonicalises and drops anything outside its
                 // project root, so we can pass client-supplied paths
-                // through without an extra filter. The server binds to
-                // 127.0.0.1 but any local process can still reach it;
-                // pushing the root check into discovery keeps the
-                // guarantee in the single place that owns the project
-                // tree.
+                // through without an extra filter. Pushing the root check
+                // into discovery keeps the guarantee in the single place
+                // that owns the project tree.
                 crate::change::apply_change(disc, bcast_tx, dirty, &dc.paths).await;
             }
             serialize_response(id, "ok")
@@ -409,14 +420,13 @@ pub async fn handle_request(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, sync::Arc};
+    use std::{fs, sync::Arc, time::Duration};
 
     use bytes::Bytes;
     use log::LevelFilter;
     use tokio::{
-        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-        net::{TcpListener, TcpStream},
         sync::{Mutex, broadcast},
+        time,
     };
     use tryke_discovery::Discoverer;
     use tryke_runner::WorkerPool;
@@ -739,8 +749,7 @@ mod tests {
 
     #[tokio::test]
     async fn did_change_ignores_paths_outside_root() {
-        // Defence-in-depth: the server binds to 127.0.0.1 but any local
-        // process can still reach it. `did_change` MUST refuse to refresh
+        // Defence-in-depth: `did_change` MUST refuse to refresh
         // discovery for files outside the configured project root —
         // otherwise a hostile client could pollute the import graph or
         // trigger arbitrary file parses.
@@ -1014,67 +1023,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn two_clients_both_receive_broadcast() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+    async fn session_receives_broadcast_and_response() {
+        // A single session must see BOTH the run notifications (pumped
+        // from the broadcast channel) and the id-bearing response,
+        // interleaved on the same stream.
         let dir = make_root();
         let disc = Arc::new(Mutex::new(Discoverer::new(dir.path())));
-        let pool = Arc::new(WorkerPool::new(
-            1,
-            "python3",
-            std::path::Path::new("."),
-            LevelFilter::Off,
-        ));
-
+        let pool = make_pool();
         let (bcast_tx, _) = broadcast::channel::<Bytes>(64);
-        let bcast_tx_clone = bcast_tx.clone();
-        let disc_clone = Arc::clone(&disc);
-        let pool_clone = Arc::clone(&pool);
-
         let run_lock = make_run_lock();
-        let run_lock_clone = Arc::clone(&run_lock);
         let dirty = make_dirty();
-        let dirty_clone = Arc::clone(&dirty);
+
+        let (client, server_side) = tokio::io::duplex(1 << 16);
+        let (server_r, server_w) = tokio::io::split(server_side);
+        let bcast_rx = bcast_tx.subscribe();
         tokio::spawn(async move {
-            for _ in 0..2u8 {
-                let (stream, _) = listener.accept().await.unwrap();
-                let bcast_rx = bcast_tx_clone.subscribe();
-                let bcast_tx_conn = bcast_tx_clone.clone();
-                let d = Arc::clone(&disc_clone);
-                let p = Arc::clone(&pool_clone);
-                let rl = Arc::clone(&run_lock_clone);
-                let dy = Arc::clone(&dirty_clone);
-                tokio::spawn(async move {
-                    ConnectionHandler::new(stream, d, bcast_rx, bcast_tx_conn, p, rl, dy)
-                        .run()
-                        .await;
-                });
-            }
+            ConnectionHandler::new(
+                server_r, server_w, disc, bcast_rx, bcast_tx, pool, run_lock, dirty,
+            )
+            .run()
+            .await;
         });
 
-        let mut c1 = TcpStream::connect(addr).await.unwrap();
-        let mut c2 = TcpStream::connect(addr).await.unwrap();
-
+        let (client_r, mut client_w) = tokio::io::split(client);
         let run_req = r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"root":"/ignored","tests":null,"run_id":"r1"}}"#;
-        c1.write_all(format!("{run_req}\n").as_bytes())
+        client_w
+            .write_all(format!("{run_req}\n").as_bytes())
             .await
             .unwrap();
 
-        let mut r1 = BufReader::new(&mut c1);
-        let mut r2 = BufReader::new(&mut c2);
-        let mut line1 = String::new();
-        let mut line2 = String::new();
-
-        // C1 should receive the run response
-        r1.read_line(&mut line1).await.unwrap();
-        let v1: serde_json::Value = serde_json::from_str(line1.trim()).unwrap();
-        // C2 should receive a broadcast notification
-        r2.read_line(&mut line2).await.unwrap();
-        let v2: serde_json::Value = serde_json::from_str(line2.trim()).unwrap();
-
-        // C1 gets a notification or response, c2 gets a notification
-        assert!(v1.get("method").is_some() || v1.get("result").is_some());
-        assert!(v2.get("method").is_some());
+        // The response is written by the request path and notifications
+        // by the pump task; they share a writer lock but not an order.
+        // Keep reading until we've seen both.
+        let mut reader = BufReader::new(client_r);
+        let mut saw_notification = false;
+        let mut response: Option<serde_json::Value> = None;
+        while !saw_notification || response.is_none() {
+            let mut line = String::new();
+            time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
+                .await
+                .expect("session went quiet before notification + response arrived")
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+            if v.get("method").is_some() {
+                saw_notification = true;
+            } else if v.get("id").is_some() {
+                response = Some(v);
+            }
+        }
+        let response = response.expect("loop exits only once the response is seen");
+        assert_eq!(response["result"]["run_id"], "r1");
     }
 
     #[tokio::test]

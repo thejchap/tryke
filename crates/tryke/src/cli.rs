@@ -161,16 +161,6 @@ pub enum Commands {
         #[arg(long)]
         root: Option<PathBuf>,
 
-        /// Run against an already-running `tryke server` instead of spawning
-        /// fresh workers.
-        ///
-        /// Pass `--port` alone to use the default `2337`, or `--port 9000`
-        /// to target a specific port. The server keeps workers pre-warmed
-        /// and the import graph cached, so this is significantly faster for
-        /// repeated runs.
-        #[arg(long, default_missing_value = "2337", num_args = 0..=1, require_equals = false, conflicts_with = "watch")]
-        port: Option<u16>,
-
         /// Run only tests affected by uncommitted changes.
         ///
         /// Uses `git diff` to find changed `.py` files, then walks the
@@ -259,26 +249,20 @@ pub enum Commands {
         /// `pyproject.toml`, not the cwd. Bare names (`python3`, `pypy`)
         /// are looked up via `PATH`. See the `Configuration` guide for
         /// the full resolution rules.
-        ///
-        /// Not compatible with `--port`; configure the interpreter on
-        /// the server instead.
-        #[arg(long, conflicts_with = "port")]
+        #[arg(long)]
         python: Option<String>,
     },
 
-    /// Start a persistent worker server.
+    /// Start a persistent worker server speaking JSON-RPC over stdio.
     ///
-    /// Spawns and pre-warms the worker pool, runs initial discovery, and
-    /// listens on `127.0.0.1:<port>` for JSON-RPC 2.0 requests. Clients
-    /// connect with `tryke test --port` to run tests without paying the
-    /// cold-start cost. The server also watches the filesystem and
-    /// broadcasts `discover_complete` notifications when the test list
+    /// Spawns and pre-warms the worker pool, runs initial discovery, then
+    /// reads newline-delimited JSON-RPC 2.0 requests from stdin and writes
+    /// responses and notifications to stdout, LSP-style. Editor plugins
+    /// spawn `tryke server` as a child process and own its stdio; closing
+    /// stdin shuts the server down. The server also watches the filesystem
+    /// and emits `discover_complete` notifications when the test list
     /// changes.
     Server {
-        /// Port for the server to listen on.
-        #[arg(long, default_value = "2337")]
-        port: u16,
-
         /// Project root used for discovery and execution.
         #[arg(long)]
         root: Option<PathBuf>,
@@ -370,7 +354,6 @@ impl Commands {
             markers: None,
             reporter: ReporterFormat::Text,
             root: None,
-            port: None,
             changed: false,
             changed_first: false,
             base_branch: None,

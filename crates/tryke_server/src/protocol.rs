@@ -56,11 +56,6 @@ impl fmt::Display for NotificationMethod {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct DiscoverParams {
-    pub root: PathBuf,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct DidChangeParams {
     pub paths: Vec<PathBuf>,
 }
@@ -197,10 +192,13 @@ mod tests {
 
     #[test]
     fn deserializes_discover_request() {
-        let json = r#"{"jsonrpc":"2.0","id":2,"method":"discover","params":{"root":"/tmp"}}"#;
+        // `discover` carries no parameters; the request must still
+        // deserialize whether or not a client supplies a `params` field.
+        let json = r#"{"jsonrpc":"2.0","id":2,"method":"discover"}"#;
         let req: Request = serde_json::from_str(json).unwrap();
-        let params: DiscoverParams = serde_json::from_value(req.params.unwrap()).unwrap();
-        assert_eq!(params.root, PathBuf::from("/tmp"));
+        assert_eq!(req.method, RequestMethod::Discover);
+        assert!(req.id.is_some());
+        assert!(req.params.is_none());
     }
 
     #[test]

@@ -15,9 +15,9 @@ use tryke_types::filter::TestFilter;
 use tryke_types::{RunSummary, TestItem, TestOutcome};
 
 use crate::protocol::{
-    DidChangeParams, DiscoverCompleteParams, DiscoverParams, ErrorResponse, INVALID_PARAMS,
-    METHOD_NOT_FOUND, Notification, NotificationMethod, Request, RequestMethod, Response,
-    RunCompleteParams, RunParams, RunResponse, RunStartParams, TestCompleteParams,
+    DidChangeParams, DiscoverCompleteParams, ErrorResponse, INVALID_PARAMS, METHOD_NOT_FOUND,
+    Notification, NotificationMethod, Request, RequestMethod, Response, RunCompleteParams,
+    RunParams, RunResponse, RunStartParams, TestCompleteParams,
 };
 
 /// Manages communication with a client over the given reader/writer
@@ -378,10 +378,6 @@ async fn execute_run(
 ///
 /// # Errors
 /// Returns an error if an outbound message cannot be serialized or queued.
-#[expect(
-    clippy::too_many_lines,
-    reason = "Keeping JSON-RPC method dispatch together makes the protocol flow easier to audit."
-)]
 pub async fn handle_request(
     line: &str,
     discoverer: &tokio::sync::Mutex<tryke_discovery::Discoverer>,
@@ -397,12 +393,11 @@ pub async fn handle_request(
     let response = match &req.method {
         RequestMethod::Ping => Response::new(id, "pong").into_json_line()?,
         RequestMethod::Discover => {
-            let Some(params) = req.params else {
-                return Ok(None);
-            };
-            let Ok(_params) = serde_json::from_value::<DiscoverParams>(params) else {
-                return Ok(None);
-            };
+            // `discover` takes no parameters — the server already knows
+            // its own project root. Any `params` a client sends are
+            // ignored rather than validated, so a malformed or absent
+            // `params` can never drop the response and hang a client
+            // that supplied an `id`.
             let tests = discoverer.lock().await.rediscover();
             send_notification(
                 outbound_tx,
@@ -679,6 +674,36 @@ mod tests {
         .unwrap()
         .expect("request should return a response");
         let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert!(val["result"]["tests"].is_array());
+    }
+
+    #[tokio::test]
+    async fn discover_without_params_returns_tests() {
+        // Regression: `discover` must answer even when the client omits
+        // `params`. It carries no parameters, so a missing `params` field
+        // must not drop the response (which would hang a client that sent
+        // an `id`).
+        let dir = make_root();
+        fs::write(dir.path().join("test_x.py"), "@test\ndef test_x(): pass\n")
+            .expect("write test file");
+        let (tx, _rx) = mpsc::channel(16);
+        let root = dir.path();
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
+        let pool = make_pool().await;
+        let run_lock = make_run_lock();
+        let resp = handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"discover"}"#,
+            &disc,
+            &tx,
+            &pool,
+            &run_lock,
+        )
+        .await
+        .unwrap()
+        .expect("discover without params must return a response");
+        let val: serde_json::Value = serde_json::from_slice(&resp).unwrap();
+        assert_eq!(val["id"], 1);
         assert!(val["result"]["tests"].is_array());
     }
 

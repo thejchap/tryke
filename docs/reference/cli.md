@@ -153,7 +153,7 @@ tryke graph [OPTIONS]
 
 Start a persistent worker server speaking JSON-RPC over stdio.
 
-Prepares the worker pool, runs initial discovery, then reads newline-delimited JSON-RPC 2.0 requests from stdin and writes responses and notifications to stdout, LSP-style. Each run uses fresh worker processes. Editor plugins spawn `tryke server` as a child process and own its stdio; closing stdin shuts the server down. The server also watches the filesystem and emits `discover_complete` notifications when the test list changes.
+Prepares the worker pool, runs initial discovery, then reads JSON-RPC 2.0 requests from stdin and writes responses and notifications to stdout. Messages are newline-delimited — one JSON object per line — not LSP's `Content-Length` framing. Each run uses fresh worker processes. Like a language server, editor plugins spawn `tryke server` as a child process and own its stdio; closing stdin shuts the server down. The server also watches the filesystem and emits `discover_complete` notifications when the test list changes.
 
 **Usage:**
 

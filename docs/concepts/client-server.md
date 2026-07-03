@@ -18,7 +18,7 @@ It then reads requests from stdin and writes responses and notifications to stdo
 
 ## Protocol
 
-The server speaks JSON-RPC 2.0 over stdin/stdout with newline-delimited messages: one JSON object per line.
+The server speaks JSON-RPC 2.0 over stdin/stdout with newline-delimited messages: one JSON object per line, terminated by `\n`. This is *not* LSP's `Content-Length`-header framing — plugins should split on newlines, not parse content-length headers.
 
 ### Request/response
 

@@ -30,10 +30,85 @@
   --tab-icon: url("../assets/icons/file-code.svg");
 }
 
+/* Home page hero. */
+.tryke-hero {
+  padding: 4.5rem 1rem;
+  background:
+    radial-gradient(circle at 50% 0%, rgb(30 130 120 / 35%), transparent 42%),
+    #064b47;
+}
+
+.tryke-hero__content {
+  max-width: 42rem;
+  margin: 0 auto;
+  text-align: center;
+}
+
+.tryke-hero__eyebrow {
+  margin: 0 0 0.8rem;
+  color: rgb(188 240 233 / 85%);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.tryke-hero__content h1 {
+  margin: 0;
+  color: #fff;
+  font-size: clamp(2.25rem, 6vw, 3.4rem);
+  font-weight: 500;
+  letter-spacing: -0.045em;
+  line-height: 1.08;
+}
+
+.tryke-hero__lead {
+  max-width: 36rem;
+  margin: 1.2rem auto 0;
+  color: rgb(255 255 255 / 75%);
+  font-size: 1.08rem;
+  line-height: 1.65;
+}
+
+.tryke-hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  justify-content: center;
+  margin-top: 1.75rem;
+}
+
+.tryke-hero .md-button {
+  min-width: 7.5rem;
+  color: #fff;
+  border-color: rgb(255 255 255 / 80%);
+}
+
+.tryke-hero .md-button:hover,
+.tryke-hero .md-button:focus {
+  color: #fff;
+  background: rgb(255 255 255 / 12%);
+  border-color: #fff;
+}
+
+.tryke-hero .md-button--primary {
+  color: #064b47;
+  background: #fff;
+  border-color: #fff;
+}
+
+.tryke-hero .md-button--primary:hover,
+.tryke-hero .md-button--primary:focus {
+  color: #064b47;
+  background: rgb(255 255 255 / 85%);
+  border-color: rgb(255 255 255 / 85%);
+}
+
 /* Demoted shields.io badges below the hero. */
 .md-badges {
-  margin-top: 1.25rem;
-  opacity: 0.8;
+  margin: 0.5rem 0 1.5rem;
+  text-align: center;
+  opacity: 0.78;
 }
 
 .md-badges a {
@@ -42,14 +117,13 @@
   border-bottom: none;
 }
 
-/* Highlights list icons. The icon class travels with each <li> so
-   reordering the list does not require touching CSS. */
+/* Feature card icons. */
 .hl-icon {
   display: inline-block;
-  width: 1.1em;
-  height: 1.1em;
-  margin-right: 0.5em;
-  vertical-align: -0.2em;
+  width: 1.25em;
+  height: 1.25em;
+  margin-right: 0.45em;
+  vertical-align: -0.25em;
   background-color: var(--md-primary-fg-color);
   -webkit-mask: var(--hl-icon) center / contain no-repeat;
   mask: var(--hl-icon) center / contain no-repeat;
@@ -72,20 +146,60 @@
 .hl-icon-marks       { --hl-icon: url("../assets/icons/tag.svg"); }
 .hl-icon-describe    { --hl-icon: url("../assets/icons/folder-tree.svg"); }
 
-/* Drop bullet markers on the highlights list since icons replace them.
-   Material's content rules use a higher-specificity selector so qualify
-   ours with `ul.md-highlights` to win. */
-ul.md-highlights {
-  list-style: none;
-  padding-left: 0;
-  margin-left: 0;
+.tryke-feature-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+  margin: 0 0 3rem;
 }
 
-ul.md-highlights > li {
-  margin-bottom: 0.4em;
-  list-style: none;
+.tryke-feature-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 1.2rem;
+  border: 0.05rem solid var(--md-default-fg-color--lightest);
+  border-radius: 0.2rem;
+  box-shadow: 0 0.1rem 0.2rem rgb(0 0 0 / 7%);
+  transition:
+    border-color 125ms,
+    box-shadow 125ms,
+    transform 125ms;
 }
 
-ul.md-highlights > li::marker {
-  content: "";
+.tryke-feature-card:hover {
+  border-color: var(--md-accent-fg-color);
+  box-shadow: 0 0.2rem 0.5rem rgb(0 0 0 / 12%);
+  transform: translateY(-0.05rem);
+}
+
+.tryke-feature-card h2 {
+  margin: 0;
+  color: var(--md-default-fg-color);
+  font-size: 0.9rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.4;
+}
+
+.tryke-feature-card p {
+  flex: 1;
+  margin: 0.75rem 0;
+  padding-top: 0.75rem;
+  border-top: 0.05rem solid var(--md-default-fg-color--lightest);
+  color: var(--md-default-fg-color--light);
+}
+
+.tryke-feature-card > a {
+  font-weight: 600;
+}
+
+@media screen and (max-width: 44.984375rem) {
+  .tryke-hero {
+    padding: 3.25rem 1rem;
+  }
+
+  .tryke-feature-grid {
+    grid-template-columns: 1fr;
+  }
 }

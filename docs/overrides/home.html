@@ -1,0 +1,32 @@
+{% extends "main.html" %}
+
+{% block tabs %}
+  {{ super() }}
+  <section class="tryke-hero">
+    <div class="md-grid md-typeset">
+      <div class="tryke-hero__content">
+        <p class="tryke-hero__eyebrow">Rust-powered Python testing</p>
+        <h1>A delightful test framework for Python</h1>
+        <p class="tryke-hero__lead">
+          Tryke is a concurrent test runner with a Jest-style API, precise diagnostics,
+          native async support, and a fast feedback loop.
+        </p>
+        <div class="tryke-hero__actions">
+          <a
+            href="{{ 'guides/installation.html' | url }}"
+            class="md-button md-button--primary"
+          >
+            Get started
+          </a>
+          <a href="https://playground.tryke.dev" class="md-button">
+            Try the playground
+          </a>
+        </div>
+      </div>
+    </div>
+  </section>
+{% endblock %}
+
+{% block content %}
+  {{ page.content }}
+{% endblock %}

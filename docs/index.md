@@ -1,6 +1,11 @@
-# Tryke
-
-A Rust-based Python test runner with a Jest-style API.
+---
+template: home.html
+title: Home
+description: A Rust-based Python test runner with a Jest-style API.
+hide:
+  - navigation
+  - toc
+---
 
 <p class="md-badges">
   <a href="https://github.com/astral-sh/ruff">
@@ -23,99 +28,94 @@ A Rust-based Python test runner with a Jest-style API.
   </a>
 </p>
 
-<video src="https://github.com/user-attachments/assets/354e21a4-b49f-4e93-a052-df98c0dfc3ae" controls muted style="max-width: 100%; max-height: 640px;"></video>
+<div class="tryke-feature-grid">
+  <article class="tryke-feature-card">
+    <h2><span class="hl-icon hl-icon-fast"></span>Fast discovery</h2>
+    <p>Let Rust find your Python tests quickly, with cached discovery built for tight feedback loops.</p>
+    <a href="concepts/discovery.html">How discovery works <span aria-hidden="true">→</span></a>
+  </article>
 
-## Highlights
+  <article class="tryke-feature-card">
+    <h2><span class="hl-icon hl-icon-concurrent"></span>Concurrent by default</h2>
+    <p>Run independent tests in parallel without opting into a separate plugin or changing your suite.</p>
+    <a href="concepts/concurrency.html">Concurrency model <span aria-hidden="true">→</span></a>
+  </article>
 
-<ul class="md-highlights">
-  <li><span class="hl-icon hl-icon-fast"></span><a href="concepts/discovery.html">Fast</a> Rust-powered test discovery</li>
-  <li><span class="hl-icon hl-icon-concurrent"></span>Concurrent tests by default</li>
-  <li><span class="hl-icon hl-icon-pretty"></span>Pretty, per-assertion diagnostics</li>
-  <li><span class="hl-icon hl-icon-soft"></span><a href="concepts/soft-assertions.html">Soft assertions</a> (like <a href="https://github.com/okken/pytest-check">pytest-check</a>)</li>
-  <li><span class="hl-icon hl-icon-async"></span>Native <code>async</code> support — no plugin</li>
-  <li><span class="hl-icon hl-icon-watch"></span><a href="guides/watch-mode.html">Watch mode</a></li>
-  <li><span class="hl-icon hl-icon-changed"></span><a href="guides/changed-mode.html">Changed mode</a> (like <a href="https://github.com/anapaulagomes/pytest-picked">pytest-picked</a>)</li>
-  <li><span class="hl-icon hl-icon-clientsrv"></span><a href="concepts/client-server.html">Client/server</a> mode for fast editor integrations</li>
-  <li><span class="hl-icon hl-icon-fixtures"></span><a href="guides/writing-tests.html#fixtures">Fixtures</a> with setup / teardown and typed <code>Depends()</code> injection</li>
-  <li><span class="hl-icon hl-icon-cases"></span><a href="concepts/cases.html">Parametrized tests</a> via <code>@test.cases</code></li>
-  <li><span class="hl-icon hl-icon-describe"></span><a href="guides/writing-tests.html#grouping-tests-with-describe">Grouping</a> with <code>describe()</code> blocks</li>
-  <li><span class="hl-icon hl-icon-marks"></span><code>skip</code>, <code>skip_if</code>, <code>xfail</code>, and <code>todo</code> markers</li>
-  <li><span class="hl-icon hl-icon-insource"></span><a href="guides/writing-tests.html#in-source-testing">In-source testing</a></li>
-  <li><span class="hl-icon hl-icon-doctests"></span>Support for <a href="https://docs.python.org/3/library/doctest.html">doctests</a></li>
-  <li><span class="hl-icon hl-icon-filter"></span>Filtering and marks</li>
-  <li><span class="hl-icon hl-icon-reporters"></span><a href="guides/reporters.html">Reporters</a> — text, dot, json, junit, llm, <a href="https://nexte.st">nextest</a>-style, and <a href="https://github.com/Teemu/pytest-sugar">pytest-sugar</a>-style</li>
-</ul>
+  <article class="tryke-feature-card">
+    <h2><span class="hl-icon hl-icon-pretty"></span>Readable diagnostics</h2>
+    <p>See precise, per-assertion failures that keep the expected value and the actual result in view.</p>
+    <a href="guides/writing-tests.html#assertions-with-expect">Writing expectations <span aria-hidden="true">→</span></a>
+  </article>
 
-## Getting started
+  <article class="tryke-feature-card">
+    <h2><span class="hl-icon hl-icon-soft"></span>Soft assertions</h2>
+    <p>Collect multiple assertion failures in one test so a single mismatch does not hide the rest.</p>
+    <a href="concepts/soft-assertions.html">Soft assertions <span aria-hidden="true">→</span></a>
+  </article>
 
-Run tryke with [uvx](https://docs.astral.sh/uv/guides/tools/) to get started quickly:
+  <article class="tryke-feature-card">
+    <h2><span class="hl-icon hl-icon-async"></span>Native async support</h2>
+    <p>Write <code>async</code> tests and fixtures directly. There is no event-loop plugin to configure.</p>
+    <a href="guides/async.html">Testing async code <span aria-hidden="true">→</span></a>
+  </article>
+
+  <article class="tryke-feature-card">
+    <h2><span class="hl-icon hl-icon-watch"></span>Fast feedback</h2>
+    <p>Stay in watch mode while you work, or run only tests affected by the files that changed.</p>
+    <a href="guides/watch-mode.html">Watch mode <span aria-hidden="true">→</span></a>
+  </article>
+
+  <article class="tryke-feature-card">
+    <h2><span class="hl-icon hl-icon-fixtures"></span>Typed fixtures</h2>
+    <p>Compose setup and teardown with fixtures and explicit, typed <code>Depends()</code> injection.</p>
+    <a href="guides/writing-tests.html#fixtures">Using fixtures <span aria-hidden="true">→</span></a>
+  </article>
+
+  <article class="tryke-feature-card">
+    <h2><span class="hl-icon hl-icon-cases"></span>Expressive test structure</h2>
+    <p>Parametrize with <code>@test.cases</code>, group with <code>describe()</code>, and mark test outcomes clearly.</p>
+    <a href="concepts/cases.html">Parametrized tests <span aria-hidden="true">→</span></a>
+  </article>
+
+  <article class="tryke-feature-card">
+    <h2><span class="hl-icon hl-icon-reporters"></span>Flexible reporting</h2>
+    <p>Choose text, dot, JSON, JUnit, LLM, nextest-style, or pytest-sugar-style output for each workflow.</p>
+    <a href="guides/reporters.html">Reporters <span aria-hidden="true">→</span></a>
+  </article>
+
+  <article class="tryke-feature-card">
+    <h2><span class="hl-icon hl-icon-clientsrv"></span>Built for tooling</h2>
+    <p>Use persistent client/server mode to power responsive editor integrations and other test clients.</p>
+    <a href="concepts/client-server.html">Client/server mode <span aria-hidden="true">→</span></a>
+  </article>
+</div>
+
+## Quick start
+
+Run Tryke with [uvx](https://docs.astral.sh/uv/guides/tools/)—there is
+nothing to install:
 
 ```bash
 uvx tryke test
 ```
 
-Or, check out the [tryke playground](https://playground.tryke.dev) to try it out in your browser.
-
-```python
-from typing import Annotated
-
-from tryke import Depends, describe, expect, fixture, test
-
-
-@fixture(per="scope")
-def database():
-    db = {}
-    yield db
-    db.clear()
-
-
-with describe("users"):
-
-    @fixture
-    def users(database: Annotated[dict[str, dict[str, str]], Depends(database)]):
-        database["users"] = {}
-
-        return database["users"]
-
-    with describe("get"):
-
-        @test("returns a stored user")
-        async def test_get(users: Annotated[dict[str, str], Depends(users)]):
-            users["alice"] = "alice@example.com"
-
-            expect(users["alice"], name="returns stored email").to_equal(
-                "alice@example.com"
-            )
-
-    with describe("set"):
-
-        @test("stores a new user")
-        async def test_set(users: Annotated[dict[str, str], Depends(users)]):
-            users["bob"] = "bob@example.com"
-
-            expect(users["bob"], name="stores email under user key").to_equal(
-                "bob@example.com"
-            )
-
-```
-
-Run the tests:
+Leave off `test` to start watch mode:
 
 ```bash
-uvx tryke test # run once
-uvx tryke # watch mode
+uvx tryke
 ```
 
-## Coming from pytest?
+## A familiar test API
 
-The [migration guide](https://tryke.dev/migration.html) has a side-by-side cheat
-sheet and a
-[copy-paste LLM prompt](https://tryke.dev/migration.html#migration-prompt).
+```python
+from tryke import expect, test
 
-## License
 
-This repository is licensed under the [MIT License](https://github.com/thejchap/tryke/blob/main/LICENSE).
+@test
+async def test_math():
+    expect(40 + 2).to_equal(42)
+```
 
-## Installation
-
-See the [installation](./guides/installation.md) documentation.
+Explore the [writing tests guide](guides/writing-tests.html), open the
+[browser playground](https://playground.tryke.dev), or use the
+[pytest migration guide](migration.html) for a side-by-side cheat sheet.

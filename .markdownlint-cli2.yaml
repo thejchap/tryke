@@ -8,8 +8,11 @@ config:
   MD033:
     allowed_elements:
       - a
+      - article
       - code
+      - div
       - h1
+      - h2
       - img
       - li
       - p

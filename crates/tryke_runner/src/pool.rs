@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
@@ -61,30 +61,6 @@ fn format_worker_failure(prefix: &str, err: &dyn std::fmt::Display, stderr: &str
     msg
 }
 
-/// Resolve path-like interpreter values before concurrent process spawning.
-///
-/// On macOS, Rust falls back from `posix_spawn` to `fork`/`exec` when a
-/// relative executable is combined with `Command::current_dir`. Concurrent
-/// worker warmup can deadlock in that fallback before `exec`. Anchoring
-/// relative paths to the project root keeps the safer `posix_spawn` path.
-/// Bare command names must remain untouched so the OS can resolve them via
-/// `PATH`; Windows drive-relative paths retain their platform semantics.
-fn resolve_python_bin(python_bin: &str, root: &Path) -> String {
-    let path = Path::new(python_bin);
-    let has_separator = python_bin.contains('/') || python_bin.contains('\\');
-    let has_prefix = matches!(path.components().next(), Some(Component::Prefix(_)));
-    if !has_separator || path.is_absolute() || path.has_root() || has_prefix {
-        return python_bin.to_owned();
-    }
-
-    let joined = root.join(path);
-    joined
-        .canonicalize()
-        .unwrap_or(joined)
-        .to_string_lossy()
-        .into_owned()
-}
-
 enum WorkerMsg {
     Unit(WorkUnit, mpsc::UnboundedSender<TestResult>),
     Shutdown,
@@ -137,7 +113,7 @@ impl WorkerPool {
     ) -> Self {
         let size = size.max(1);
         let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-        let python_bin = resolve_python_bin(python_bin, &root);
+        let python_bin = python_bin.to_owned();
         let python_path = python_path.map_or_else(
             || {
                 let mut paths = vec![root.clone()];
@@ -583,7 +559,6 @@ async fn worker_task(
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::path::PathBuf;
 
     use tokio_stream::StreamExt;
@@ -602,62 +577,6 @@ mod tests {
 
     fn python_package_dir() -> PathBuf {
         workspace_root().join("python")
-    }
-
-    #[test]
-    fn relative_python_path_resolves_against_project_root() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let python = dir.path().join(".venv/bin/python");
-        fs::create_dir_all(python.parent().expect("python parent")).expect("create venv bin");
-        fs::write(&python, "").expect("write python placeholder");
-        let root = dir.path().canonicalize().expect("canonicalize root");
-
-        assert_eq!(
-            resolve_python_bin(".venv/bin/python", &root),
-            python
-                .canonicalize()
-                .expect("canonicalize python")
-                .to_string_lossy()
-        );
-    }
-
-    #[test]
-    fn missing_relative_python_path_still_becomes_absolute() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path().canonicalize().expect("canonicalize root");
-
-        assert_eq!(
-            resolve_python_bin(".venv/bin/missing-python", &root),
-            root.join(".venv/bin/missing-python").to_string_lossy()
-        );
-    }
-
-    #[test]
-    fn absolute_python_path_is_unchanged() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path().canonicalize().expect("canonicalize root");
-        let python = root.join("outside/python");
-        let python = python.to_string_lossy();
-
-        assert_eq!(resolve_python_bin(&python, &root), python);
-    }
-
-    #[test]
-    fn bare_python_command_is_unchanged_for_path_lookup() {
-        let dir = tempfile::tempdir().expect("tempdir");
-
-        assert_eq!(resolve_python_bin("python3", dir.path()), "python3");
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn drive_relative_python_path_is_unchanged() {
-        let dir = tempfile::tempdir().expect("tempdir");
-
-        assert_eq!(
-            resolve_python_bin(r"C:venv\Scripts\python.exe", dir.path()),
-            r"C:venv\Scripts\python.exe"
-        );
     }
 
     fn make_test_item(module: &str, name: &str, file: &std::path::Path) -> TestItem {

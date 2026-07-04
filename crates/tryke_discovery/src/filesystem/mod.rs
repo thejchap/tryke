@@ -15,31 +15,6 @@ pub(crate) mod import_graph;
 pub use cache::{CleanCacheReport, clean_project_cache};
 pub use discoverer::{ChangeImpact, Discoverer};
 
-fn find_project_root(start: &Path) -> Option<PathBuf> {
-    start
-        .ancestors()
-        .find(|dir| dir.join("pyproject.toml").exists())
-        .map(Path::to_path_buf)
-}
-
-/// Resolves the project root from `start`.
-///
-/// The nearest ancestor containing `pyproject.toml` wins. If no project
-/// marker exists, `start` itself is used.
-#[must_use]
-pub fn resolve_project_root(start: &Path) -> PathBuf {
-    let root = find_project_root(start).unwrap_or_else(|| start.to_path_buf());
-    root.canonicalize().unwrap_or(root)
-}
-
-#[must_use]
-pub fn configured_excludes(start: &Path, cli_excludes: &[String]) -> Vec<String> {
-    if !cli_excludes.is_empty() {
-        return cli_excludes.to_vec();
-    }
-    tryke_config::load_effective_config(start).discovery.exclude
-}
-
 fn build_excludes(root: &Path, excludes: &[String]) -> Gitignore {
     let mut builder = GitignoreBuilder::new(root);
     for exclude in excludes {
@@ -150,18 +125,18 @@ fn parse_tests_from_file(root: &Path, src_roots: &[PathBuf], file: &Path) -> Par
 
 #[must_use]
 pub fn discover_from(start: &Path) -> Vec<TestItem> {
-    let config = tryke_config::load_effective_config(start);
-    let root = resolve_project_root(start);
-    let src_roots = config.discovery.src_roots(&root);
-    discover_from_with_options(&root, &config.discovery.exclude, &src_roots)
+    let config = tryke_config::TrykeConfig::discover(start);
+    let root = config.root();
+    let src_roots = config.src_roots();
+    discover_from_with_options(root, &config.discovery.exclude, &src_roots)
 }
 
 #[must_use]
 pub fn discover_from_with_excludes(start: &Path, excludes: &[String]) -> Vec<TestItem> {
-    let config = tryke_config::load_effective_config(start);
-    let root = resolve_project_root(start);
-    let src_roots = config.discovery.src_roots(&root);
-    discover_from_with_options(&root, excludes, &src_roots)
+    let config = tryke_config::TrykeConfig::discover(start);
+    let root = config.root();
+    let src_roots = config.src_roots();
+    discover_from_with_options(root, excludes, &src_roots)
 }
 
 #[must_use]
@@ -219,19 +194,6 @@ mod tests {
     }
 
     #[test]
-    fn finds_project_root_from_child_dir() {
-        let dir = make_tree(&["src/foo.py"]);
-        let child = dir.path().join("src");
-        assert_eq!(find_project_root(&child), Some(dir.path().to_path_buf()));
-    }
-
-    #[test]
-    fn returns_none_when_no_pyproject() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        assert_eq!(find_project_root(dir.path()), None);
-    }
-
-    #[test]
     fn collects_py_files_only() {
         let dir = make_tree(&["a.py", "b.txt", "sub/c.py"]);
         let mut files = collect_python_files(dir.path(), &[]);
@@ -247,18 +209,6 @@ mod tests {
         let files = collect_python_files(dir.path(), &[]);
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("a.py"));
-    }
-
-    #[test]
-    fn cli_excludes_override_pyproject() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(
-            dir.path().join("pyproject.toml"),
-            "[tool.tryke]\nexclude = [\"generated/suites\"]\n",
-        )
-        .expect("write pyproject");
-        let excludes = configured_excludes(dir.path(), &["tmp".into(), "cache".into()]);
-        assert_eq!(excludes, vec!["tmp", "cache"]);
     }
 
     #[test]

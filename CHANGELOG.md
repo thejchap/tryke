@@ -9,11 +9,14 @@
 - Add configurable discovery cache directory (#128)
 - Add clean cache command (#129)
 - Add `--workers` to `tryke server`
+- Discover Python environments from `VIRTUAL_ENV`, Conda, and the project
+  `.venv`
 
 ### Bug Fixes
 
 - Prevent watch and server runs from hanging while restarting worker processes
 - Prevent concurrent worker spawn timeouts with relative Python paths on macOS
+- Preserve virtual-environment interpreter symlinks during path resolution
 
 ### Contributors
 

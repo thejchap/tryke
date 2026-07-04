@@ -236,13 +236,12 @@ pub enum Commands {
         #[arg(long = "now", requires = "watch")]
         now: bool,
 
-        /// Path to the Python interpreter used to spawn worker processes.
+        /// Path to the Python interpreter or environment used to spawn workers.
         ///
-        /// Overrides `[tool.tryke] python` in `pyproject.toml`. Defaults
-        /// to `python` on Windows / `python3` on Unix from `PATH`. The
-        /// interpreter is the user's responsibility — tryke does not
-        /// validate it. Activate the appropriate venv (or use
-        /// `uv run tryke ...`) and the default will pick it up.
+        /// Overrides `[tool.tryke] python` in `pyproject.toml`. When unset,
+        /// Tryke checks `VIRTUAL_ENV`, Conda, and the project `.venv` before
+        /// falling back to `python` on Windows / `python3` on Unix from
+        /// `PATH`.
         ///
         /// Relative CLI paths resolve against the project root. Relative
         /// `python` values in `pyproject.toml` (e.g.,
@@ -277,10 +276,11 @@ pub enum Commands {
         #[arg(short = 'i', long = "include")]
         include: Vec<String>,
 
-        /// Path to the Python interpreter used to spawn worker processes.
+        /// Path to the Python interpreter or environment used to spawn workers.
         ///
-        /// Overrides `[tool.tryke] python` in `pyproject.toml`. Defaults
-        /// to `python` on Windows / `python3` on Unix from `PATH`.
+        /// Overrides `[tool.tryke] python` in `pyproject.toml`. When unset,
+        /// Tryke checks `VIRTUAL_ENV`, Conda, and the project `.venv` before
+        /// falling back to `python` on Windows / `python3` on Unix from `PATH`.
         /// Relative CLI paths resolve against the project root. Relative
         /// values in `pyproject.toml` resolve against the directory containing
         /// `pyproject.toml`; bare names go through `PATH`. See the

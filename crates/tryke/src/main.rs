@@ -1,16 +1,15 @@
-use std::{env, time::Instant};
+use std::{env, path::Path, time::Instant};
 
 use anyhow::Result;
 use clap::Parser;
 use log::debug;
 use tryke::cli::{Cli, Commands, ReporterFormat};
-use tryke::discovery::{
-    discover_tests, discover_tests_changed_first, discover_tests_for_paths, resolved_excludes,
-};
+use tryke::discovery::{discover_tests, discover_tests_changed_first, discover_tests_for_paths};
 use tryke::execution::{run_tests, worker_pool_size};
 use tryke::graph::{run_fixture_graph, run_graph};
 use tryke::watch::run_watch;
-use tryke_discovery::{Discoverer, resolve_project_root};
+use tryke_config::{ConfigOverrides, TrykeConfig};
+use tryke_discovery::Discoverer;
 use tryke_reporter::{
     DotReporter, JSONReporter, JUnitReporter, LlmReporter, NextReporter, ProgressReporter,
     Reporter, SugarReporter, TextReporter, Verbosity,
@@ -76,6 +75,24 @@ fn effective_command(command: Option<Commands>) -> EffectiveCommand {
     }
 }
 
+fn load_config(
+    root: &Path,
+    python: Option<&str>,
+    cache_dir: Option<&Path>,
+    exclude: &[String],
+    include: &[String],
+) -> TrykeConfig {
+    TrykeConfig::load(
+        root,
+        ConfigOverrides {
+            python: python.map(str::to_owned),
+            cache_dir: cache_dir.map(Path::to_path_buf),
+            exclude: exclude.to_vec(),
+            include: include.to_vec(),
+        },
+    )
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let cli_filter = cli.verbose.log_level_filter();
@@ -133,59 +150,44 @@ fn main() -> Result<()> {
                 });
                 rep.set_watch_hint(Some("Waiting for file changes...".into()));
                 let cwd = env::current_dir()?;
-                let root_path = resolve_project_root(root.as_deref().unwrap_or(&cwd));
-                let excludes = resolved_excludes(&root_path, exclude, include);
+                let config = load_config(
+                    root.as_deref().unwrap_or(&cwd),
+                    python.as_deref(),
+                    cache_dir.as_deref(),
+                    exclude,
+                    include,
+                );
                 let test_filter = TestFilter::from_args(&[], filter.as_deref(), markers.as_deref())
                     .map_err(|e| anyhow::anyhow!(e))?;
-                let config = tryke_config::load_effective_config(&root_path);
-                let resolved_python = tryke_config::resolve_python(python.as_deref(), &config);
-                let resolved_cache_dir =
-                    tryke_config::resolve_cache_dir(cache_dir.as_deref(), &config);
                 return runtime.block_on(run_watch(
                     &mut *rep,
-                    Some(&root_path),
-                    &resolved_python,
+                    &config,
                     worker_log,
-                    &excludes,
                     &test_filter,
                     resolved_maxfail,
                     *workers,
                     (*dist).into(),
                     *all,
                     *now,
-                    resolved_cache_dir.as_deref(),
                 ));
             }
             let cwd = env::current_dir()?;
-            let root_path = resolve_project_root(root.as_deref().unwrap_or(&cwd));
-            let excludes = resolved_excludes(&root_path, exclude, include);
+            let config = load_config(
+                root.as_deref().unwrap_or(&cwd),
+                python.as_deref(),
+                cache_dir.as_deref(),
+                exclude,
+                include,
+            );
             let test_filter = TestFilter::from_args(paths, filter.as_deref(), markers.as_deref())
                 .map_err(|e| anyhow::anyhow!(e))?;
-            let config = tryke_config::load_effective_config(&root_path);
-            let resolved_cache_dir = tryke_config::resolve_cache_dir(cache_dir.as_deref(), &config);
             let discovery_start = Instant::now();
             let discovered = if !paths.is_empty() && !*changed && !*changed_first {
-                discover_tests_for_paths(
-                    &root_path,
-                    &test_filter.path_specs,
-                    &excludes,
-                    resolved_cache_dir.as_deref(),
-                )
+                discover_tests_for_paths(&config, &test_filter.path_specs)
             } else if *changed_first {
-                discover_tests_changed_first(
-                    &root_path,
-                    base_branch.as_deref(),
-                    &excludes,
-                    resolved_cache_dir.as_deref(),
-                )
+                discover_tests_changed_first(&config, base_branch.as_deref())
             } else {
-                discover_tests(
-                    &root_path,
-                    *changed,
-                    base_branch.as_deref(),
-                    &excludes,
-                    resolved_cache_dir.as_deref(),
-                )
+                discover_tests(&config, *changed, base_branch.as_deref())
             };
             for warning in &discovered.warnings {
                 rep.on_discovery_warning(warning);
@@ -204,11 +206,9 @@ fn main() -> Result<()> {
                 rep.on_collect_complete(&tests);
                 Ok(())
             } else {
-                let resolved_python = tryke_config::resolve_python(python.as_deref(), &config);
                 let summary = runtime.block_on(run_tests(
                     &mut *rep,
-                    &root_path,
-                    &resolved_python,
+                    &config,
                     worker_log,
                     tests,
                     &discovered.hooks,
@@ -232,12 +232,18 @@ fn main() -> Result<()> {
             workers,
         } => {
             let cwd = env::current_dir()?;
-            let root_path = resolve_project_root(root.as_deref().unwrap_or(&cwd));
-            let excludes = resolved_excludes(&root_path, exclude, include);
-            let config = tryke_config::load_effective_config(&root_path);
-            let src_roots = config.discovery.src_roots(&root_path);
-            let resolved_python = tryke_config::resolve_python(python.as_deref(), &config);
-            let resolved_cache_dir = tryke_config::resolve_cache_dir(cache_dir.as_deref(), &config);
+            let config = load_config(
+                root.as_deref().unwrap_or(&cwd),
+                python.as_deref(),
+                cache_dir.as_deref(),
+                exclude,
+                include,
+            );
+            let root_path = config.root().to_path_buf();
+            let excludes = config.discovery.exclude.clone();
+            let src_roots = config.src_roots();
+            let resolved_python = config.python();
+            let resolved_cache_dir = config.cache_dir();
 
             runtime.block_on(async move {
                 let worker_pool = WorkerPool::spawn(
@@ -264,11 +270,14 @@ fn main() -> Result<()> {
         }
         Commands::Clean { root } => {
             let cwd = env::current_dir()?;
-            let root_path = resolve_project_root(root.as_deref().unwrap_or(&cwd));
-            let config = tryke_config::load_effective_config(&root_path);
-            let resolved_cache_dir = tryke_config::resolve_cache_dir(cache_dir.as_deref(), &config);
-            let report =
-                tryke_discovery::clean_project_cache(&root_path, resolved_cache_dir.as_deref())?;
+            let config = load_config(
+                root.as_deref().unwrap_or(&cwd),
+                None,
+                cache_dir.as_deref(),
+                &[],
+                &[],
+            );
+            let report = tryke_discovery::clean_project_cache(&config)?;
             if report.removed_entries == 0 {
                 println!(
                     "No tryke discovery cache found at {}",
@@ -295,21 +304,17 @@ fn main() -> Result<()> {
                 return Err(anyhow::anyhow!("--base-branch requires --changed"));
             }
             let cwd = env::current_dir()?;
-            let root_path = resolve_project_root(root.as_deref().unwrap_or(&cwd));
-            let excludes = resolved_excludes(&root_path, exclude, include);
-            let config = tryke_config::load_effective_config(&root_path);
-            let resolved_cache_dir = tryke_config::resolve_cache_dir(cache_dir.as_deref(), &config);
+            let config = load_config(
+                root.as_deref().unwrap_or(&cwd),
+                None,
+                cache_dir.as_deref(),
+                exclude,
+                include,
+            );
             if *fixtures {
-                run_fixture_graph(Some(&root_path), &excludes, resolved_cache_dir.as_deref())
+                run_fixture_graph(&config)
             } else {
-                run_graph(
-                    Some(&root_path),
-                    &excludes,
-                    *connected_only,
-                    *changed,
-                    base_branch.as_deref(),
-                    resolved_cache_dir.as_deref(),
-                )
+                run_graph(&config, *connected_only, *changed, base_branch.as_deref())
             }
         }
     }

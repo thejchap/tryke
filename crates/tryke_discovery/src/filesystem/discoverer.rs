@@ -76,21 +76,15 @@ impl Discoverer {
     /// the default `<project-root>/.tryke/cache` location.
     #[must_use]
     pub fn new(
-        start: &Path,
+        root: &Path,
         src_roots: Vec<PathBuf>,
         excludes: &[String],
         cache_dir: Option<&Path>,
     ) -> Self {
-        let start = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
-        let root = super::resolve_project_root(&start);
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         let src_roots = src_roots
             .into_iter()
-            .map(|src_root| {
-                let reanchored = src_root
-                    .strip_prefix(&start)
-                    .map_or(src_root.clone(), |relative| root.join(relative));
-                reanchored.canonicalize().unwrap_or(reanchored)
-            })
+            .map(|src_root| src_root.canonicalize().unwrap_or(src_root))
             .collect();
 
         let cache = cache_dir.map_or_else(
@@ -719,10 +713,8 @@ mod tests {
     }
 
     fn make_discoverer(root: &Path, excludes: &[String], cache_dir: Option<&Path>) -> Discoverer {
-        let src_roots = tryke_config::load_effective_config(root)
-            .discovery
-            .src_roots(root);
-        Discoverer::new(root, src_roots, excludes, cache_dir)
+        let config = tryke_config::TrykeConfig::discover(root);
+        Discoverer::new(config.root(), config.src_roots(), excludes, cache_dir)
     }
 
     #[test]
@@ -887,8 +879,8 @@ mod tests {
             "[tool.tryke]\ncache_dir = \"configured-cache\"\n",
         )
         .expect("write pyproject");
-        let config = tryke_config::load_effective_config(dir.path());
-        let cache_dir = tryke_config::resolve_cache_dir(None, &config);
+        let config = tryke_config::TrykeConfig::discover(dir.path());
+        let cache_dir = config.cache_dir();
         let mut discoverer = make_discoverer(dir.path(), &[], cache_dir.as_deref());
 
         discoverer.rediscover();

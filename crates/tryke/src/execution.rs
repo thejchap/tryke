@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use log::LevelFilter;
 use tokio_stream::StreamExt;
+use tryke_config::TrykeConfig;
 use tryke_reporter::Reporter;
 use tryke_runner::{DistMode, WorkerPool, partition_with_hooks};
 use tryke_types::{ChangedSelectionSummary, HookItem, RunSummary, TestOutcome};
@@ -14,8 +15,7 @@ pub fn worker_pool_size() -> usize {
 #[expect(clippy::too_many_arguments)]
 pub async fn run_tests(
     reporter: &mut dyn Reporter,
-    root: &std::path::Path,
-    python: &str,
+    config: &TrykeConfig,
     log_level: LevelFilter,
     tests: Vec<tryke_types::TestItem>,
     hooks: &[HookItem],
@@ -26,7 +26,8 @@ pub async fn run_tests(
     changed_selection: Option<ChangedSelectionSummary>,
 ) -> Result<RunSummary> {
     let pool_size = workers.unwrap_or_else(|| tests.len().min(worker_pool_size()));
-    let pool = WorkerPool::spawn(pool_size, python, root, None, log_level, true).await;
+    let python = config.python();
+    let pool = WorkerPool::spawn(pool_size, &python, config.root(), None, log_level, true).await;
     let summary = report_cycle(
         reporter,
         tests,
@@ -210,6 +211,7 @@ pub async fn report_cycle(
 mod tests {
     use std::path::PathBuf;
 
+    use tryke_config::{ConfigOverrides, TrykeConfig};
     use tryke_discovery::Discoverer;
     use tryke_reporter::{
         DotReporter, JSONReporter, JUnitReporter, NextReporter, SugarReporter, TextReporter,
@@ -218,7 +220,17 @@ mod tests {
     use tryke_types::TestOutcome;
 
     use super::*;
-    use crate::discovery::{discover_tests, resolved_excludes};
+    use crate::discovery::discover_tests;
+
+    fn test_config(root: &std::path::Path) -> TrykeConfig {
+        TrykeConfig::load(
+            root,
+            ConfigOverrides {
+                python: Some(test_python_bin()),
+                ..ConfigOverrides::default()
+            },
+        )
+    }
 
     async fn run_cycle(
         reporter: &mut dyn Reporter,
@@ -245,12 +257,11 @@ mod tests {
     async fn smoke_run_tests(reporter: &mut dyn Reporter) {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
-        let excludes = resolved_excludes(dir.path(), &[], &[]);
-        let tests = discover_tests(dir.path(), false, None, &excludes, None).tests;
+        let config = test_config(dir.path());
+        let tests = discover_tests(&config, false, None).tests;
         let _ = run_tests(
             reporter,
-            dir.path(),
-            &test_python_bin(),
+            &config,
             LevelFilter::Off,
             tests,
             &[],
@@ -361,12 +372,12 @@ mod tests {
         std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
         let mut reporter = TextReporter::new();
         // Non-git directory → git_changed_files returns None → discover_tests runs all (0 here)
-        let tests = discover_tests(dir.path(), true, None, &[], None).tests;
+        let config = test_config(dir.path());
+        let tests = discover_tests(&config, true, None).tests;
         assert!(
             run_tests(
                 &mut reporter,
-                dir.path(),
-                &test_python_bin(),
+                &config,
                 LevelFilter::Off,
                 tests,
                 &[],
@@ -407,7 +418,8 @@ def test_failing():
         )
         .expect("write test file");
 
-        let tests = discover_tests(dir.path(), false, None, &[], None).tests;
+        let config = test_config(dir.path());
+        let tests = discover_tests(&config, false, None).tests;
         assert_eq!(tests.len(), 2);
 
         let python_path = [dir.path().to_path_buf(), python_dir];
@@ -459,7 +471,8 @@ def test_failing():
             "from tryke import test, expect\n\n@test\ndef test_ok():\n    expect(1 + 1).to_equal(2)\n",
         )
         .expect("write test file");
-        let tests = discover_tests(dir.path(), false, None, &[], None).tests;
+        let config = test_config(dir.path());
+        let tests = discover_tests(&config, false, None).tests;
         let mut reporter = TextReporter::with_writer(Vec::new());
         let python_path = [dir.path().to_path_buf(), python_dir];
         let pool = WorkerPool::spawn(
@@ -501,7 +514,8 @@ def test_failing():
             "from tryke import test, expect\n\n@test\ndef test_bad():\n    expect(1 + 1).to_equal(3)\n",
         )
         .expect("write test file");
-        let tests = discover_tests(dir.path(), false, None, &[], None).tests;
+        let config = test_config(dir.path());
+        let tests = discover_tests(&config, false, None).tests;
         let mut reporter = TextReporter::with_writer(Vec::new());
         let python_path = [dir.path().to_path_buf(), python_dir];
         let pool = WorkerPool::spawn(

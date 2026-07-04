@@ -42,16 +42,29 @@ This only affects absolute imports (`from foo.bar import x`). Relative imports (
 
 ### `python`
 
-Path to the Python interpreter used to spawn worker processes. Tryke does not enforce `requires-python` — that is the package manager's job (uv, pip, poetry, hatch). Whatever interpreter you point at is the one that runs your tests.
+Path to the Python interpreter or environment used to spawn worker processes. Tryke does not enforce `requires-python` — that is the package manager's job (uv, pip, poetry, hatch). Whatever interpreter you point at is the one that runs your tests.
 
 ```toml
 [tool.tryke]
 python = ".venv/bin/python3"
 ```
 
-Defaults to `python` on Windows and `python3` on Unix from `PATH`.
+An environment directory is also accepted:
 
-**Path resolution.** A value with a path separator (e.g., `.venv/bin/python3`) is treated as a filesystem path; bare names (e.g., `python3`, `pypy`) are looked up via `PATH` exactly like `execvp` / `CreateProcess`. Relative paths from `pyproject.toml` are anchored to the directory containing that file, not the cwd, so `python = ".venv/bin/python3"` keeps working when tryke is invoked from a sibling directory or a script. Relative paths passed via `--python` are anchored to the project root. Absolute paths and Windows drive-relative values (e.g., `C:foo\\python.exe`) are passed through unchanged.
+```toml
+[tool.tryke]
+python = ".venv"
+```
+
+When `python` is unset, Tryke discovers an environment in this order:
+
+1. `VIRTUAL_ENV`
+2. An active non-base Conda environment
+3. `.venv` in the project root
+4. An active base Conda environment
+5. `python` on Windows or `python3` on Unix from `PATH`
+
+**Path resolution.** A value with a path separator (e.g., `.venv/bin/python3`) is treated as a filesystem path; bare names (e.g., `python3`, `pypy`) are looked up via `PATH` exactly like `execvp` / `CreateProcess`. Relative paths from `pyproject.toml` are anchored to the directory containing that file, not the cwd. Relative paths passed via `--python` are anchored to the project root. Paths are made absolute without resolving symlinks, preserving virtual-environment interpreter identity. Absolute paths and Windows drive-relative values (e.g., `C:foo\\python.exe`) are passed through unchanged.
 
 ### `cache_dir`
 

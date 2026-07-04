@@ -1,13 +1,10 @@
-use std::{
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use console::{Key, Term};
 use log::{LevelFilter, debug};
-use tryke_config::load_effective_config;
-use tryke_discovery::{Discoverer, resolve_project_root};
+use tryke_config::TrykeConfig;
+use tryke_discovery::Discoverer;
 use tryke_reporter::{Reporter, reporter::WatchIdleInfo};
 use tryke_runner::{DistMode, WorkerPool};
 use tryke_types::{DiscoveryWarning, DiscoveryWarningKind, HookItem, filter::TestFilter};
@@ -174,25 +171,24 @@ async fn run_initial_cycle(
 )]
 pub async fn run_watch(
     reporter: &mut dyn Reporter,
-    root: Option<&Path>,
-    python: &str,
+    config: &TrykeConfig,
     log_level: LevelFilter,
-    excludes: &[String],
     test_filter: &TestFilter,
     maxfail: Option<usize>,
     workers: Option<usize>,
     dist: DistMode,
     all_tests: bool,
     run_now: bool,
-    cache_dir: Option<&Path>,
 ) -> Result<()> {
-    let cwd = std::env::current_dir()?;
-    let root = resolve_project_root(root.unwrap_or(&cwd));
-    let src_roots = load_effective_config(&root).discovery.src_roots(&root);
-    let mut discoverer = Discoverer::new(&root, src_roots, excludes, cache_dir);
+    let root = config.root();
+    let src_roots = config.src_roots();
+    let cache_dir = config.cache_dir();
+    let excludes = &config.discovery.exclude;
+    let mut discoverer = Discoverer::new(root, src_roots, excludes, cache_dir.as_deref());
 
     let pool_size = workers.unwrap_or_else(worker_pool_size);
-    let pool = WorkerPool::spawn(pool_size, python, &root, None, log_level, false).await;
+    let python = config.python();
+    let pool = WorkerPool::spawn(pool_size, &python, root, None, log_level, false).await;
 
     run_initial_cycle(
         reporter,
@@ -205,7 +201,7 @@ pub async fn run_watch(
     )
     .await;
 
-    let mut watcher = FileWatcher::spawn(&root, excludes)?;
+    let mut watcher = FileWatcher::spawn(root, excludes)?;
     let mut commands = spawn_key_listener();
 
     loop {
@@ -308,7 +304,8 @@ mod tests {
             "from tryke import test, expect\n\n@test\ndef test_bad():\n    expect(1 + 1).to_equal(3)\n",
         )
         .expect("write test file");
-        let tests = discover_tests(dir.path(), false, None, &[], None).tests;
+        let config = TrykeConfig::discover(dir.path());
+        let tests = discover_tests(&config, false, None).tests;
         let mut reporter = TextReporter::with_writer(Vec::new());
         let python_path = [dir.path().to_path_buf(), python_dir];
         let pool = WorkerPool::spawn(
@@ -359,9 +356,7 @@ mod tests {
             "from tryke import test, expect\n\n@test\ndef test_ok():\n    expect(1).to_equal(1)\n",
         )
         .expect("write test file");
-        let src_roots = load_effective_config(dir.path())
-            .discovery
-            .src_roots(dir.path());
+        let src_roots = TrykeConfig::discover(dir.path()).src_roots();
         let mut discoverer = Discoverer::new(dir.path(), src_roots, &[], None);
         let test_filter = TestFilter::from_args(&[], None, None).expect("filter");
         let python_path = [dir.path().to_path_buf(), python_dir];

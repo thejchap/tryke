@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use log::{debug, warn};
-use tryke_config::load_effective_config;
-use tryke_discovery::{Discoverer, resolve_project_root};
+use tryke_config::TrykeConfig;
+use tryke_discovery::Discoverer;
 use tryke_types::filter::PathSpec;
 use tryke_types::{DiscoveryWarning, DiscoveryWarningKind, HookItem};
 
@@ -62,44 +62,27 @@ fn all_discovery_warnings(discoverer: &Discoverer) -> Vec<DiscoveryWarning> {
     warnings
 }
 
-pub fn resolved_excludes(
-    root: &Path,
-    cli_excludes: &[String],
-    cli_includes: &[String],
-) -> Vec<String> {
-    if !cli_excludes.is_empty() {
-        return cli_excludes.to_vec();
-    }
-    let includes = cli_includes
-        .iter()
-        .collect::<std::collections::HashSet<_>>();
-    load_effective_config(root)
-        .discovery
-        .exclude
-        .into_iter()
-        .filter(|exclude| !includes.contains(exclude))
-        .collect()
-}
-
 /// Discover tests, optionally restricting to changed files.
-///
-/// `cache_dir` optionally overrides the discovery cache directory.
 pub fn discover_tests(
-    root: &Path,
+    config: &TrykeConfig,
     changed: bool,
     base_branch: Option<&str>,
-    excludes: &[String],
-    cache_dir: Option<&Path>,
 ) -> DiscoverySelection {
-    let root = resolve_project_root(root);
-    let src_roots = load_effective_config(&root).discovery.src_roots(&root);
-    let mut discoverer = Discoverer::new(&root, src_roots, excludes, cache_dir);
+    let root = config.root();
+    let src_roots = config.src_roots();
+    let cache_dir = config.cache_dir();
+    let mut discoverer = Discoverer::new(
+        root,
+        src_roots,
+        &config.discovery.exclude,
+        cache_dir.as_deref(),
+    );
     discoverer.rediscover();
     let warnings = all_discovery_warnings(&discoverer);
     let hooks = discoverer.hooks();
 
     if changed {
-        match resolve_changed_files(&root, base_branch) {
+        match resolve_changed_files(root, base_branch) {
             Some(changed_files) if !changed_files.is_empty() => {
                 debug!("--changed: {} git-changed files", changed_files.len());
                 DiscoverySelection {
@@ -148,25 +131,27 @@ pub fn discover_tests(
 /// if any spec resolves to a nonexistent file or escapes the project
 /// root — the existing post-filter (`TestFilter::apply`) still runs in
 /// `main` and handles suffix-match semantics in that case.
-///
-/// `cache_dir` optionally overrides the discovery cache directory.
 pub fn discover_tests_for_paths(
-    root: &Path,
+    config: &TrykeConfig,
     path_specs: &[PathSpec],
-    excludes: &[String],
-    cache_dir: Option<&Path>,
 ) -> DiscoverySelection {
-    let root = resolve_project_root(root);
-    let walk_roots = match resolve_walk_roots(&root, path_specs) {
+    let root = config.root();
+    let walk_roots = match resolve_walk_roots(root, path_specs) {
         Some(roots) => roots,
         None => {
             debug!("discover_tests_for_paths: falling back to full discovery");
-            return discover_tests(&root, false, None, excludes, cache_dir);
+            return discover_tests(config, false, None);
         }
     };
 
-    let src_roots = load_effective_config(&root).discovery.src_roots(&root);
-    let mut discoverer = Discoverer::new(&root, src_roots, excludes, cache_dir);
+    let src_roots = config.src_roots();
+    let cache_dir = config.cache_dir();
+    let mut discoverer = Discoverer::new(
+        root,
+        src_roots,
+        &config.discovery.exclude,
+        cache_dir.as_deref(),
+    );
     let tests = discoverer.rediscover_restricted(&walk_roots);
     let warnings = all_discovery_warnings(&discoverer);
     let hooks = discoverer.hooks();
@@ -228,21 +213,23 @@ fn resolve_walk_roots(root: &Path, path_specs: &[PathSpec]) -> Option<Vec<PathBu
 }
 
 /// Discover all tests but place changed tests first in the returned list.
-///
-/// `cache_dir` optionally overrides the discovery cache directory.
 pub fn discover_tests_changed_first(
-    root: &Path,
+    config: &TrykeConfig,
     base_branch: Option<&str>,
-    excludes: &[String],
-    cache_dir: Option<&Path>,
 ) -> DiscoverySelection {
-    let root = resolve_project_root(root);
-    let src_roots = load_effective_config(&root).discovery.src_roots(&root);
-    let mut discoverer = Discoverer::new(&root, src_roots, excludes, cache_dir);
+    let root = config.root();
+    let src_roots = config.src_roots();
+    let cache_dir = config.cache_dir();
+    let mut discoverer = Discoverer::new(
+        root,
+        src_roots,
+        &config.discovery.exclude,
+        cache_dir.as_deref(),
+    );
     discoverer.rediscover();
     let warnings = all_discovery_warnings(&discoverer);
     let hooks = discoverer.hooks();
-    let changed_files = resolve_changed_files(&root, base_branch);
+    let changed_files = resolve_changed_files(root, base_branch);
     let all_tests = discoverer.tests();
     match changed_files {
         Some(cf) if !cf.is_empty() => {
@@ -292,49 +279,6 @@ mod tests {
     use crate::git::test_helpers::*;
 
     #[test]
-    fn resolved_excludes_reads_pyproject_when_enabled() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            dir.path().join("pyproject.toml"),
-            "[tool.tryke]\nexclude = [\"generated/suites\"]\n",
-        )
-        .expect("write pyproject.toml");
-
-        let excludes = resolved_excludes(dir.path(), &[], &[]);
-        assert_eq!(excludes, vec!["generated/suites"]);
-    }
-
-    #[test]
-    fn resolved_excludes_removes_included_config_excludes() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            dir.path().join("pyproject.toml"),
-            "[tool.tryke]\nexclude = [\"generated/suites\", \"generated\"]\n",
-        )
-        .expect("write pyproject.toml");
-
-        let excludes = resolved_excludes(dir.path(), &[], &["generated/suites".into()]);
-        assert_eq!(excludes, vec!["generated"]);
-    }
-
-    #[test]
-    fn resolved_excludes_prefers_cli_excludes_over_includes() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            dir.path().join("pyproject.toml"),
-            "[tool.tryke]\nexclude = [\"generated/suites\"]\n",
-        )
-        .expect("write pyproject.toml");
-
-        let excludes = resolved_excludes(
-            dir.path(),
-            &["tmp".into(), "cache".into()],
-            &["generated/suites".into()],
-        );
-        assert_eq!(excludes, vec!["tmp", "cache"]);
-    }
-
-    #[test]
     fn discover_tests_with_base_branch() {
         let dir = tempfile::tempdir().expect("tempdir");
         seed_git_repo_with_main(
@@ -354,7 +298,8 @@ mod tests {
         git_run(dir.path(), &["add", "test_feature.py"]);
         git_run(dir.path(), &["commit", "-m", "add feature test"]);
 
-        let discovered = discover_tests(dir.path(), true, Some("main"), &[], None);
+        let config = TrykeConfig::discover(dir.path());
+        let discovered = discover_tests(&config, true, Some("main"));
         assert!(
             discovered.tests.iter().any(|t| t.name == "test_feature"),
             "should find the branch's test: {:?}",
@@ -388,7 +333,8 @@ mod tests {
         )
         .expect("write");
 
-        let discovered = discover_tests_changed_first(dir.path(), None, &[], None);
+        let config = TrykeConfig::discover(dir.path());
+        let discovered = discover_tests_changed_first(&config, None);
         let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
 
         assert!(
@@ -421,7 +367,8 @@ mod tests {
             )],
         );
 
-        let discovered = discover_tests_changed_first(dir.path(), None, &[], None);
+        let config = TrykeConfig::discover(dir.path());
+        let discovered = discover_tests_changed_first(&config, None);
         assert!(
             discovered.changed_prefix_len.is_none(),
             "changed_prefix_len should be None when no changes"
@@ -458,7 +405,8 @@ mod tests {
         git_run(dir.path(), &["add", "test_c.py"]);
         git_run(dir.path(), &["commit", "-m", "add test_c"]);
 
-        let discovered = discover_tests_changed_first(dir.path(), Some("main"), &[], None);
+        let config = TrykeConfig::discover(dir.path());
+        let discovered = discover_tests_changed_first(&config, Some("main"));
         let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
 
         assert!(
@@ -486,7 +434,8 @@ mod tests {
         )
         .expect("write test_dyn.py");
 
-        let discovered = discover_tests(dir.path(), false, None, &[], None);
+        let config = TrykeConfig::discover(dir.path());
+        let discovered = discover_tests(&config, false, None);
         assert!(
             !discovered.warnings.is_empty(),
             "should have at least one dynamic import warning"
@@ -535,7 +484,8 @@ mod tests {
             ),
         ]);
         let specs = vec![pathspec_file("test_a.py")];
-        let discovered = discover_tests_for_paths(dir.path(), &specs, &[], None);
+        let config = TrykeConfig::discover(dir.path());
+        let discovered = discover_tests_for_paths(&config, &specs);
         let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec!["test_a"], "got: {names:?}");
     }
@@ -557,7 +507,8 @@ mod tests {
             ),
         ]);
         let specs = vec![pathspec_file("tests")];
-        let discovered = discover_tests_for_paths(dir.path(), &specs, &[], None);
+        let config = TrykeConfig::discover(dir.path());
+        let discovered = discover_tests_for_paths(&config, &specs);
         let mut names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
         names.sort_unstable();
         assert_eq!(names, vec!["test_a", "test_b"], "got: {names:?}");
@@ -578,7 +529,8 @@ mod tests {
         // Dir + a contained file should dedupe to just the dir; both
         // tests should be discovered (not just test_a).
         let specs = vec![pathspec_file("tests"), pathspec_file("tests/test_a.py")];
-        let discovered = discover_tests_for_paths(dir.path(), &specs, &[], None);
+        let config = TrykeConfig::discover(dir.path());
+        let discovered = discover_tests_for_paths(&config, &specs);
         let mut names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
         names.sort_unstable();
         assert_eq!(names, vec!["test_a", "test_b"], "got: {names:?}");
@@ -591,7 +543,8 @@ mod tests {
             "from tryke import test\n@test\ndef test_real(): pass\n",
         )]);
         let specs = vec![pathspec_file("does_not_exist.py")];
-        let discovered = discover_tests_for_paths(dir.path(), &specs, &[], None);
+        let config = TrykeConfig::discover(dir.path());
+        let discovered = discover_tests_for_paths(&config, &specs);
         // Fallback runs full discovery; the post-filter (applied in
         // main, not here) is what would narrow the set. So we expect
         // every test in the project here.
@@ -615,7 +568,8 @@ mod tests {
             ),
         ]);
         let specs = vec![PathSpec::FileLine(PathBuf::from("test_a.py"), 2)];
-        let discovered = discover_tests_for_paths(dir.path(), &specs, &[], None);
+        let config = TrykeConfig::discover(dir.path());
+        let discovered = discover_tests_for_paths(&config, &specs);
         let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
         // The walk is restricted to test_a.py — test_b should not appear
         // even before the post-filter narrows by line.
@@ -635,8 +589,14 @@ mod tests {
             ),
         ]);
         let specs = vec![pathspec_file("tests")];
-        let discovered =
-            discover_tests_for_paths(dir.path(), &specs, &["tests/skip".to_string()], None);
+        let config = TrykeConfig::load(
+            dir.path(),
+            tryke_config::ConfigOverrides {
+                exclude: vec!["tests/skip".to_string()],
+                ..tryke_config::ConfigOverrides::default()
+            },
+        );
+        let discovered = discover_tests_for_paths(&config, &specs);
         let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec!["test_a"], "got: {names:?}");
     }
@@ -651,7 +611,8 @@ mod tests {
         let outside_file = outside.path().join("stray.py");
         std::fs::write(&outside_file, "x = 1\n").expect("write stray");
         let specs = vec![PathSpec::File(outside_file)];
-        let discovered = discover_tests_for_paths(dir.path(), &specs, &[], None);
+        let config = TrykeConfig::discover(dir.path());
+        let discovered = discover_tests_for_paths(&config, &specs);
         let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
         // Out-of-root spec falls back to full discovery rather than
         // attempting to walk outside the project.

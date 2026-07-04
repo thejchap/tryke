@@ -185,9 +185,9 @@ tryke server [OPTIONS]
 
 - `--python` `<PYTHON>`
 
-  Path to the Python interpreter used to spawn worker processes.
+  Path to the Python interpreter or environment used to spawn workers.
 
-  Overrides `[tool.tryke] python` in `pyproject.toml`. Defaults to `python` on Windows / `python3` on Unix from `PATH`. Relative CLI paths resolve against the project root. Relative values in `pyproject.toml` resolve against the directory containing `pyproject.toml`; bare names go through `PATH`. See the `Configuration` guide for the full rules.
+  Overrides `[tool.tryke] python` in `pyproject.toml`. When unset, Tryke checks `VIRTUAL_ENV`, Conda, and the project `.venv` before falling back to `python` on Windows / `python3` on Unix from `PATH`. Relative CLI paths resolve against the project root. Relative values in `pyproject.toml` resolve against the directory containing `pyproject.toml`; bare names go through `PATH`. See the `Configuration` guide for the full rules.
 
 - `-q`, `--quiet`
 
@@ -342,9 +342,9 @@ tryke test [OPTIONS] [PATHS]...
 
 - `--python` `<PYTHON>`
 
-  Path to the Python interpreter used to spawn worker processes.
+  Path to the Python interpreter or environment used to spawn workers.
 
-  Overrides `[tool.tryke] python` in `pyproject.toml`. Defaults to `python` on Windows / `python3` on Unix from `PATH`. The interpreter is the user's responsibility — tryke does not validate it. Activate the appropriate venv (or use `uv run tryke ...`) and the default will pick it up.
+  Overrides `[tool.tryke] python` in `pyproject.toml`. When unset, Tryke checks `VIRTUAL_ENV`, Conda, and the project `.venv` before falling back to `python` on Windows / `python3` on Unix from `PATH`.
 
   Relative CLI paths resolve against the project root. Relative `python` values in `pyproject.toml` (e.g., `.venv/bin/python3`) resolve against the directory containing `pyproject.toml`, not the cwd. Bare names (`python3`, `pypy`) are looked up via `PATH`. See the `Configuration` guide for the full resolution rules.
 

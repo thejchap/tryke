@@ -51,7 +51,7 @@ python = ".venv/bin/python3"
 
 Defaults to `python` on Windows and `python3` on Unix from `PATH`.
 
-**Path resolution.** A value with a path separator (e.g., `.venv/bin/python3`) is treated as a filesystem path; bare names (e.g., `python3`, `pypy`) are looked up via `PATH` exactly like `execvp` / `CreateProcess`. Relative paths are anchored to the directory containing `pyproject.toml`, not the cwd, so `python = ".venv/bin/python3"` keeps working when tryke is invoked from a sibling directory or a script. Absolute paths and Windows drive-relative values (e.g., `C:foo\\python.exe`) are passed through unchanged.
+**Path resolution.** A value with a path separator (e.g., `.venv/bin/python3`) is treated as a filesystem path; bare names (e.g., `python3`, `pypy`) are looked up via `PATH` exactly like `execvp` / `CreateProcess`. Relative paths from `pyproject.toml` are anchored to the directory containing that file, not the cwd, so `python = ".venv/bin/python3"` keeps working when tryke is invoked from a sibling directory or a script. Relative paths passed via `--python` are anchored to the project root. Absolute paths and Windows drive-relative values (e.g., `C:foo\\python.exe`) are passed through unchanged.
 
 ### `cache_dir`
 

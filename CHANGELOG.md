@@ -13,6 +13,7 @@
 ### Bug Fixes
 
 - Prevent watch and server runs from hanging while restarting worker processes
+- Prevent concurrent worker spawn timeouts with relative Python paths on macOS
 
 ### Contributors
 

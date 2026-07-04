@@ -244,11 +244,12 @@ pub enum Commands {
         /// validate it. Activate the appropriate venv (or use
         /// `uv run tryke ...`) and the default will pick it up.
         ///
-        /// Relative `python` values in `pyproject.toml` (e.g.,
+        /// Relative CLI paths resolve against the project root. Relative
+        /// `python` values in `pyproject.toml` (e.g.,
         /// `.venv/bin/python3`) resolve against the directory containing
-        /// `pyproject.toml`, not the cwd. Bare names (`python3`, `pypy`)
-        /// are looked up via `PATH`. See the `Configuration` guide for
-        /// the full resolution rules.
+        /// `pyproject.toml`, not the cwd. Bare names (`python3`, `pypy`) are
+        /// looked up via `PATH`. See the `Configuration` guide for the full
+        /// resolution rules.
         #[arg(long)]
         python: Option<String>,
     },
@@ -280,9 +281,10 @@ pub enum Commands {
         ///
         /// Overrides `[tool.tryke] python` in `pyproject.toml`. Defaults
         /// to `python` on Windows / `python3` on Unix from `PATH`.
-        /// Relative values in `pyproject.toml` resolve against the
-        /// directory containing `pyproject.toml`; bare names go through
-        /// `PATH`. See the `Configuration` guide for the full rules.
+        /// Relative CLI paths resolve against the project root. Relative
+        /// values in `pyproject.toml` resolve against the directory containing
+        /// `pyproject.toml`; bare names go through `PATH`. See the
+        /// `Configuration` guide for the full rules.
         #[arg(long)]
         python: Option<String>,
 

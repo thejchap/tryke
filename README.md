@@ -20,6 +20,7 @@
 - Support for [doctests](https://docs.python.org/3/library/doctest.html)
 - Filtering and marks
 - [Reporters](https://tryke.dev/guides/reporters.html) — text, dot, json, junit, llm, [nextest](https://nexte.st)-style, and [pytest-sugar](https://github.com/Teemu/pytest-sugar)-style
+- [VSCode](https://github.com/thejchap/tryke-vscode) and [Neovim](https://github.com/thejchap/neotest-tryke) integrations
 
 ## Getting started
 

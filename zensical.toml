@@ -45,8 +45,6 @@ repo = "fontawesome/brands/github"
 
 [project.theme]
 custom_dir = "docs/overrides"
-logo = "assets/logo.png"
-favicon = "assets/logo.png"
 features = [
   "navigation.instant",
   "navigation.sections",
@@ -86,11 +84,6 @@ toggle.icon = "lucide/moon"
 toggle.name = "Switch to system preference"
 primary = "teal"
 accent = "teal"
-
-# Absolute URL to the thumbnail rendered when the site is pasted into
-# Slack / LinkedIn / Twitter / Discord. Consumed by docs/overrides/main.html.
-[project.extra]
-social_image = "https://tryke.dev/assets/logo.png"
 
 [[project.extra.social]]
 icon = "fontawesome/brands/github"

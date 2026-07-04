@@ -1,13 +1,6 @@
-<p align="center">
-  <a href="https://tryke.dev">
-    <img height="170" alt="tryke-small" src="https://github.com/user-attachments/assets/39a2521a-fe9a-4235-8bb8-97b9e4f68aa7" />
-  </a>
-</p>
 <h1 align="center">Tryke</h1>
 
 <p align="center"><a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="ruff" /></a> <a href="https://pypi.org/project/tryke/"><img src="https://img.shields.io/pypi/v/tryke" alt="PyPI" /></a> <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="license" /></a> <a href="https://python.org"><img src="https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14%20%7C%203.15-blue.svg" alt="python" /></a> <a href="https://github.com/thejchap/tryke/actions/workflows/release.yml"><img src="https://github.com/thejchap/tryke/actions/workflows/release.yml/badge.svg" alt="CI" /></a> <a href="https://tryke.dev/"><img src="https://img.shields.io/badge/docs-tryke.dev-blue" alt="docs" /></a></p>
-
-<video src="https://github.com/user-attachments/assets/354e21a4-b49f-4e93-a052-df98c0dfc3ae" controls muted></video>
 
 ## Highlights
 

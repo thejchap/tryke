@@ -23,8 +23,6 @@ A Rust-based Python test runner with a Jest-style API.
   </a>
 </p>
 
-<video src="https://github.com/user-attachments/assets/354e21a4-b49f-4e93-a052-df98c0dfc3ae" controls muted style="max-width: 100%; max-height: 640px;"></video>
-
 ## Highlights
 
 <ul class="md-highlights">

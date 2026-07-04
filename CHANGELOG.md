@@ -1,3 +1,30 @@
+## 0.0.30
+
+Released on 2026-07-04.
+
+### Breaking Changes
+
+- Replace server TCP transport with stdio JSON-RPC (#148)
+
+### Documentation
+
+- Mention uvx quickstart and playground in README and getting started (#127)
+
+### Features
+
+- Add configurable discovery cache directory (#128)
+- Add clean cache command (#129)
+- Skip rediscovery for unchanged AST (#130)
+- Add interactive browser playground (#126)
+
+### Contributors
+
+- @thejchap
+- @RaulBSanchez
+- @dependabot[bot]
+- @marvin8
+- @sarvesh1327
+
 ## unreleased
 
 ### Documentation

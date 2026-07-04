@@ -29,8 +29,8 @@ impl From<Dist> for tryke_runner::DistMode {
 ///
 /// Tryke discovers tests by walking the project's import graph, runs them
 /// across a pool of pre-warmed worker processes, and streams results through
-/// a pluggable reporter. It can also run as a long-lived server that keeps
-/// workers warm between file changes for sub-second feedback in editors.
+/// a pluggable reporter. Its watch and server modes cache discovery while
+/// starting fresh workers for each logical run.
 ///
 /// Running `tryke` with no subcommand starts watch mode. Run `tryke
 /// <command> --help` to see detailed help for a subcommand.
@@ -161,16 +161,6 @@ pub enum Commands {
         #[arg(long)]
         root: Option<PathBuf>,
 
-        /// Run against an already-running `tryke server` instead of spawning
-        /// fresh workers.
-        ///
-        /// Pass `--port` alone to use the default `2337`, or `--port 9000`
-        /// to target a specific port. The server keeps workers pre-warmed
-        /// and the import graph cached, so this is significantly faster for
-        /// repeated runs.
-        #[arg(long, default_missing_value = "2337", num_args = 0..=1, require_equals = false, conflicts_with = "watch")]
-        port: Option<u16>,
-
         /// Run only tests affected by uncommitted changes.
         ///
         /// Uses `git diff` to find changed `.py` files, then walks the
@@ -223,8 +213,8 @@ pub enum Commands {
         /// Enters an interactive loop: tryke watches all `.py` files
         /// (respecting `.gitignore`), and on each save it walks the import
         /// graph from the modified file forward to find affected tests,
-        /// restarts the worker pool, and reruns just those tests. Press `q`
-        /// to quit, `enter` to run all tests, or `c` to clear results.
+        /// starts fresh workers, and reruns just those tests. Press `q` to
+        /// quit, `enter` to run all tests, or `c` to clear results.
         #[arg(short = 'w', long = "watch")]
         watch: bool,
 
@@ -246,39 +236,34 @@ pub enum Commands {
         #[arg(long = "now", requires = "watch")]
         now: bool,
 
-        /// Path to the Python interpreter used to spawn worker processes.
+        /// Path to the Python interpreter or environment used to spawn workers.
         ///
-        /// Overrides `[tool.tryke] python` in `pyproject.toml`. Defaults
-        /// to `python` on Windows / `python3` on Unix from `PATH`. The
-        /// interpreter is the user's responsibility — tryke does not
-        /// validate it. Activate the appropriate venv (or use
-        /// `uv run tryke ...`) and the default will pick it up.
+        /// Overrides `[tool.tryke] python` in `pyproject.toml`. When unset,
+        /// Tryke checks `VIRTUAL_ENV`, Conda, and the project `.venv` before
+        /// falling back to `python` on Windows / `python3` on Unix from
+        /// `PATH`.
         ///
-        /// Relative `python` values in `pyproject.toml` (e.g.,
+        /// Relative CLI paths resolve against the project root. Relative
+        /// `python` values in `pyproject.toml` (e.g.,
         /// `.venv/bin/python3`) resolve against the directory containing
-        /// `pyproject.toml`, not the cwd. Bare names (`python3`, `pypy`)
-        /// are looked up via `PATH`. See the `Configuration` guide for
-        /// the full resolution rules.
-        ///
-        /// Not compatible with `--port`; configure the interpreter on
-        /// the server instead.
-        #[arg(long, conflicts_with = "port")]
+        /// `pyproject.toml`, not the cwd. Bare names (`python3`, `pypy`) are
+        /// looked up via `PATH`. See the `Configuration` guide for the full
+        /// resolution rules.
+        #[arg(long)]
         python: Option<String>,
     },
 
-    /// Start a persistent worker server.
+    /// Start a persistent worker server speaking JSON-RPC over stdio.
     ///
-    /// Spawns and pre-warms the worker pool, runs initial discovery, and
-    /// listens on `127.0.0.1:<port>` for JSON-RPC 2.0 requests. Clients
-    /// connect with `tryke test --port` to run tests without paying the
-    /// cold-start cost. The server also watches the filesystem and
-    /// broadcasts `discover_complete` notifications when the test list
-    /// changes.
+    /// Prepares the worker pool, runs initial discovery, then reads JSON-RPC
+    /// 2.0 requests from stdin and writes responses and notifications to
+    /// stdout. Messages are newline-delimited — one JSON object per line —
+    /// not LSP's `Content-Length` framing. Each run uses fresh worker
+    /// processes. Like a language server, editor plugins spawn `tryke server`
+    /// as a child process and own its stdio; closing stdin shuts the server
+    /// down. The server also watches the filesystem and emits
+    /// `discover_complete` notifications when the test list changes.
     Server {
-        /// Port for the server to listen on.
-        #[arg(long, default_value = "2337")]
-        port: u16,
-
         /// Project root used for discovery and execution.
         #[arg(long)]
         root: Option<PathBuf>,
@@ -291,15 +276,24 @@ pub enum Commands {
         #[arg(short = 'i', long = "include")]
         include: Vec<String>,
 
-        /// Path to the Python interpreter used to spawn worker processes.
+        /// Path to the Python interpreter or environment used to spawn workers.
         ///
-        /// Overrides `[tool.tryke] python` in `pyproject.toml`. Defaults
-        /// to `python` on Windows / `python3` on Unix from `PATH`.
-        /// Relative values in `pyproject.toml` resolve against the
-        /// directory containing `pyproject.toml`; bare names go through
-        /// `PATH`. See the `Configuration` guide for the full rules.
+        /// Overrides `[tool.tryke] python` in `pyproject.toml`. When unset,
+        /// Tryke checks `VIRTUAL_ENV`, Conda, and the project `.venv` before
+        /// falling back to `python` on Windows / `python3` on Unix from `PATH`.
+        /// Relative CLI paths resolve against the project root. Relative
+        /// values in `pyproject.toml` resolve against the directory containing
+        /// `pyproject.toml`; bare names go through `PATH`. See the
+        /// `Configuration` guide for the full rules.
         #[arg(long)]
         python: Option<String>,
+
+        /// Number of worker processes.
+        ///
+        /// Defaults to the CPU count. Set to `1` to run tests in a single
+        /// worker, which is useful when debugging concurrency issues.
+        #[arg(short = 'j', long = "workers")]
+        workers: Option<usize>,
     },
 
     /// Remove tryke's persistent discovery cache.
@@ -370,7 +364,6 @@ impl Commands {
             markers: None,
             reporter: ReporterFormat::Text,
             root: None,
-            port: None,
             changed: false,
             changed_first: false,
             base_branch: None,

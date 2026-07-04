@@ -55,8 +55,8 @@ warning: tests/helpers/loader.py — dynamic imports found; this file will alway
 
 ### Effect on watch and server mode
 
-Watch and server mode pick up code changes by restarting the worker subprocesses
-between cycles, so every cycle starts with an empty `sys.modules`. Both static
+Watch and server mode start fresh worker subprocesses for each logical run, so
+every cycle starts with an empty `sys.modules`. Both static
 and dynamic imports load the latest source on the first test that needs them —
 there is no stale-cache pitfall here.
 
@@ -155,5 +155,5 @@ exclude = ["scripts/generate.py", "scripts/generated/"]
 If a file intentionally tests dynamic loading behavior — for example, a test that
 verifies your plugin loader works — that's fine. Just be aware that those tests
 will always run with `--changed`, since the import graph cannot prove they aren't
-affected by an unrelated change. (Watch and server mode restart workers on every
-change, so the dynamically-loaded code itself is always reloaded fresh.)
+affected by an unrelated change. (Watch and server mode start fresh workers for
+every run, so the dynamically-loaded code itself is always loaded fresh.)

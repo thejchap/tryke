@@ -19,7 +19,6 @@ clap-verbosity-flag = "3"
 console = { workspace = true }
 env_logger = "0.11"
 log = "0.4"
-notify-debouncer-mini = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tryke_config = { workspace = true }
@@ -28,6 +27,7 @@ tryke_reporter = { workspace = true, features = ["terminal"] }
 tryke_runner = { workspace = true }
 tryke_server = { workspace = true }
 tryke_types = { workspace = true }
+tryke_watcher = { workspace = true }
 
 [dev-dependencies]
 insta = { version = "1", features = ["filters"] }

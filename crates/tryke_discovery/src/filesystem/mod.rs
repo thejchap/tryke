@@ -13,22 +13,7 @@ mod discoverer;
 pub(crate) mod import_graph;
 
 pub use cache::{CleanCacheReport, clean_project_cache};
-pub use discoverer::Discoverer;
-
-pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
-    start
-        .ancestors()
-        .find(|dir| dir.join("pyproject.toml").exists())
-        .map(Path::to_path_buf)
-}
-
-#[must_use]
-pub fn configured_excludes(start: &Path, cli_excludes: &[String]) -> Vec<String> {
-    if !cli_excludes.is_empty() {
-        return cli_excludes.to_vec();
-    }
-    tryke_config::load_effective_config(start).discovery.exclude
-}
+pub use discoverer::{ChangeImpact, Discoverer};
 
 fn build_excludes(root: &Path, excludes: &[String]) -> Gitignore {
     let mut builder = GitignoreBuilder::new(root);
@@ -140,29 +125,31 @@ fn parse_tests_from_file(root: &Path, src_roots: &[PathBuf], file: &Path) -> Par
 
 #[must_use]
 pub fn discover_from(start: &Path) -> Vec<TestItem> {
-    let config = tryke_config::load_effective_config(start);
-    discover_from_with_options(start, &config.discovery.exclude, &config.discovery.src)
+    let config = tryke_config::TrykeConfig::discover(start);
+    let root = config.root();
+    let src_roots = config.src_roots();
+    discover_from_with_options(root, &config.discovery.exclude, &src_roots)
 }
 
 #[must_use]
 pub fn discover_from_with_excludes(start: &Path, excludes: &[String]) -> Vec<TestItem> {
-    let src = tryke_config::load_effective_config(start).discovery.src;
-    discover_from_with_options(start, excludes, &src)
+    let config = tryke_config::TrykeConfig::discover(start);
+    let root = config.root();
+    let src_roots = config.src_roots();
+    discover_from_with_options(root, excludes, &src_roots)
 }
 
 #[must_use]
 pub fn discover_from_with_options(
-    start: &Path,
+    root: &Path,
     excludes: &[String],
-    src: &[String],
+    src_roots: &[PathBuf],
 ) -> Vec<TestItem> {
-    let root = find_project_root(start).unwrap_or_else(|| start.to_path_buf());
-    let src_roots = resolve_src_roots(&root, src);
-    let mut files = collect_python_files(&root, excludes);
+    let mut files = collect_python_files(root, excludes);
     files.sort();
     let parsed: Vec<ParsedFile> = files
         .par_iter()
-        .map(|f| parse_tests_from_file(&root, &src_roots, f))
+        .map(|f| parse_tests_from_file(root, src_roots, f))
         .collect();
     let mut tests: Vec<TestItem> = parsed.into_iter().flat_map(|p| p.tests).collect();
     tests.sort_by(|a, b| {
@@ -171,21 +158,6 @@ pub fn discover_from_with_options(
             .then(a.line_number.cmp(&b.line_number))
     });
     tests
-}
-
-/// Resolve configured `src` entries (relative strings) into absolute
-/// source roots under `root`. Canonicalizes each so comparisons against
-/// the enumerated project file set (also canonicalized by the
-/// discoverer) compare apples to apples; falls back to the joined path
-/// if canonicalize fails (e.g. the configured root doesn't exist yet).
-#[must_use]
-pub fn resolve_src_roots(root: &Path, src: &[String]) -> Vec<PathBuf> {
-    src.iter()
-        .map(|entry| {
-            let joined = root.join(entry);
-            joined.canonicalize().unwrap_or(joined)
-        })
-        .collect()
 }
 
 /// # Errors
@@ -216,17 +188,9 @@ mod tests {
         dir
     }
 
-    #[test]
-    fn finds_project_root_from_child_dir() {
-        let dir = make_tree(&["src/foo.py"]);
-        let child = dir.path().join("src");
-        assert_eq!(find_project_root(&child), Some(dir.path().to_path_buf()));
-    }
-
-    #[test]
-    fn returns_none_when_no_pyproject() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        assert_eq!(find_project_root(dir.path()), None);
+    fn make_discoverer(root: &Path) -> Discoverer {
+        let src_roots = tryke_config::DiscoveryConfig::default().src_roots(root);
+        Discoverer::new(root, src_roots, &[], None)
     }
 
     #[test]
@@ -245,18 +209,6 @@ mod tests {
         let files = collect_python_files(dir.path(), &[]);
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("a.py"));
-    }
-
-    #[test]
-    fn cli_excludes_override_pyproject() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(
-            dir.path().join("pyproject.toml"),
-            "[tool.tryke]\nexclude = [\"generated/suites\"]\n",
-        )
-        .expect("write pyproject");
-        let excludes = configured_excludes(dir.path(), &["tmp".into(), "cache".into()]);
-        assert_eq!(excludes, vec!["tmp", "cache"]);
     }
 
     #[test]
@@ -328,7 +280,7 @@ if __TRYKE_TESTING__:
 ";
         fs::write(dir.path().join("user.py"), user_src).expect("write user.py");
 
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path());
         discoverer.rediscover();
         let changed = vec![dir.path().join("helpers.py")];
         let tests = discoverer.tests_for_changed(&changed);
@@ -356,7 +308,7 @@ if __TRYKE_TESTING__:
 ";
         fs::write(dir.path().join("test_guarded_dyn.py"), guarded_dyn).expect("write");
 
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path());
         discoverer.rediscover();
         let files = discoverer.dynamic_import_files();
         let names: Vec<&str> = files
@@ -383,7 +335,7 @@ def t(): pass
 ";
         fs::write(dir.path().join("test_raw_dyn.py"), raw_dyn).expect("write");
 
-        let mut discoverer = Discoverer::new(dir.path());
+        let mut discoverer = make_discoverer(dir.path());
         discoverer.rediscover();
         let files = discoverer.dynamic_import_files();
         let names: Vec<&str> = files

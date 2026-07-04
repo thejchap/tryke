@@ -1,5 +1,5 @@
 [package]
-name = "tryke_server"
+name = "tryke_watcher"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,23 +11,14 @@ license.workspace = true
 
 [dependencies]
 anyhow = "1"
-chrono = "0.4.44"
-bytes = "1"
 log = "0.4"
-serde = { workspace = true }
-serde_json = { workspace = true }
+notify = { workspace = true }
+notify-debouncer-mini = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = { workspace = true }
 tryke_discovery = { workspace = true, features = ["filesystem"] }
-tryke_reporter = { workspace = true, features = ["terminal"] }
-tryke_runner = { workspace = true }
-tryke_types = { workspace = true }
-tryke_watcher = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { workspace = true }
-tryke_testing = { workspace = true }
 
 [lints]
 workspace = true

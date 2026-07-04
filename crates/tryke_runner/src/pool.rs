@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use log::{LevelFilter, debug, trace};
+use anyhow::{Result, anyhow};
+use log::{LevelFilter, debug, trace, warn};
 
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::Stream;
@@ -12,6 +13,9 @@ use tryke_types::{HookItem, TestOutcome, TestResult};
 use crate::protocol::RegisterHooksParams;
 use crate::schedule::WorkUnit;
 use crate::worker::WorkerProcess;
+
+const WORKER_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+const WORKER_SPAWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Per-worker-task state: the (optional) live Python process plus a cache of
 /// the most recent `register_hooks` call per module. The cache exists so
@@ -76,48 +80,62 @@ enum WorkerCtrl {
 }
 
 pub struct WorkerPool {
+    /// Sender channel for work units
+    ///
+    /// Workers claim individual units off of this
     work_tx: async_channel::Sender<WorkerMsg>,
+
+    /// Control channels
+    ///
+    /// One per-worker to distribute messages to all.
     ctrl_txs: Vec<mpsc::UnboundedSender<WorkerCtrl>>,
 }
 
 impl WorkerPool {
-    /// Build a pool whose workers receive `TRYKE_LOG=<log_level>` on spawn.
+    /// Spawns a pool whose workers receive `TRYKE_LOG=<log_level>`.
     ///
     /// Pass `LevelFilter::Off` to leave workers silent (the env var is
     /// then not set on the child, so the worker's
     /// `_configure_logging_from_env` no-ops). Production callers use
     /// `tryke_config::worker_log_level` to derive this from CLI flags
     /// + the `TRYKE_LOG` env var.
-    #[must_use]
-    pub fn new(size: usize, python_bin: &str, root: &Path, log_level: LevelFilter) -> Self {
-        let mut python_path = vec![root.to_path_buf()];
-        // pyproject.toml declares python-source = "python" — add it to
-        // PYTHONPATH so the tryke package is importable even without a venv.
-        let src_dir = root.join("python");
-        if src_dir.is_dir() {
-            python_path.push(src_dir);
-        }
-        Self::with_python_path(size, python_bin, root, &python_path, log_level)
-    }
-
-    #[must_use]
-    pub fn with_python_path(
+    ///
+    /// `python_path` overrides the default path of `root` plus its `python`
+    /// directory when present. If `warm` is true, this method also waits for
+    /// every Python subprocess to start before returning.
+    pub async fn spawn(
         size: usize,
         python_bin: &str,
         root: &Path,
-        python_path: &[PathBuf],
+        python_path: Option<&[PathBuf]>,
         log_level: LevelFilter,
+        warm: bool,
     ) -> Self {
         let size = size.max(1);
-        let python_path = python_path.to_vec();
         let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let python_bin = python_bin.to_owned();
+        let python_path = python_path.map_or_else(
+            || {
+                let mut paths = vec![root.clone()];
+                // pyproject.toml declares python-source = "python" — add it to
+                // PYTHONPATH so the tryke package is importable without a venv.
+                let src_dir = root.join("python");
+                if src_dir.is_dir() {
+                    paths.push(src_dir);
+                }
+                paths
+            },
+            <[PathBuf]>::to_vec,
+        );
         let (work_tx, work_rx) = async_channel::unbounded();
         let mut ctrl_txs = Vec::with_capacity(size);
+
         for _ in 0..size {
-            let bin = python_bin.to_owned();
+            let bin = python_bin.clone();
             let work_rx = work_rx.clone();
             let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
             ctrl_txs.push(ctrl_tx);
+
             tokio::spawn(worker_task(
                 bin,
                 python_path.clone(),
@@ -127,10 +145,21 @@ impl WorkerPool {
                 ctrl_rx,
             ));
         }
-        Self { work_tx, ctrl_txs }
+
+        let pool = Self { work_tx, ctrl_txs };
+
+        if warm {
+            pool.warm().await;
+        }
+
+        pool
     }
 
-    pub fn run(&self, units: Vec<WorkUnit>) -> impl Stream<Item = TestResult> + use<> {
+    /// Submit any number of `WorkUnit`s to the worker pool
+    ///
+    /// A `WorkUnit` is an atomic group of tests to be run sequentially on a single worker
+    /// Returns a stream
+    pub fn submit(&self, units: Vec<WorkUnit>) -> impl Stream<Item = TestResult> + use<> {
         let (stream_tx, stream_rx) = mpsc::unbounded_channel();
 
         for unit in units {
@@ -151,7 +180,11 @@ impl WorkerPool {
     /// If a worker task has died (ctrl channel receiver dropped), its
     /// `send` returns `Err`; we skip its ack rather than push a future
     /// that will never resolve, which would hang the watcher/server.
-    async fn fanout_ctrl(&self, build: fn(oneshot::Sender<()>) -> WorkerCtrl) {
+    async fn fanout_ctrl_with_timeout(
+        &self,
+        build: fn(oneshot::Sender<()>) -> WorkerCtrl,
+        timeout: Duration,
+    ) -> bool {
         let mut ack_rxs = Vec::with_capacity(self.ctrl_txs.len());
         for ctrl_tx in &self.ctrl_txs {
             let (ack_tx, ack_rx) = oneshot::channel();
@@ -159,12 +192,30 @@ impl WorkerPool {
                 ack_rxs.push(ack_rx);
             }
         }
-        for ack_rx in ack_rxs {
-            let _ = ack_rx.await;
+        tokio::time::timeout(timeout, async {
+            for ack_rx in ack_rxs {
+                let _ = ack_rx.await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    async fn fanout_ctrl(&self, operation: &str, build: fn(oneshot::Sender<()>) -> WorkerCtrl) {
+        if !self
+            .fanout_ctrl_with_timeout(build, WORKER_CONTROL_TIMEOUT)
+            .await
+        {
+            // A control timeout means at least one worker did not ack a
+            // restart/warm, undermining the "fresh workers each run"
+            // guarantee — surface it at warn so it's visible by default.
+            warn!(
+                "worker control operation '{operation}' timed out after {WORKER_CONTROL_TIMEOUT:?}"
+            );
         }
     }
 
-    /// Kill every worker subprocess and respawn a fresh one in its place.
+    /// Replace every worker subprocess with a fresh, responsive process.
     ///
     /// This is how watch and server mode pick up code changes: rather than
     /// trying to mutate a live interpreter with `importlib.reload` (which is
@@ -174,13 +225,14 @@ impl WorkerPool {
     /// process replays cached `register_hooks` calls so fixtures keep
     /// working — same path as crash recovery.
     pub async fn restart_workers(&self) {
-        self.fanout_ctrl(WorkerCtrl::Restart).await;
+        self.fanout_ctrl("restart", WorkerCtrl::Restart).await;
+        self.warm().await;
     }
 
     /// Pre-spawn all worker processes in parallel so Python startup
     /// latency is not on the critical path of the first tests.
-    pub async fn warm(&self) {
-        self.fanout_ctrl(WorkerCtrl::Ping).await;
+    async fn warm(&self) {
+        self.fanout_ctrl("warm", WorkerCtrl::Ping).await;
     }
 
     pub fn shutdown(self) {
@@ -191,6 +243,35 @@ impl WorkerPool {
 }
 
 pub use tryke_types::path_to_module;
+
+async fn spawn_worker_process(
+    python_bin: &str,
+    path_refs: &[&Path],
+    root: &Path,
+    log_level: LevelFilter,
+) -> Result<WorkerProcess> {
+    let python_bin = python_bin.to_owned();
+    let python_paths = path_refs
+        .iter()
+        .map(|path| (*path).to_path_buf())
+        .collect::<Vec<_>>();
+    let root = root.to_path_buf();
+    let spawn = tokio::task::spawn_blocking(move || {
+        let path_refs = python_paths
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        WorkerProcess::spawn(&python_bin, &path_refs, &root, log_level)
+    });
+
+    match tokio::time::timeout(WORKER_SPAWN_TIMEOUT, spawn).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => Err(anyhow!("worker spawn task failed: {error}")),
+        Err(_) => Err(anyhow!(
+            "worker process spawn timed out after {WORKER_SPAWN_TIMEOUT:?}"
+        )),
+    }
+}
 
 /// Ensure a worker process is live, spawning one if needed and replaying
 /// every cached `register_hooks` call before returning it. Replay guarantees
@@ -208,7 +289,7 @@ async fn ensure_worker<'a>(
         return state.process.as_mut();
     }
     trace!("worker_task: spawning process");
-    let mut w = match WorkerProcess::spawn(python_bin, path_refs, root, log_level) {
+    let mut w = match spawn_worker_process(python_bin, path_refs, root, log_level).await {
         Ok(w) => w,
         Err(e) => {
             let msg = format_worker_failure(
@@ -384,10 +465,6 @@ async fn handle_ctrl(
             if let Some(mut w) = state.process.take() {
                 w.shutdown().await;
             }
-            // Eagerly respawn so the next Unit doesn't pay Python startup
-            // latency. ensure_worker replays cached register_hooks against
-            // the fresh process, mirroring the crash-recovery path.
-            let _ = ensure_worker(state, python_bin, path_refs, root, log_level).await;
             let _ = ack_tx.send(());
         }
     }
@@ -568,16 +645,18 @@ def test_third(n: int = Depends(counter)) -> None:
             hooks: vec![hook],
         };
 
-        let pool = WorkerPool::with_python_path(
+        let python_path = [dir.path().to_path_buf(), python_package_dir()];
+        let pool = WorkerPool::spawn(
             1,
             &test_python_bin(),
             dir.path(),
-            &[dir.path().to_path_buf(), python_package_dir()],
+            Some(&python_path),
             LevelFilter::Off,
-        );
-        pool.warm().await;
+            true,
+        )
+        .await;
 
-        let mut results: Vec<TestResult> = pool.run(vec![unit]).collect().await;
+        let mut results: Vec<TestResult> = pool.submit(vec![unit]).collect().await;
         results.sort_by_key(|r| r.test.name.clone());
 
         assert_eq!(results.len(), 3, "expected 3 results, got {results:?}");
@@ -653,16 +732,18 @@ def test_noop() -> None:
             hooks: vec![],
         };
 
-        let pool = WorkerPool::with_python_path(
+        let python_path = [dir.path().to_path_buf(), python_package_dir()];
+        let pool = WorkerPool::spawn(
             1,
             &test_python_bin(),
             dir.path(),
-            &[dir.path().to_path_buf(), python_package_dir()],
+            Some(&python_path),
             LevelFilter::Off,
-        );
-        pool.warm().await;
+            true,
+        )
+        .await;
 
-        let r1: Vec<TestResult> = pool.run(vec![make_unit()]).collect().await;
+        let r1: Vec<TestResult> = pool.submit(vec![make_unit()]).collect().await;
         assert_eq!(r1.len(), 1);
         assert!(
             matches!(r1[0].outcome, TestOutcome::Passed),
@@ -672,7 +753,7 @@ def test_noop() -> None:
 
         pool.restart_workers().await;
 
-        let r2: Vec<TestResult> = pool.run(vec![make_unit()]).collect().await;
+        let r2: Vec<TestResult> = pool.submit(vec![make_unit()]).collect().await;
         assert_eq!(r2.len(), 1);
         assert!(
             matches!(r2[0].outcome, TestOutcome::Passed),
@@ -759,15 +840,18 @@ def test_noop() -> None:
             hooks: vec![hook],
         };
 
-        let pool = WorkerPool::with_python_path(
+        let python_path = [dir.path().to_path_buf()];
+        let pool = WorkerPool::spawn(
             1,
             fake_python.to_str().expect("fake python path"),
             dir.path(),
-            &[dir.path().to_path_buf()],
+            Some(&python_path),
             LevelFilter::Off,
-        );
+            false,
+        )
+        .await;
 
-        let results: Vec<TestResult> = pool.run(vec![unit]).collect().await;
+        let results: Vec<TestResult> = pool.submit(vec![unit]).collect().await;
         assert_eq!(results.len(), 1);
         let message = match &results[0].outcome {
             TestOutcome::Error { message } => message.clone(),
@@ -793,29 +877,44 @@ def test_noop() -> None:
         pool.shutdown();
     }
 
-    /// `restart_workers` on a pool that has not been warmed (no
-    /// processes spawned yet) must still ack. The handler eagerly
-    /// spawns a fresh process — same path as a normal restart — so the
-    /// next test run is not on the Python startup critical path. This
-    /// matters because the file watcher can fire before the user
-    /// triggers any test run, and the watcher awaits the ack.
+    /// `restart_workers` on a cold pool must start every process and
+    /// acknowledge within the control timeout. This matters because the file
+    /// watcher can fire before the user triggers any test run.
     #[tokio::test]
     async fn restart_workers_with_no_live_processes_acks() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
 
-        let pool = WorkerPool::with_python_path(
+        let python_path = [dir.path().to_path_buf(), python_package_dir()];
+        let pool = WorkerPool::spawn(
             2,
             &test_python_bin(),
             dir.path(),
-            &[dir.path().to_path_buf(), python_package_dir()],
+            Some(&python_path),
             LevelFilter::Off,
-        );
-        // No warm() — workers are not yet spawned.
+            false,
+        )
+        .await;
         let restarted =
             tokio::time::timeout(std::time::Duration::from_secs(10), pool.restart_workers()).await;
         assert!(restarted.is_ok(), "restart_workers must ack within timeout");
 
         pool.shutdown();
+    }
+
+    #[tokio::test]
+    async fn worker_control_fanout_times_out_when_a_worker_does_not_ack() {
+        let (work_tx, _work_rx) = async_channel::unbounded();
+        let (ctrl_tx, _ctrl_rx) = mpsc::unbounded_channel();
+        let pool = WorkerPool {
+            work_tx,
+            ctrl_txs: vec![ctrl_tx],
+        };
+
+        let acknowledged = pool
+            .fanout_ctrl_with_timeout(WorkerCtrl::Restart, Duration::from_millis(10))
+            .await;
+
+        assert!(!acknowledged, "a missing worker ack must time out");
     }
 }

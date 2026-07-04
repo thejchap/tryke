@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use tryke_config::{TrykeConfig, resolve_python};
+use tryke_config::TrykeConfig;
 
 /// Path to the workspace root, derived from this crate's manifest dir.
 ///
@@ -21,21 +21,8 @@ pub fn workspace_root() -> PathBuf {
 
 /// Returns a Python interpreter suitable for spawning workers in tests.
 ///
-/// Prefers the workspace's uv-managed `.venv` if it exists (so tests pick
-/// up the project's `requires-python` interpreter even when no venv is
-/// active in the shell), otherwise delegates to `tryke_config::resolve_python`
-/// so the bare-name fallback always matches whatever production picks.
+/// Uses the same environment discovery as production.
 #[must_use]
 pub fn python_bin() -> String {
-    let workspace = workspace_root();
-    let venv = if cfg!(windows) {
-        workspace.join(".venv/Scripts/python.exe")
-    } else {
-        workspace.join(".venv/bin/python3")
-    };
-    if venv.exists() {
-        venv.to_string_lossy().into_owned()
-    } else {
-        resolve_python(None, &TrykeConfig::default())
-    }
+    TrykeConfig::discover(&workspace_root()).python()
 }

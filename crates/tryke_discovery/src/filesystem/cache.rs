@@ -97,31 +97,26 @@ pub struct CleanCacheReport {
     pub removed_entries: usize,
 }
 
-/// Remove tryke's persistent discovery cache for `start`.
+/// Remove tryke's persistent discovery cache.
 ///
-/// When `cache_dir` is `None`, the default cache lives under tryke's owned
-/// state directory at `<project-root>/.tryke/cache`, so the whole cache
-/// directory can be removed. `start` is resolved the same way discovery finds a
-/// project root: walk up to the nearest `pyproject.toml`, then fall back to
-/// `start` when no project file exists. When a custom cache directory is
-/// configured, only tryke-owned cache files are removed to avoid deleting
-/// unrelated user data.
+/// The supplied configuration already contains the resolved project root and
+/// cache override. The default cache lives at `<project-root>/.tryke/cache`;
+/// custom cache directories retain unrelated user data.
 ///
 /// # Errors
 ///
 /// Returns any filesystem error encountered while deleting the cache directory
 /// or cache files, except missing cache paths which are treated as already
 /// clean.
-pub fn clean_project_cache(start: &Path, cache_dir: Option<&Path>) -> io::Result<CleanCacheReport> {
-    match cache_dir {
+pub fn clean_project_cache(config: &tryke_config::TrykeConfig) -> io::Result<CleanCacheReport> {
+    let cache_dir = config.cache_dir();
+    match cache_dir.as_deref() {
         Some(cache_dir) => clean_custom_cache_dir(cache_dir),
-        None => clean_default_cache_dir(start),
+        None => clean_default_cache_dir(config.root()),
     }
 }
 
-fn clean_default_cache_dir(start: &Path) -> io::Result<CleanCacheReport> {
-    let root = super::find_project_root(start).unwrap_or_else(|| start.to_path_buf());
-    let root = root.canonicalize().unwrap_or(root);
+fn clean_default_cache_dir(root: &Path) -> io::Result<CleanCacheReport> {
     let cache_dir = root.join(".tryke").join("cache");
     let removed_entries = match fs::remove_dir_all(&cache_dir) {
         Ok(()) => 1,
@@ -368,7 +363,8 @@ mod tests {
         fs::write(state_dir.join(".gitignore"), b"# created by tryke\n*\n")
             .expect("write gitignore");
 
-        let report = clean_project_cache(dir.path(), None).expect("clean cache");
+        let config = tryke_config::TrykeConfig::discover(dir.path());
+        let report = clean_project_cache(&config).expect("clean cache");
 
         assert_eq!(report.cache_dir, cache_dir);
         assert_eq!(report.removed_entries, 1);
@@ -391,7 +387,8 @@ mod tests {
         fs::create_dir_all(&cache_dir).expect("create cache dir");
         fs::write(cache_dir.join("discovery-v1.bin"), b"cache").expect("write cache");
 
-        let report = clean_project_cache(&subdir, None).expect("clean cache");
+        let config = tryke_config::TrykeConfig::discover(&subdir);
+        let report = clean_project_cache(&config).expect("clean cache");
 
         assert_eq!(report.cache_dir, cache_dir);
         assert_eq!(report.removed_entries, 1);
@@ -408,7 +405,14 @@ mod tests {
         fs::write(cache_dir.join("keep-me.txt"), b"user data").expect("write user data");
         fs::write(cache_dir.join(".gitignore"), b"custom\n").expect("write user gitignore");
 
-        let report = clean_project_cache(dir.path(), Some(&cache_dir)).expect("clean custom cache");
+        let config = tryke_config::TrykeConfig::load(
+            dir.path(),
+            tryke_config::ConfigOverrides {
+                cache_dir: Some(cache_dir.clone()),
+                ..tryke_config::ConfigOverrides::default()
+            },
+        );
+        let report = clean_project_cache(&config).expect("clean custom cache");
 
         assert_eq!(report.cache_dir, cache_dir);
         assert_eq!(report.removed_entries, 2);

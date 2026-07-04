@@ -1,24 +1,27 @@
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
 
 use anyhow::Result;
+use tryke_config::TrykeConfig;
 use tryke_discovery::Discoverer;
 use tryke_types::HookItem;
 
 use crate::git::resolve_changed_files;
 
 pub fn run_graph(
-    root: Option<&Path>,
-    excludes: &[String],
+    config: &TrykeConfig,
     connected_only: bool,
     changed: bool,
     base_branch: Option<&str>,
-    cache_dir: Option<&Path>,
 ) -> Result<()> {
-    let cwd = std::env::current_dir()?;
-    let root_path = root.unwrap_or(&cwd);
-    let mut discoverer =
-        Discoverer::new_with_excludes_and_cache_dir(root_path, excludes, cache_dir);
+    let root_path = config.root();
+    let src_roots = config.src_roots();
+    let cache_dir = config.cache_dir();
+    let mut discoverer = Discoverer::new(
+        root_path,
+        src_roots,
+        &config.discovery.exclude,
+        cache_dir.as_deref(),
+    );
     discoverer.rediscover();
 
     let changed_files = if changed {
@@ -103,15 +106,16 @@ pub fn run_graph(
 /// dependency names (references to hooks that don't exist in any
 /// discovered module) are printed with a `?` suffix so users can spot
 /// typos or missing fixtures without reading through test output.
-pub fn run_fixture_graph(
-    root: Option<&Path>,
-    excludes: &[String],
-    cache_dir: Option<&Path>,
-) -> Result<()> {
-    let cwd = std::env::current_dir()?;
-    let root_path = root.unwrap_or(&cwd);
-    let mut discoverer =
-        Discoverer::new_with_excludes_and_cache_dir(root_path, excludes, cache_dir);
+pub fn run_fixture_graph(config: &TrykeConfig) -> Result<()> {
+    let root_path = config.root();
+    let src_roots = config.src_roots();
+    let cache_dir = config.cache_dir();
+    let mut discoverer = Discoverer::new(
+        root_path,
+        src_roots,
+        &config.discovery.exclude,
+        cache_dir.as_deref(),
+    );
     discoverer.rediscover();
 
     let hooks = discoverer.hooks();
@@ -208,7 +212,8 @@ mod tests {
             "from utils import helper\n@test\ndef test_foo(): pass\n",
         )
         .expect("write");
-        assert!(run_graph(Some(dir.path()), &[], false, false, None, None).is_ok());
+        let config = TrykeConfig::discover(dir.path());
+        assert!(run_graph(&config, false, false, None).is_ok());
     }
 
     #[test]
@@ -226,7 +231,8 @@ mod tests {
             "@test\ndef test_isolated(): pass\n",
         )
         .expect("write");
-        assert!(run_graph(Some(dir.path()), &[], true, false, None, None).is_ok());
+        let config = TrykeConfig::discover(dir.path());
+        assert!(run_graph(&config, true, false, None).is_ok());
     }
 
     #[test]
@@ -244,7 +250,8 @@ mod tests {
              def test_it(s=Depends(session)):\n    pass\n",
         )
         .expect("write");
-        assert!(run_fixture_graph(Some(dir.path()), &[], None).is_ok());
+        let config = TrykeConfig::discover(dir.path());
+        assert!(run_fixture_graph(&config).is_ok());
     }
 
     #[test]
@@ -256,6 +263,7 @@ mod tests {
             "@test\ndef test_it(): pass\n",
         )
         .expect("write");
-        assert!(run_fixture_graph(Some(dir.path()), &[], None).is_ok());
+        let config = TrykeConfig::discover(dir.path());
+        assert!(run_fixture_graph(&config).is_ok());
     }
 }

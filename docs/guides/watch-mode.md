@@ -8,15 +8,15 @@ Watch mode monitors your project for file changes and reruns only the affected t
 tryke
 ```
 
-On startup Tryke pre-warms the worker pool and runs discovery to
-build the import graph (so it can answer "which tests are affected?"
+On startup Tryke prepares the worker pool and runs discovery to build
+the import graph (so it can answer "which tests are affected?"
 on the first save). It then enters an idle state — no tests are
 **executed** until you save a file. Pass `--now` to also run the full
 test set on startup. Either way, once a file changes, Tryke:
 
 1. Identifies which modules were modified
 2. Walks the import graph to find all tests that depend on the changed modules
-3. Restarts the worker subprocesses so the next run loads the updated code in a fresh Python interpreter
+3. Starts fresh worker subprocesses for the run
 4. Reruns only the affected tests
 
 This gives you fast feedback without rerunning the entire suite. Restarting the workers (rather than calling `importlib.reload` in-process) avoids the classic reload pitfalls — stale class objects, captured closures, and decorator-bound state from the old definitions are all dropped because the interpreter itself is gone.
@@ -124,11 +124,11 @@ This is useful when:
 - You are debugging test ordering or flake issues and want a full run on
   every save.
 
-Worker subprocesses are still restarted on every change so Python picks up
-the new code from a fresh interpreter; only the test selection is broadened.
+Worker subprocesses are still fresh for every run; only the test selection is
+broadened.
 
 ## Debouncing and change dedup
 
 File system events are debounced with a 50ms quiet window — just long enough to coalesce the burst of inotify events the kernel emits for a single write syscall.
 
-On top of the debouncer, watch mode tracks each file's `(mtime, size)` signature and skips events that don't actually move it. Editor tail activity (atomic-rename metadata writes, swap-file cleanup, format-on-save that produces identical output, LSP re-saves) often produces a second batch of events outside the debounce window; without the signature check, that second batch would trigger a redundant restart for a single user save. With it, only batches that represent a real content change reach the worker pool — so we can keep the debounce tight without paying for it in spurious restarts.
+On top of the debouncer, watch mode tracks each file's `(mtime, size)` signature and skips events that don't actually move it. Editor tail activity (atomic-rename metadata writes, swap-file cleanup, format-on-save that produces identical output, LSP re-saves) often produces a second batch of events outside the debounce window; without the signature check, that second batch would trigger a redundant test cycle for a single user save. With it, only batches that represent a real content change reach discovery — so we can keep the debounce tight without paying for it in spurious runs.

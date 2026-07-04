@@ -1,19 +1,20 @@
-use std::{env, time::Instant};
+use std::{env, path::Path, time::Instant};
 
 use anyhow::Result;
 use clap::Parser;
 use log::debug;
 use tryke::cli::{Cli, Commands, ReporterFormat};
-use tryke::discovery::{
-    discover_tests, discover_tests_changed_first, discover_tests_for_paths, resolved_excludes,
-};
-use tryke::execution::run_tests;
+use tryke::discovery::{discover_tests, discover_tests_changed_first, discover_tests_for_paths};
+use tryke::execution::{run_tests, worker_pool_size};
 use tryke::graph::{run_fixture_graph, run_graph};
 use tryke::watch::run_watch;
+use tryke_config::{ConfigOverrides, TrykeConfig};
+use tryke_discovery::Discoverer;
 use tryke_reporter::{
     DotReporter, JSONReporter, JUnitReporter, LlmReporter, NextReporter, ProgressReporter,
     Reporter, SugarReporter, TextReporter, Verbosity,
 };
+use tryke_runner::WorkerPool;
 use tryke_types::ChangedSelectionSummary;
 use tryke_types::filter::TestFilter;
 
@@ -74,6 +75,24 @@ fn effective_command(command: Option<Commands>) -> EffectiveCommand {
     }
 }
 
+fn load_config(
+    root: &Path,
+    python: Option<&str>,
+    cache_dir: Option<&Path>,
+    exclude: &[String],
+    include: &[String],
+) -> TrykeConfig {
+    TrykeConfig::load(
+        root,
+        ConfigOverrides {
+            python: python.map(str::to_owned),
+            cache_dir: cache_dir.map(Path::to_path_buf),
+            exclude: exclude.to_vec(),
+            include: include.to_vec(),
+        },
+    )
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let cli_filter = cli.verbose.log_level_filter();
@@ -87,22 +106,9 @@ fn main() -> Result<()> {
     )
     .init();
     debug!("{cli:?}");
-
-    // Cross-language verbosity for spawned python workers. `RUST_LOG` is
-    // intentionally not consulted (its per-module filter syntax doesn't
-    // map onto a python log level); `TRYKE_LOG` is the umbrella knob and
-    // `-v` only propagates when the user explicitly asked for more
-    // verbosity than the `Warn` default.
     let worker_log = tryke_config::worker_log_level(tryke_log.as_deref(), cli_filter);
-
-    // Reporter diagnostic verbosity follows the cross-language umbrella,
-    // not the raw CLI flag — otherwise `TRYKE_LOG=info` would light up logs
-    // but keep short tracebacks, contradicting the "single knob" promise.
-    // `RUST_LOG` is deliberately not consulted here: it's a rust-internal
-    // filter, not a user-facing UI knob.
     let verbosity = Verbosity::from_level_filter(rust_default);
-
-    let rt = tokio::runtime::Runtime::new()?;
+    let runtime = tokio::runtime::Runtime::new()?;
     let cache_dir = cli.cache_dir.clone();
     let effective = effective_command(cli.command);
     let command = effective.as_command();
@@ -116,7 +122,6 @@ fn main() -> Result<()> {
             markers,
             reporter,
             root,
-            port,
             changed,
             changed_first,
             base_branch,
@@ -145,85 +150,44 @@ fn main() -> Result<()> {
                 });
                 rep.set_watch_hint(Some("Waiting for file changes...".into()));
                 let cwd = env::current_dir()?;
-                let root_path = root.as_deref().unwrap_or(&cwd);
-                let excludes = resolved_excludes(root_path, exclude, include);
+                let config = load_config(
+                    root.as_deref().unwrap_or(&cwd),
+                    python.as_deref(),
+                    cache_dir.as_deref(),
+                    exclude,
+                    include,
+                );
                 let test_filter = TestFilter::from_args(&[], filter.as_deref(), markers.as_deref())
                     .map_err(|e| anyhow::anyhow!(e))?;
-                let config = tryke_config::load_effective_config(root_path);
-                let resolved_python = tryke_config::resolve_python(python.as_deref(), &config);
-                let resolved_cache_dir =
-                    tryke_config::resolve_cache_dir(cache_dir.as_deref(), &config);
-                return rt.block_on(run_watch(
+                return runtime.block_on(run_watch(
                     &mut *rep,
-                    Some(root_path),
-                    &resolved_python,
+                    &config,
                     worker_log,
-                    &excludes,
                     &test_filter,
                     resolved_maxfail,
                     *workers,
                     (*dist).into(),
                     *all,
                     *now,
-                    resolved_cache_dir.as_deref(),
                 ));
             }
-            if let Some(p) = port {
-                if cache_dir.is_some() {
-                    return Err(anyhow::anyhow!(
-                        "--cache-dir is not supported with --port; start the server with --cache-dir instead"
-                    ));
-                }
-                if !exclude.is_empty() {
-                    return Err(anyhow::anyhow!(
-                        "--exclude is not supported with --port; start the server with --exclude instead"
-                    ));
-                }
-                let root_path = root.clone().unwrap_or(env::current_dir()?);
-                return tryke_server::Client::new(
-                    *p,
-                    filter.clone(),
-                    paths.clone(),
-                    markers.clone(),
-                )
-                .run(&root_path, &mut *rep);
-            }
-
             let cwd = env::current_dir()?;
-            let root_path = root.as_deref().unwrap_or(&cwd);
-            let excludes = resolved_excludes(root_path, exclude, include);
+            let config = load_config(
+                root.as_deref().unwrap_or(&cwd),
+                python.as_deref(),
+                cache_dir.as_deref(),
+                exclude,
+                include,
+            );
             let test_filter = TestFilter::from_args(paths, filter.as_deref(), markers.as_deref())
                 .map_err(|e| anyhow::anyhow!(e))?;
-            let config = tryke_config::load_effective_config(root_path);
-            let resolved_cache_dir = tryke_config::resolve_cache_dir(cache_dir.as_deref(), &config);
-
             let discovery_start = Instant::now();
-            // Fast path: explicit paths without change-based selection
-            // skip the full project walk and import-graph build. The
-            // post-filter (`test_filter.apply` below) still runs to
-            // honor `:line` specs, `--filter`, and `--markers`.
             let discovered = if !paths.is_empty() && !*changed && !*changed_first {
-                discover_tests_for_paths(
-                    root_path,
-                    &test_filter.path_specs,
-                    &excludes,
-                    resolved_cache_dir.as_deref(),
-                )
+                discover_tests_for_paths(&config, &test_filter.path_specs)
             } else if *changed_first {
-                discover_tests_changed_first(
-                    root_path,
-                    base_branch.as_deref(),
-                    &excludes,
-                    resolved_cache_dir.as_deref(),
-                )
+                discover_tests_changed_first(&config, base_branch.as_deref())
             } else {
-                discover_tests(
-                    root_path,
-                    *changed,
-                    base_branch.as_deref(),
-                    &excludes,
-                    resolved_cache_dir.as_deref(),
-                )
+                discover_tests(&config, *changed, base_branch.as_deref())
             };
             for warning in &discovered.warnings {
                 rep.on_discovery_warning(warning);
@@ -242,11 +206,9 @@ fn main() -> Result<()> {
                 rep.on_collect_complete(&tests);
                 Ok(())
             } else {
-                let resolved_python = tryke_config::resolve_python(python.as_deref(), &config);
-                let summary = rt.block_on(run_tests(
+                let summary = runtime.block_on(run_tests(
                     &mut *rep,
-                    root_path,
-                    &resolved_python,
+                    &config,
                     worker_log,
                     tests,
                     &discovered.hooks,
@@ -263,34 +225,59 @@ fn main() -> Result<()> {
             }
         }
         Commands::Server {
-            port,
             root,
             exclude,
             include,
             python,
+            workers,
         } => {
-            let root_path = root.clone().unwrap_or(env::current_dir()?);
-            let excludes = resolved_excludes(&root_path, exclude, include);
-            let config = tryke_config::load_effective_config(&root_path);
-            let resolved_python = tryke_config::resolve_python(python.as_deref(), &config);
-            let resolved_cache_dir = tryke_config::resolve_cache_dir(cache_dir.as_deref(), &config);
-            let server = tryke_server::Server::new(
-                *port,
-                root_path,
-                excludes,
-                resolved_python,
-                worker_log,
-                resolved_cache_dir,
+            let cwd = env::current_dir()?;
+            let config = load_config(
+                root.as_deref().unwrap_or(&cwd),
+                python.as_deref(),
+                cache_dir.as_deref(),
+                exclude,
+                include,
             );
-            rt.block_on(server.run())
+            let root_path = config.root().to_path_buf();
+            let excludes = config.discovery.exclude.clone();
+            let src_roots = config.src_roots();
+            let resolved_python = config.python();
+            let resolved_cache_dir = config.cache_dir();
+
+            runtime.block_on(async move {
+                let worker_pool = WorkerPool::spawn(
+                    workers.unwrap_or_else(worker_pool_size),
+                    &resolved_python,
+                    &root_path,
+                    None,
+                    worker_log,
+                    false,
+                )
+                .await;
+
+                let discoverer = Discoverer::new(
+                    &root_path,
+                    src_roots,
+                    &excludes,
+                    resolved_cache_dir.as_deref(),
+                );
+
+                tryke_server::Server::new(worker_pool, discoverer)
+                    .serve()
+                    .await
+            })
         }
         Commands::Clean { root } => {
             let cwd = env::current_dir()?;
-            let root_path = root.as_deref().unwrap_or(&cwd);
-            let config = tryke_config::load_effective_config(root_path);
-            let resolved_cache_dir = tryke_config::resolve_cache_dir(cache_dir.as_deref(), &config);
-            let report =
-                tryke_discovery::clean_project_cache(root_path, resolved_cache_dir.as_deref())?;
+            let config = load_config(
+                root.as_deref().unwrap_or(&cwd),
+                None,
+                cache_dir.as_deref(),
+                &[],
+                &[],
+            );
+            let report = tryke_discovery::clean_project_cache(&config)?;
             if report.removed_entries == 0 {
                 println!(
                     "No tryke discovery cache found at {}",
@@ -317,21 +304,17 @@ fn main() -> Result<()> {
                 return Err(anyhow::anyhow!("--base-branch requires --changed"));
             }
             let cwd = env::current_dir()?;
-            let root_path = root.as_deref().unwrap_or(&cwd);
-            let excludes = resolved_excludes(root_path, exclude, include);
-            let config = tryke_config::load_effective_config(root_path);
-            let resolved_cache_dir = tryke_config::resolve_cache_dir(cache_dir.as_deref(), &config);
+            let config = load_config(
+                root.as_deref().unwrap_or(&cwd),
+                None,
+                cache_dir.as_deref(),
+                exclude,
+                include,
+            );
             if *fixtures {
-                run_fixture_graph(Some(root_path), &excludes, resolved_cache_dir.as_deref())
+                run_fixture_graph(&config)
             } else {
-                run_graph(
-                    Some(root_path),
-                    &excludes,
-                    *connected_only,
-                    *changed,
-                    base_branch.as_deref(),
-                    resolved_cache_dir.as_deref(),
-                )
+                run_graph(&config, *connected_only, *changed, base_branch.as_deref())
             }
         }
     }
@@ -633,12 +616,6 @@ mod tests {
     }
 
     #[test]
-    fn watch_conflicts_with_port() {
-        let result = Cli::try_parse_from(["tryke", "test", "--watch", "--port", "2337"]);
-        assert!(result.is_err(), "--watch and --port should conflict");
-    }
-
-    #[test]
     fn watch_conflicts_with_paths() {
         let result = Cli::try_parse_from(["tryke", "test", "--watch", "tests/foo.py"]);
         assert!(
@@ -664,14 +641,8 @@ mod tests {
 
     #[test]
     fn server_subcommand_parsed() {
-        let cli = Cli::try_parse_from(["tryke", "server", "--port", "9000"]).unwrap();
-        assert!(matches!(command(&cli), Commands::Server { port: 9000, .. }));
-    }
-
-    #[test]
-    fn server_default_port() {
         let cli = Cli::try_parse_from(["tryke", "server"]).unwrap();
-        assert!(matches!(command(&cli), Commands::Server { port: 2337, .. }));
+        assert!(matches!(command(&cli), Commands::Server { .. }));
     }
 
     #[test]
@@ -694,16 +665,6 @@ mod tests {
     }
 
     #[test]
-    fn test_python_conflicts_with_port() {
-        let result =
-            Cli::try_parse_from(["tryke", "test", "--python", "/usr/bin/python3", "--port"]);
-        assert!(
-            result.is_err(),
-            "--python and --port should conflict (server has its own python)"
-        );
-    }
-
-    #[test]
     fn server_python_flag_parsed() {
         let cli =
             Cli::try_parse_from(["tryke", "server", "--python", "/usr/bin/python3.13"]).unwrap();
@@ -717,24 +678,12 @@ mod tests {
     }
 
     #[test]
-    fn test_port_flag_parsed() {
-        let cli = Cli::try_parse_from(["tryke", "test", "--port", "2337"]).unwrap();
+    fn server_workers_flag_parsed() {
+        let cli = Cli::try_parse_from(["tryke", "server", "--workers", "2"]).unwrap();
         assert!(matches!(
             command(&cli),
-            Commands::Test {
-                port: Some(2337),
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn test_port_flag_defaults_to_2337() {
-        let cli = Cli::try_parse_from(["tryke", "test", "--port"]).unwrap();
-        assert!(matches!(
-            command(&cli),
-            Commands::Test {
-                port: Some(2337),
+            Commands::Server {
+                workers: Some(2),
                 ..
             }
         ));

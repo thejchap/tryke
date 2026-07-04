@@ -16,7 +16,7 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # Dry-run on pull_request so label changes can be reviewed in CI output
       # without mutating the repo. Real sync only happens on push to main or
       # manual workflow_dispatch.

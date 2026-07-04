@@ -1,3 +1,5 @@
 [profile.default]
 # Warn on tests slower than 30s. No terminate-after — that masks flakes.
 slow-timeout = { period = "30s" }
+# Concurrent process teardown on macOS can exceed nextest's 100ms default.
+leak-timeout = "500ms"

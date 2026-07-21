@@ -57,7 +57,14 @@ import logging
 import os
 import sys
 import traceback
-from typing import TYPE_CHECKING
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    NotRequired,
+    TypedDict,
+    assert_never,
+)
 
 import tryke_guard
 from tryke.runner import (
@@ -93,6 +100,39 @@ type _DispatchResult = TestResult | str | None
 
 class _InvalidParamsError(Exception):
     """Missing or invalid JSON-RPC method parameter."""
+
+
+_Method = Literal["ping", "register_hooks", "finalize_hooks", "run_test", "run_doctest"]
+"""Tryke RPC methods"""
+
+_JSONRPCErrorCode = Literal[-32700, -32600, -32601, -32602, -32603]
+"""
+code	message	meaning
+-32700	Parse error	Invalid JSON was received by the server.
+An error occurred on the server while parsing the JSON text.
+-32600	Invalid Request	The JSON sent is not a valid Request object.
+-32601	Method not found	The method does not exist / is not available.
+-32602	Invalid params	Invalid method parameter(s).
+-32603	Internal error	Internal JSON-RPC error.
+-32000 to -32099	Server error	Reserved for implementation-defined server-errors.
+The remainder of the space is available for application defined errors.
+"""
+
+
+class _JSONRPCError(TypedDict):
+    code: _JSONRPCErrorCode
+    message: str
+    data: NotRequired[Any]
+    traceback: NotRequired[str]
+
+
+class _JSONRPCResponse(TypedDict):
+    """https://www.jsonrpc.org/specification#response_object"""
+
+    id: NotRequired[int | str | None]
+    jsonrpc: Literal["2.0"]
+    result: NotRequired[Any]
+    error: NotRequired[_JSONRPCError]
 
 
 class Worker:
@@ -161,12 +201,13 @@ class Worker:
                         "error": {
                             "code": -32603,
                             "message": str(exc),
+                            # TODO(thejchap) change to data # noqa: FIX002, TD003, TD004
                             "traceback": traceback.format_exc(),
                         },
                     }
                 )
 
-    def _write(self, obj: dict[str, object]) -> None:
+    def _write(self, obj: _JSONRPCResponse) -> None:
         self._output.write(json.dumps(obj) + "\n")
         self._output.flush()
 
@@ -190,42 +231,42 @@ class Worker:
 
     def _dispatch(
         self,
-        method: str,
+        method: _Method,
         params: dict[str, object],
     ) -> _DispatchResult:
-        if method == "ping":
-            return "pong"
-        if method == "register_hooks":
-            return self._register_hooks(
-                self._require_str(params, "module", method),
-                params.get("hooks", []),
-            )
-        if method == "finalize_hooks":
-            return self._finalize_hooks(
-                self._require_str(params, "module", method),
-            )
-        if method == "run_test":
-            xfail_raw = params.get("xfail")
-            raw_groups = params.get("groups", [])
-            groups = (
-                [str(g) for g in raw_groups] if isinstance(raw_groups, list) else []
-            )
-            case_label_raw = params.get("case_label")
-            case_label = str(case_label_raw) if case_label_raw is not None else None
-            return self._run_test(
-                self._require_str(params, "module", method),
-                self._require_str(params, "function", method),
-                xfail=(str(xfail_raw) if xfail_raw is not None else None),
-                groups=groups,
-                case_label=case_label,
-            )
-        if method == "run_doctest":
-            return self._run_doctest(
-                self._require_str(params, "module", method),
-                str(params.get("object_path", "")),
-            )
-        msg = f"unknown method: {method}"
-        raise ValueError(msg)
+        match method:
+            case "ping":
+                return "pong"
+            case "register_hooks":
+                return self._register_hooks(
+                    self._require_str(params, "module", method),
+                    params.get("hooks", []),
+                )
+            case "finalize_hooks":
+                return self._finalize_hooks(
+                    self._require_str(params, "module", method),
+                )
+            case "run_test":
+                xfail_raw = params.get("xfail")
+                raw_groups = params.get("groups", [])
+                groups = (
+                    [str(g) for g in raw_groups] if isinstance(raw_groups, list) else []
+                )
+                case_label_raw = params.get("case_label")
+                case_label = str(case_label_raw) if case_label_raw is not None else None
+                return self._run_test(
+                    self._require_str(params, "module", method),
+                    self._require_str(params, "function", method),
+                    xfail=(str(xfail_raw) if xfail_raw is not None else None),
+                    groups=groups,
+                    case_label=case_label,
+                )
+            case "run_doctest":
+                return self._run_doctest(
+                    self._require_str(params, "module", method),
+                    str(params.get("object_path", "")),
+                )
+        assert_never(method)
 
     def _get_module(self, module_name: str) -> ModuleType:
         if module_name not in self._modules:

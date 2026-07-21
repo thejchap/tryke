@@ -100,8 +100,8 @@ with describe("json-rpc envelope"):
     def test_unknown_method() -> None:
         resp = _send(_rpc("bogus"))
         expect(resp["error"]["code"], "internal error code").to_equal(-32603)
-        expect(resp["error"]["message"], "error mentions unknown method").to_contain(
-            "unknown method",
+        expect(resp["error"]["message"], "unknown method").to_contain(
+            "Expected code to be unreachable",
         )
 
     @test(name="missing required param returns -32602")

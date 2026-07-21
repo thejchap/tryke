@@ -101,7 +101,7 @@ impl<T: Serialize> Response<T> {
 pub struct ErrorResponse {
     pub jsonrpc: String,
     pub id: Option<Value>,
-    pub error: RpcError,
+    pub error: RPCError,
 }
 
 impl ErrorResponse {
@@ -110,7 +110,7 @@ impl ErrorResponse {
         Self {
             jsonrpc: "2.0".to_string(),
             id,
-            error: RpcError { code, message },
+            error: RPCError { code, message },
         }
     }
 
@@ -126,7 +126,7 @@ impl ErrorResponse {
 }
 
 #[derive(Debug, Serialize)]
-pub struct RpcError {
+pub struct RPCError {
     pub code: i32,
     pub message: String,
 }
@@ -236,7 +236,7 @@ mod tests {
         let resp = ErrorResponse {
             jsonrpc: "2.0".to_string(),
             id: None,
-            error: RpcError {
+            error: RPCError {
                 code: METHOD_NOT_FOUND,
                 message: "not found".to_string(),
             },

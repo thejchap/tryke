@@ -32,23 +32,33 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize)]
-pub struct RpcRequest {
+#[serde(rename_all = "snake_case")]
+pub enum RPCRequestMethod {
+    RegisterHooks,
+    FinalizeHooks,
+    RunTest,
+    RunDoctest,
+    Ping,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RPCRequest {
     pub jsonrpc: &'static str,
     pub id: u64,
-    pub method: String,
+    pub method: RPCRequestMethod,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub params: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct RpcResponse {
+pub struct RPCResponse {
     pub id: u64,
     pub result: Option<serde_json::Value>,
-    pub error: Option<RpcErrorDetail>,
+    pub error: Option<RPCErrorDetail>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct RpcErrorDetail {
+pub struct RPCErrorDetail {
     pub code: i32,
     pub message: String,
     #[serde(default)]

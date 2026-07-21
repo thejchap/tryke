@@ -10,8 +10,8 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tryke_types::{TestItem, TestResult, convert_wire_result};
 
 use crate::protocol::{
-    FinalizeHooksParams, RegisterHooksParams, RpcRequest, RpcResponse, RunDoctestParams,
-    RunTestParams, RunTestResultWire,
+    FinalizeHooksParams, RPCRequest, RPCRequestMethod, RPCResponse, RegisterHooksParams,
+    RunDoctestParams, RunTestParams, RunTestResultWire,
 };
 
 /// Cap on retained worker-stderr bytes. Beyond this we keep the most recent
@@ -107,15 +107,15 @@ impl WorkerProcess {
 
     async fn call<R: for<'de> serde::Deserialize<'de>>(
         &mut self,
-        method: &str,
+        method: RPCRequestMethod,
         params: Option<serde_json::Value>,
     ) -> Result<R> {
         let id = self.next_id;
         self.next_id += 1;
-        let req = RpcRequest {
+        let req = RPCRequest {
             jsonrpc: "2.0",
             id,
-            method: method.to_string(),
+            method,
             params,
         };
         let mut line = serde_json::to_string(&req)?;
@@ -127,7 +127,7 @@ impl WorkerProcess {
         // library may have written to fd 1 during import (e.g. weasyprint via
         // cffi).  Collect leaked lines so we can surface them in errors.
         let mut leaked_stdout: Vec<String> = Vec::new();
-        let resp: RpcResponse = loop {
+        let resp: RPCResponse = loop {
             let mut resp_line = String::new();
             let n = self.stdout.read_line(&mut resp_line).await?;
             if n == 0 {
@@ -145,7 +145,7 @@ impl WorkerProcess {
             trace!("worker rpc <- {}", resp_line.trim());
             let trimmed = resp_line.trim();
             if !trimmed.is_empty()
-                && let Ok(resp) = serde_json::from_str::<RpcResponse>(trimmed)
+                && let Ok(resp) = serde_json::from_str::<RPCResponse>(trimmed)
             {
                 if !leaked_stdout.is_empty() {
                     trace!(
@@ -194,7 +194,7 @@ impl WorkerProcess {
             groups: test.groups.clone(),
             case_label: test.case_label.clone(),
         })?;
-        let wire: RunTestResultWire = self.call("run_test", Some(params)).await?;
+        let wire: RunTestResultWire = self.call(RPCRequestMethod::RunTest, Some(params)).await?;
         Ok(convert_wire_result(test.clone(), wire))
     }
 
@@ -206,7 +206,7 @@ impl WorkerProcess {
     /// rejects the registration request.
     pub async fn register_hooks(&mut self, params: RegisterHooksParams) -> Result<()> {
         let value = serde_json::to_value(params)?;
-        self.call::<serde_json::Value>("register_hooks", Some(value))
+        self.call::<serde_json::Value>(RPCRequestMethod::RegisterHooks, Some(value))
             .await?;
         Ok(())
     }
@@ -220,7 +220,7 @@ impl WorkerProcess {
     /// worker reports a teardown failure.
     pub async fn finalize_hooks(&mut self, module: String) -> Result<()> {
         let value = serde_json::to_value(FinalizeHooksParams { module })?;
-        self.call::<serde_json::Value>("finalize_hooks", Some(value))
+        self.call::<serde_json::Value>(RPCRequestMethod::FinalizeHooks, Some(value))
             .await?;
         Ok(())
     }
@@ -230,7 +230,9 @@ impl WorkerProcess {
             module: test.module_path.clone(),
             object_path: object_path.to_owned(),
         })?;
-        let wire: RunTestResultWire = self.call("run_doctest", Some(params)).await?;
+        let wire: RunTestResultWire = self
+            .call(RPCRequestMethod::RunDoctest, Some(params))
+            .await?;
         Ok(convert_wire_result(test.clone(), wire))
     }
 
@@ -240,7 +242,7 @@ impl WorkerProcess {
     /// Returns an error if the ping RPC fails or if the worker returns an
     /// unexpected response.
     pub async fn ping(&mut self) -> Result<()> {
-        let result: String = self.call("ping", None).await?;
+        let result: String = self.call(RPCRequestMethod::Ping, None).await?;
         if result == "pong" {
             Ok(())
         } else {

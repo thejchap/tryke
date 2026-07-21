@@ -5,7 +5,9 @@ description = "Tryke - A Python testing tool"
 readme = "README.md"
 authors = [{ name = "Justin Chapman", email = "commonmodestudio@gmail.com" }]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "debugpy>=1.8.21",
+]
 keywords = ["testing", "test", "framework", "runner", "assertions"]
 classifiers = [
   "Development Status :: 3 - Alpha",

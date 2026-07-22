@@ -1,5 +1,6 @@
 pub mod filter;
 
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -698,6 +699,163 @@ pub struct ParsedFile {
     /// a loud error instead of a silent no-op at resolution time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<String>,
+}
+
+#[derive(Debug)]
+pub enum SnapshotParseErrorKind {
+    MissingHeader,
+    InvalidMarker,
+    InvalidIdentity,
+    DuplicateEntry {
+        test: String,
+        key: SnapshotAssertionKey,
+    },
+    UnterminatedEntry,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SnapshotError {
+    #[error("failed to read snapshot file {path}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("invalid snapshot file {path} at line {line}: {kind:?}")]
+    Parse {
+        path: PathBuf,
+        line: NonZeroUsize,
+        kind: SnapshotParseErrorKind,
+    },
+
+    #[error(
+        "snapshot file {path} uses format version {found}; \
+           supported version is {supported}"
+    )]
+    UnsupportedVersion {
+        path: PathBuf,
+        found: u32,
+        supported: u32,
+    },
+
+    #[error("snapshot file changed during the test run: {path}")]
+    ConcurrentModification { path: PathBuf },
+
+    #[error("received snapshot events for an unplanned test: {test_id}")]
+    UnexpectedTest { test_id: String },
+
+    #[error("worker returned snapshot {key:?} more than once for {test_id}")]
+    DuplicateEvent {
+        test_id: String,
+        key: SnapshotAssertionKey,
+    },
+
+    #[error("failed to create snapshot directory for {path}")]
+    CreateDirectory {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to write temporary snapshot file for {path}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to atomically replace snapshot file {path}")]
+    Commit {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to remove obsolete snapshot file {path}")]
+    Remove {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotMode {
+    /// Compare snapshots to persisted value
+    Compare,
+
+    /// Update snapshots to current value
+    Update,
+}
+
+/// The key of the given snapshot assertion
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotAssertionKey {
+    /// Named snapshpt assertion keys
+    ///
+    /// `expect(user, "created user").to_match_snapshot()` -> Named { name: "created user" }
+    Named { name: String },
+
+    /// Unnamed snapshpt assertion keys
+    ///
+    /// `expect(user).to_match_snapshot()` -> Unnamed { index: 1 }
+    Unnamed { index: NonZeroU32 },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ExpectedSnapshot {
+    pub key: SnapshotAssertionKey,
+    pub value: String,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SnapshotTestContext {
+    mode: SnapshotMode,
+    snapshot_file: PathBuf,
+    expected: Vec<ExpectedSnapshot>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SnapshotSummary {
+    pub matched: usize,
+    pub mismatched: usize,
+    pub missing: usize,
+    pub obsolete: usize,
+    pub added: usize,
+    pub updated: usize,
+    pub removed: usize,
+}
+
+impl SnapshotSummary {
+    #[must_use]
+    pub const fn failed(&self) -> usize {
+        self.mismatched + self.missing + self.obsolete
+    }
+
+    #[must_use]
+    pub const fn changed(&self) -> usize {
+        self.added + self.updated + self.removed
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        self.matched += other.matched;
+        self.mismatched += other.mismatched;
+        self.missing += other.missing;
+        self.obsolete += other.obsolete;
+        self.added += other.added;
+        self.updated += other.updated;
+        self.removed += other.removed;
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SnapshotRunReport {
+    pub summary: SnapshotSummary,
+    pub changed_files: Vec<PathBuf>,
 }
 
 #[cfg(test)]

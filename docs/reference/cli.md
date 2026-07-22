@@ -366,6 +366,14 @@ tryke test [OPTIONS] [PATHS]...
 
   Defaults to the current working directory. Discovery, the import graph, and `pyproject.toml` resolution are all anchored here.
 
+- `--snapshot-mode` `<SNAPSHOT_MODE>`
+
+  Snapshot mode
+
+  Possible values: `compare`, `update`
+
+  Default: `compare`
+
 - `-v`, `--verbose`
 
   Increase logging verbosity

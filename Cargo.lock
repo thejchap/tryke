@@ -2015,6 +2015,7 @@ dependencies = [
  "tryke_reporter",
  "tryke_runner",
  "tryke_server",
+ "tryke_snapshot",
  "tryke_testing",
  "tryke_types",
  "tryke_watcher",
@@ -2111,6 +2112,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tryke_snapshot"
+version = "0.0.30"
+dependencies = [
+ "thiserror",
+ "tryke_types",
+]
+
+[[package]]
 name = "tryke_testing"
 version = "0.0.30"
 dependencies = [
@@ -2123,6 +2132,7 @@ version = "0.0.30"
 dependencies = [
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]

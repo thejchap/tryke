@@ -105,7 +105,7 @@ pub async fn report_cycle(
     let mut buffers: HashMap<Option<PathBuf>, FileBuffer> = HashMap::new();
 
     // short-circuit skip/todo tests — buffer instead of reporting eagerly
-    let (run_tests, shortcircuit): (Vec<_>, Vec<_>) = tests
+    let (runnable_tests, shortcircuit): (Vec<_>, Vec<_>) = tests
         .into_iter()
         .partition(|t| t.skip.is_none() && t.todo.is_none());
 
@@ -137,7 +137,7 @@ pub async fn report_cycle(
     }
 
     let mut hit_maxfail = false;
-    let partition = partition_with_hooks(run_tests, hooks, dist);
+    let partition = partition_with_hooks(runnable_tests, hooks, dist);
     for warning in &partition.warnings {
         reporter.on_discovery_warning(warning);
     }

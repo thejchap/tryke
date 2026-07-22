@@ -15,6 +15,7 @@ use tryke_reporter::{
     Reporter, SugarReporter, TextReporter, Verbosity,
 };
 use tryke_runner::WorkerPool;
+use tryke_snapshot::{SnapshotRun, SnapshotRunOptions};
 use tryke_types::ChangedSelectionSummary;
 use tryke_types::filter::TestFilter;
 
@@ -106,7 +107,7 @@ fn main() -> Result<()> {
     )
     .init();
     debug!("{cli:?}");
-    let worker_log = tryke_config::worker_log_level(tryke_log.as_deref(), cli_filter);
+    let log_level = tryke_config::worker_log_level(tryke_log.as_deref(), cli_filter);
     let verbosity = Verbosity::from_level_filter(rust_default);
     let runtime = tokio::runtime::Runtime::new()?;
     let cache_dir = cli.cache_dir.clone();
@@ -134,6 +135,7 @@ fn main() -> Result<()> {
             all,
             now,
             python,
+            snapshot_mode,
         } => {
             if base_branch.is_some() && !changed && !changed_first {
                 return Err(anyhow::anyhow!(
@@ -141,14 +143,15 @@ fn main() -> Result<()> {
                 ));
             }
             let resolved_maxfail = if *fail_fast { Some(1) } else { *maxfail };
-            let mut rep = build_reporter(reporter, verbosity, cli.no_progress);
+            let mut reporter = build_reporter(reporter, verbosity, cli.no_progress);
+
             if *watch {
-                rep.set_subcommand_label(if bare_watch {
+                reporter.set_subcommand_label(if bare_watch {
                     "tryke"
                 } else {
                     "tryke test --watch"
                 });
-                rep.set_watch_hint(Some("Waiting for file changes...".into()));
+                reporter.set_watch_hint(Some("Waiting for file changes...".into()));
                 let cwd = env::current_dir()?;
                 let config = load_config(
                     root.as_deref().unwrap_or(&cwd),
@@ -160,9 +163,9 @@ fn main() -> Result<()> {
                 let test_filter = TestFilter::from_args(&[], filter.as_deref(), markers.as_deref())
                     .map_err(|e| anyhow::anyhow!(e))?;
                 return runtime.block_on(run_watch(
-                    &mut *rep,
+                    &mut *reporter,
                     &config,
-                    worker_log,
+                    log_level,
                     &test_filter,
                     resolved_maxfail,
                     *workers,
@@ -171,6 +174,7 @@ fn main() -> Result<()> {
                     *now,
                 ));
             }
+
             let cwd = env::current_dir()?;
             let config = load_config(
                 root.as_deref().unwrap_or(&cwd),
@@ -179,9 +183,12 @@ fn main() -> Result<()> {
                 exclude,
                 include,
             );
+
             let test_filter = TestFilter::from_args(paths, filter.as_deref(), markers.as_deref())
                 .map_err(|e| anyhow::anyhow!(e))?;
+
             let discovery_start = Instant::now();
+
             let discovered = if !paths.is_empty() && !*changed && !*changed_first {
                 discover_tests_for_paths(&config, &test_filter.path_specs)
             } else if *changed_first {
@@ -189,11 +196,15 @@ fn main() -> Result<()> {
             } else {
                 discover_tests(&config, *changed, base_branch.as_deref())
             };
+
             for warning in &discovered.warnings {
-                rep.on_discovery_warning(warning);
+                reporter.on_discovery_warning(warning);
             }
+
             let tests = test_filter.apply(discovered.tests);
+
             let discovery_duration = discovery_start.elapsed();
+
             let changed_selection =
                 discovered
                     .changed_files
@@ -202,14 +213,19 @@ fn main() -> Result<()> {
                         affected_tests: tests.len(),
                     });
 
+            let mut _snapshots = SnapshotRun::begin(SnapshotRunOptions {
+                root: config.root().into(),
+                mode: snapshot_mode.to_wire(),
+            })?;
+
             if *collect_only {
-                rep.on_collect_complete(&tests);
+                reporter.on_collect_complete(&tests);
                 Ok(())
             } else {
                 let summary = runtime.block_on(run_tests(
-                    &mut *rep,
+                    &mut *reporter,
                     &config,
-                    worker_log,
+                    log_level,
                     tests,
                     &discovered.hooks,
                     resolved_maxfail,
@@ -251,7 +267,7 @@ fn main() -> Result<()> {
                     &resolved_python,
                     &root_path,
                     None,
-                    worker_log,
+                    log_level,
                     false,
                 )
                 .await;

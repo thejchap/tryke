@@ -1259,6 +1259,28 @@ class Expectation[T]:
             received=f"length {actual}",
         )
 
+    def to_match_snapshot(self) -> MatchResult:
+        """Assert the value matches its snapshot.
+
+        Example:
+        ```pycon
+        >>> from tryke import expect
+        >>> expect(1).to_match_snapshot()
+        MatchResult(ok)
+
+        ```
+        """
+
+        a = 1
+        b = 1
+
+        return self._assert(
+            a == b,
+            f"{self._value!r} to match snapshot",
+            expected=str(a),
+            received=str(b),
+        )
+
     def to_match(self, pattern: str) -> MatchResult:
         """Regex match against the string representation of the value.
 

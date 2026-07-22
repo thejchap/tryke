@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use clap_verbosity_flag::{Verbosity as LogVerbosity, WarnLevel};
+use tryke_types::SnapshotMode as SnapshotModeWire;
 
 /// How tests are distributed across workers.
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -58,6 +59,24 @@ pub struct Cli {
     /// `<project-root>/.tryke/cache`.
     #[arg(long = "cache-dir", global = true)]
     pub cache_dir: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+pub enum SnapshotMode {
+    /// Compare snapshots to persisted value
+    Compare,
+
+    /// Update snapshots to current value
+    Update,
+}
+
+impl SnapshotMode {
+    pub fn to_wire(&self) -> SnapshotModeWire {
+        match self {
+            SnapshotMode::Compare => SnapshotModeWire::Compare,
+            SnapshotMode::Update => SnapshotModeWire::Update,
+        }
+    }
 }
 
 /// Reporter format used to render test results.
@@ -251,6 +270,10 @@ pub enum Commands {
         /// resolution rules.
         #[arg(long)]
         python: Option<String>,
+
+        /// Snapshot mode.
+        #[arg(long, default_value = "compare")]
+        snapshot_mode: SnapshotMode,
     },
 
     /// Start a persistent worker server speaking JSON-RPC over stdio.
@@ -375,6 +398,7 @@ impl Commands {
             all: false,
             now: false,
             python: None,
+            snapshot_mode: SnapshotMode::Compare,
         }
     }
 }

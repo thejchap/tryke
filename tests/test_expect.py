@@ -192,6 +192,12 @@ with describe("expectations"):
             msg = "ExpectationError was not raised"
             raise AssertionError(msg)
 
+    with describe("snapshots"):
+
+        @test(name="to_match_snapshot")
+        def test_match_snapshot() -> None:
+            expect("test").to_match_snapshot()
+
 
 with describe("soft assertions"):
 

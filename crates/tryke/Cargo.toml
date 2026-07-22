@@ -26,6 +26,7 @@ tryke_discovery = { workspace = true, features = ["filesystem"] }
 tryke_reporter = { workspace = true, features = ["terminal"] }
 tryke_runner = { workspace = true }
 tryke_server = { workspace = true }
+tryke_snapshot = { workspace = true }
 tryke_types = { workspace = true }
 tryke_watcher = { workspace = true }
 

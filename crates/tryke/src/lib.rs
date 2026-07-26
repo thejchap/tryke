@@ -1,10 +1,14 @@
 mod cli;
 mod commands;
 
-use std::env;
-use std::process::{ExitCode, Termination};
+use std::{
+    env,
+    io::{self, Write},
+    process::{ExitCode, Termination},
+};
 
 use clap::{CommandFactory, Parser};
+use console::style;
 use log::debug;
 
 use cli::{Cli, Commands};
@@ -33,7 +37,11 @@ impl Termination for ExitStatus {
     }
 }
 
-pub fn run() -> anyhow::Result<ExitStatus> {
+pub fn run() -> ExitStatus {
+    try_run().unwrap_or_else(report_error)
+}
+
+fn try_run() -> anyhow::Result<ExitStatus> {
     let cli = Cli::parse();
     let cli_filter = cli.global.verbose.log_level_filter();
     let tryke_log = env::var("TRYKE_LOG").ok();
@@ -61,6 +69,30 @@ pub fn run() -> anyhow::Result<ExitStatus> {
         Commands::Clean(args) => run_clean_command(args, &global),
         Commands::Graph(args) => run_graph_command(args, &global),
     }
+}
+
+fn report_error(error: anyhow::Error) -> ExitStatus {
+    // Exit gracefully when output is piped to a process that closes early.
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<io::Error>()
+            .is_some_and(|error| error.kind() == io::ErrorKind::BrokenPipe)
+    }) {
+        return ExitStatus::Success;
+    }
+
+    // Avoid panicking if writing the error itself fails.
+    let mut stderr = io::stderr().lock();
+    let _ = writeln!(
+        stderr,
+        "{}",
+        style("tryke failed").red().bold().for_stderr()
+    );
+    for cause in error.chain() {
+        let _ = writeln!(stderr, "  {} {cause}", style("Cause:").bold().for_stderr());
+    }
+
+    ExitStatus::Error
 }
 
 /// Exported for use by `tryke_dev` CLI doc generation.

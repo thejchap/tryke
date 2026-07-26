@@ -64,12 +64,6 @@ pub(crate) fn run_test_command(
     global: &GlobalArgs,
     origin: CommandOrigin,
 ) -> Result<ExitStatus> {
-    if args.base_branch.is_some() && !args.changed && !args.changed_first {
-        return Err(anyhow::anyhow!(
-            "--base-branch requires --changed or --changed-first"
-        ));
-    }
-
     let cli_filter = global.verbose.log_level_filter();
     let tryke_log = env::var("TRYKE_LOG").ok();
     let rust_default = tryke_config::rust_log_default(tryke_log.as_deref(), cli_filter);

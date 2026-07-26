@@ -1,7 +1,7 @@
 mod cli;
 mod commands;
+mod logging;
 
-use std::env;
 use std::process::{ExitCode, Termination};
 
 use clap::{CommandFactory, Parser};
@@ -12,6 +12,7 @@ use cli::{Cli, Commands};
 use commands::{
     CommandOrigin, run_clean_command, run_graph_command, run_server_command, run_test_command,
 };
+use logging::LogConfig;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExitStatus {
@@ -36,14 +37,8 @@ impl Termination for ExitStatus {
 
 pub async fn run() -> anyhow::Result<ExitStatus> {
     let cli = Cli::parse();
-    let cli_filter = cli.global.verbose.log_level_filter();
-    let tryke_log = env::var("TRYKE_LOG").ok();
-    let rust_default = tryke_config::rust_log_default(tryke_log.as_deref(), cli_filter);
-
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or(rust_default.as_str().to_ascii_lowercase()),
-    )
-    .init();
+    let logging = LogConfig::from_env(cli.global.verbose.log_level_filter())?;
+    logging.init_rust_logging();
 
     debug!("{cli:?}");
 
@@ -59,7 +54,7 @@ pub async fn run() -> anyhow::Result<ExitStatus> {
     match command {
         Commands::Test(args) => {
             let cancellation = CancellationToken::new();
-            let command = run_test_command(args, &global, origin, cancellation.clone());
+            let command = run_test_command(args, &global, origin, logging, cancellation.clone());
             tokio::pin!(command);
 
             tokio::select! {
@@ -76,7 +71,7 @@ pub async fn run() -> anyhow::Result<ExitStatus> {
         }
         Commands::Server(args) => {
             let cancellation = CancellationToken::new();
-            let command = run_server_command(args, &global, cancellation.clone());
+            let command = run_server_command(args, &global, logging, cancellation.clone());
             tokio::pin!(command);
 
             tokio::select! {

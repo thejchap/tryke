@@ -41,10 +41,9 @@ impl WorkerProcess {
     /// Spawn a fresh worker process.
     ///
     /// `log_level` is forwarded as `TRYKE_LOG=<level>` on the child env so
-    /// the python worker's `_configure_logging_from_env` lights up at the
-    /// same level as the rust process. Pass `LevelFilter::Off` to keep the
-    /// worker silent (no env var set), preserving the pre-existing
-    /// "no chatter unless asked" default.
+    /// the Python worker's `_configure_logging_from_env` lights up at the
+    /// resolved Tryke level. `LevelFilter::Off` explicitly disables worker
+    /// logging.
     ///
     /// # Errors
     /// Returns an error if the Python process cannot be spawned, if its stdio
@@ -66,11 +65,8 @@ impl WorkerProcess {
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        if let Some(value) = worker_log_env_value(log_level) {
-            command.env("TRYKE_LOG", value);
-        }
+            .stderr(Stdio::piped())
+            .env("TRYKE_LOG", worker_log_env_value(log_level));
 
         let mut child = command.spawn()?;
 
@@ -378,17 +374,12 @@ fn append_stderr(buf: &Mutex<VecDeque<u8>>, data: &[u8]) {
 }
 
 /// Translate a resolved log level into the value placed on the spawned
-/// worker's `TRYKE_LOG` env var, if any.
+/// worker's `TRYKE_LOG` environment variable.
 ///
-/// `Off` returns `None` so the env var stays unset and the python
-/// worker's `_configure_logging_from_env` no-ops. Anything else returns
-/// the lowercase level name (`debug`, `info`, ...) which the worker's
-/// `logging.getLevelName` understands once uppercased.
-fn worker_log_env_value(log_level: log::LevelFilter) -> Option<String> {
-    if log_level == log::LevelFilter::Off {
-        return None;
-    }
-    Some(log_level.as_str().to_ascii_lowercase())
+/// The canonical lowercase value keeps worker configuration deterministic,
+/// including explicit propagation of `off`.
+fn worker_log_env_value(log_level: log::LevelFilter) -> String {
+    log_level.as_str().to_ascii_lowercase()
 }
 
 fn build_pythonpath(extra: &[&Path]) -> String {
@@ -436,30 +427,17 @@ mod tests {
     }
 
     #[test]
-    fn worker_log_env_value_off_returns_none() {
-        // `Off` means: don't set TRYKE_LOG on the child env, preserving
-        // the python worker's "no chatter unless asked" default.
-        assert_eq!(worker_log_env_value(log::LevelFilter::Off), None);
-    }
-
-    #[test]
-    fn worker_log_env_value_lowercases_level_name() {
-        // The python worker uppercases before passing to
-        // `logging.getLevelName`, so case actually doesn't matter, but
-        // shipping lowercase keeps env values consistent with how rust
-        // log levels render and avoids a 50/50 stylistic decision.
-        assert_eq!(
-            worker_log_env_value(log::LevelFilter::Info).as_deref(),
-            Some("info"),
-        );
-        assert_eq!(
-            worker_log_env_value(log::LevelFilter::Debug).as_deref(),
-            Some("debug"),
-        );
-        assert_eq!(
-            worker_log_env_value(log::LevelFilter::Warn).as_deref(),
-            Some("warn"),
-        );
+    fn worker_log_env_value_canonicalizes_every_level() {
+        for (level, expected) in [
+            (log::LevelFilter::Off, "off"),
+            (log::LevelFilter::Error, "error"),
+            (log::LevelFilter::Warn, "warn"),
+            (log::LevelFilter::Info, "info"),
+            (log::LevelFilter::Debug, "debug"),
+            (log::LevelFilter::Trace, "trace"),
+        ] {
+            assert_eq!(worker_log_env_value(level), expected);
+        }
     }
 
     #[test]

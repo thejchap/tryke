@@ -2097,7 +2097,6 @@ dependencies = [
 name = "tryke_config"
 version = "0.0.30"
 dependencies = [
- "log",
  "serde",
  "tempfile",
  "toml",

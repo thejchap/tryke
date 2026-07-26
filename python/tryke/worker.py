@@ -403,21 +403,19 @@ class Worker:
 
 
 def _configure_logging_from_env() -> None:
-    """Opt-in worker logging via ``TRYKE_LOG``.
+    """Configure worker logging from the resolved ``TRYKE_LOG`` level.
 
-    Off by default so normal test runs don't emit anything on stderr.
-    The rust runner sets ``TRYKE_LOG=<level>`` on the worker env when
-    ``-v`` (or ``TRYKE_LOG``) asks for cross-language verbosity, so
-    users typically don't set this directly. ``-q``/quiet does not
-    light up workers — workers stay silent unless the user explicitly
-    asked for more verbosity than the rust default ``warn``.
+    The Rust runner always sets ``TRYKE_LOG=<level>`` on the worker
+    environment. A directly invoked worker remains off when the variable
+    is absent, and ``OFF`` explicitly disables logging.
 
-    Accepts ``DEBUG`` / ``INFO`` / ``WARN`` / ``ERROR`` / ``TRACE``.
+    Accepts ``OFF`` / ``ERROR`` / ``WARN`` / ``INFO`` / ``DEBUG`` /
+    ``TRACE``.
     Output goes to stderr so it never contaminates the JSON-RPC stream
     on stdout.
     """
     level_name = os.environ.get("TRYKE_LOG", "").strip().upper()
-    if not level_name:
+    if not level_name or level_name == "OFF":
         return
     # Map TRACE to DEBUG since stdlib logging has no TRACE level.
     if level_name == "TRACE":

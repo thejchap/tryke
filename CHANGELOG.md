@@ -38,6 +38,7 @@ Released on 2026-07-04.
 - Add `--workers` to `tryke server`
 - Discover Python environments from `VIRTUAL_ENV`, Conda, and the project
   `.venv`
+- Resolve one log level for Rust, reporter diagnostics, and Python workers
 
 ### Bug Fixes
 

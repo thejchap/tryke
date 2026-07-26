@@ -9,15 +9,14 @@ use tryke_server::Server;
 
 use crate::ExitStatus;
 use crate::cli::{GlobalArgs, ServerArgs};
+use crate::logging::LogConfig;
 
 pub(crate) async fn run_server_command(
     args: ServerArgs,
     global: &GlobalArgs,
+    logging: LogConfig,
     cancellation: CancellationToken,
 ) -> Result<ExitStatus> {
-    let cli_filter = global.verbose.log_level_filter();
-    let tryke_log = env::var("TRYKE_LOG").ok();
-    let log_level = tryke_config::worker_log_level(tryke_log.as_deref(), cli_filter);
     let cwd = env::current_dir()?;
 
     let mut metadata = ProjectMetadata::new(args.root.as_deref().unwrap_or(&cwd));
@@ -30,7 +29,7 @@ pub(crate) async fn run_server_command(
         WorkerPoolOptions {
             size: args.workers,
             python_path: None,
-            log_level,
+            log_level: logging.level(),
             warm: false,
         },
     )

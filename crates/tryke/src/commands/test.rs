@@ -11,7 +11,7 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tryke_config::{Project, ProjectMetadata};
 use tryke_discovery::{Discoverer, DiscoveryOptions};
-use tryke_reporter::{Reporter, Verbosity, build_reporter, reporter::WatchIdleInfo};
+use tryke_reporter::{Reporter, build_reporter, reporter::WatchIdleInfo};
 use tryke_runner::{DistMode, WorkerPool, WorkerPoolOptions, partition_with_hooks};
 use tryke_types::{
     ChangedSelectionSummary, DiscoveryWarning, DiscoveryWarningKind, HookItem, RunSummary,
@@ -22,6 +22,7 @@ use tryke_watcher::{FileChangeBatch, FileWatcher};
 use super::CommandOrigin;
 use crate::ExitStatus;
 use crate::cli::{GlobalArgs, TestArgs};
+use crate::logging::LogConfig;
 
 #[derive(Debug, Eq, PartialEq)]
 enum Interruptible<T> {
@@ -61,6 +62,7 @@ pub(crate) async fn run_test_command(
     args: TestArgs,
     global: &GlobalArgs,
     origin: CommandOrigin,
+    logging: LogConfig,
     cancellation: CancellationToken,
 ) -> Result<ExitStatus> {
     if args.base_branch.is_some() && !args.changed && !args.changed_first {
@@ -69,11 +71,8 @@ pub(crate) async fn run_test_command(
         ));
     }
 
-    let cli_filter = global.verbose.log_level_filter();
-    let tryke_log = env::var("TRYKE_LOG").ok();
-    let rust_default = tryke_config::rust_log_default(tryke_log.as_deref(), cli_filter);
-    let log_level = tryke_config::worker_log_level(tryke_log.as_deref(), cli_filter);
-    let verbosity = Verbosity::from_level_filter(rust_default);
+    let log_level = logging.level();
+    let verbosity = logging.reporter_verbosity();
 
     let maxfail = if args.fail_fast {
         Some(1)

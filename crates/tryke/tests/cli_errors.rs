@@ -11,7 +11,7 @@ fn post_parse_errors_use_invocation_error_status() -> Result<(), Box<dyn std::er
     assert!(output.stdout.is_empty(), "unexpected stdout");
     assert!(stderr.contains("tryke failed"), "{stderr}");
     assert!(
-        stderr.contains("Cause: invalid filter expression: unexpected end of expression"),
+        stderr.contains("invalid filter expression: unexpected end of expression"),
         "{stderr}"
     );
     Ok(())

@@ -335,6 +335,10 @@ impl<W: Write> Reporter for NextReporter<W> {
         summary::write_summary_with_hint(&mut self.writer, run_summary, self.watch_hint.as_deref());
     }
 
+    fn cleanup(&mut self) {
+        self.live.finish_and_clear();
+    }
+
     fn on_collect_complete(&mut self, tests: &[TestItem]) {
         summary::write_collect_list(&mut self.writer, self.subcommand_label, tests);
     }

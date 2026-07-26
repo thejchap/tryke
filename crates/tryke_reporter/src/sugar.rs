@@ -356,6 +356,10 @@ impl<W: Write> Reporter for SugarReporter<W> {
         summary::write_summary_with_hint(&mut self.writer, run_summary, self.watch_hint.as_deref());
     }
 
+    fn cleanup(&mut self) {
+        self.live.finish_and_clear();
+    }
+
     fn set_subcommand_label(&mut self, label: &'static str) {
         self.subcommand_label = label;
     }

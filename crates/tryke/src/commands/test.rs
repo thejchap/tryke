@@ -1,5 +1,6 @@
 use std::{
     env,
+    future::Future,
     time::{Duration, Instant},
 };
 
@@ -20,6 +21,43 @@ use tryke_watcher::{FileChangeBatch, FileWatcher};
 use super::CommandOrigin;
 use crate::ExitStatus;
 use crate::cli::{GlobalArgs, TestArgs};
+
+#[derive(Debug, Eq, PartialEq)]
+enum Interruptible<T> {
+    Completed(T),
+    Interrupted,
+}
+
+async fn run_interruptibly<T>(
+    run: impl Future<Output = Result<T>>,
+    interrupt: impl Future<Output = std::io::Result<()>>,
+) -> Result<Interruptible<T>> {
+    tokio::select! {
+        biased;
+        signal = interrupt => {
+            signal?;
+            Ok(Interruptible::Interrupted)
+        },
+        result = run => result.map(Interruptible::Completed),
+    }
+}
+
+fn resolve_interruptible<T>(
+    result: Result<Interruptible<T>>,
+    reporter: &mut dyn Reporter,
+) -> Result<Option<T>> {
+    match result {
+        Ok(Interruptible::Completed(value)) => Ok(Some(value)),
+        Ok(Interruptible::Interrupted) => {
+            reporter.cleanup();
+            Ok(None)
+        }
+        Err(error) => {
+            reporter.cleanup();
+            Err(error)
+        }
+    }
+}
 
 pub(crate) fn run_test_command(
     args: TestArgs,
@@ -65,17 +103,23 @@ pub(crate) fn run_test_command(
             TestFilter::from_args(&[], args.filter.as_deref(), args.markers.as_deref())
                 .map_err(|error| anyhow::anyhow!(error))?;
 
-        runtime.block_on(run_watch(
-            &mut *reporter,
-            &project,
-            log_level,
-            &test_filter,
-            resolved_maxfail,
-            args.workers,
-            args.dist.into(),
-            args.all,
-            args.now,
-        ))?;
+        let result = runtime.block_on(run_interruptibly(
+            run_watch(
+                &mut *reporter,
+                &project,
+                log_level,
+                &test_filter,
+                resolved_maxfail,
+                args.workers,
+                args.dist.into(),
+                args.all,
+                args.now,
+            ),
+            tokio::signal::ctrl_c(),
+        ));
+        if resolve_interruptible(result, &mut *reporter)?.is_none() {
+            return Ok(ExitStatus::Interrupted);
+        }
 
         return Ok(ExitStatus::Success);
     }
@@ -119,18 +163,24 @@ pub(crate) fn run_test_command(
     //     mode: args.snapshot_mode.to_wire(),
     // })?;
 
-    let summary = runtime.block_on(run_tests(
-        &mut *reporter,
-        &project,
-        log_level,
-        tests,
-        &discovered.hooks,
-        resolved_maxfail,
-        args.workers,
-        args.dist.into(),
-        Some(discovery_duration),
-        changed_selection,
-    ))?;
+    let result = runtime.block_on(run_interruptibly(
+        run_tests(
+            &mut *reporter,
+            &project,
+            log_level,
+            tests,
+            &discovered.hooks,
+            resolved_maxfail,
+            args.workers,
+            args.dist.into(),
+            Some(discovery_duration),
+            changed_selection,
+        ),
+        tokio::signal::ctrl_c(),
+    ));
+    let Some(summary) = resolve_interruptible(result, &mut *reporter)? else {
+        return Ok(ExitStatus::Interrupted);
+    };
 
     if summary.failed > 0 || summary.errors > 0 {
         Ok(ExitStatus::Failure)
@@ -637,6 +687,58 @@ async fn run_watch(
 
     pool.shutdown();
     Ok(())
+}
+
+#[cfg(test)]
+mod interrupt_tests {
+    use std::future::{pending, ready};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct CleanupReporter {
+        cleanup_calls: usize,
+    }
+
+    impl Reporter for CleanupReporter {
+        fn on_run_start(&mut self, _tests: &[tryke_types::TestItem]) {}
+
+        fn on_test_complete(&mut self, _result: &tryke_types::TestResult) {}
+
+        fn on_run_complete(&mut self, _summary: &RunSummary) {}
+
+        fn cleanup(&mut self) {
+            self.cleanup_calls += 1;
+        }
+    }
+
+    #[tokio::test]
+    async fn interruption_takes_priority_and_cleans_up_reporter() -> Result<()> {
+        let result = run_interruptibly(
+            ready(Ok::<_, anyhow::Error>(())),
+            ready(Ok::<(), std::io::Error>(())),
+        )
+        .await;
+        let mut reporter = CleanupReporter::default();
+
+        assert_eq!(resolve_interruptible(result, &mut reporter)?, None);
+        assert_eq!(reporter.cleanup_calls, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn completion_does_not_clean_up_reporter() -> Result<()> {
+        let result = run_interruptibly(
+            ready(Ok::<_, anyhow::Error>(42)),
+            pending::<std::io::Result<()>>(),
+        )
+        .await;
+        let mut reporter = CleanupReporter::default();
+
+        assert_eq!(resolve_interruptible(result, &mut reporter)?, Some(42));
+        assert_eq!(reporter.cleanup_calls, 0);
+        Ok(())
+    }
 }
 
 #[cfg(test)]

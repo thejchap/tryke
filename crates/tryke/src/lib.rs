@@ -22,6 +22,9 @@ pub enum ExitStatus {
 
     /// Test run failed due to an invocation error.
     Error = 2,
+
+    /// Test run was interrupted by Ctrl+C.
+    Interrupted = 130,
 }
 
 impl Termination for ExitStatus {

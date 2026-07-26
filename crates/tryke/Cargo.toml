@@ -19,7 +19,7 @@ clap-verbosity-flag = "3"
 console = { workspace = true }
 env_logger = "0.11"
 log = "0.4"
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["signal"] }
 tokio-stream = { workspace = true }
 tryke_config = { workspace = true }
 tryke_discovery = { workspace = true, features = ["filesystem"] }

@@ -16,6 +16,9 @@ pub trait Reporter {
     fn on_run_start(&mut self, tests: &[TestItem]);
     fn on_test_complete(&mut self, result: &TestResult);
     fn on_run_complete(&mut self, summary: &RunSummary);
+    /// Restore any terminal state owned by the reporter before an abnormal
+    /// exit. Implementations must make cleanup idempotent.
+    fn cleanup(&mut self) {}
     fn on_collect_complete(&mut self, _tests: &[TestItem]) {}
     fn on_discovery_error(&mut self, _error: &DiscoveryError) {}
     /// Surface a non-fatal warning discovered while collecting or planning a

@@ -96,6 +96,11 @@ impl<R: Reporter> Reporter for ProgressReporter<R> {
         self.inner.on_run_complete(summary);
     }
 
+    fn cleanup(&mut self) {
+        emit_osc(0, 0);
+        self.inner.cleanup();
+    }
+
     fn on_collect_complete(&mut self, tests: &[TestItem]) {
         self.inner.on_collect_complete(tests);
     }
@@ -141,6 +146,7 @@ mod tests {
         started: bool,
         results: Vec<String>,
         completed: bool,
+        cleaned: bool,
     }
 
     impl RecordingReporter {
@@ -149,6 +155,7 @@ mod tests {
                 started: false,
                 results: Vec::new(),
                 completed: false,
+                cleaned: false,
             }
         }
     }
@@ -164,6 +171,10 @@ mod tests {
 
         fn on_run_complete(&mut self, _summary: &RunSummary) {
             self.completed = true;
+        }
+
+        fn cleanup(&mut self) {
+            self.cleaned = true;
         }
     }
 
@@ -227,6 +238,9 @@ mod tests {
         });
         assert!(reporter.inner.completed);
         assert_eq!(reporter.inner.results.len(), 2);
+
+        reporter.cleanup();
+        assert!(reporter.inner.cleaned);
     }
 
     #[test]

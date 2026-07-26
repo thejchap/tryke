@@ -76,7 +76,7 @@ pub(crate) fn run_test_command(
     let log_level = tryke_config::worker_log_level(tryke_log.as_deref(), cli_filter);
     let verbosity = Verbosity::from_level_filter(rust_default);
 
-    let resolved_maxfail = if args.fail_fast {
+    let maxfail = if args.fail_fast {
         Some(1)
     } else {
         args.maxfail
@@ -109,7 +109,7 @@ pub(crate) fn run_test_command(
                 &project,
                 log_level,
                 &test_filter,
-                resolved_maxfail,
+                maxfail,
                 args.workers,
                 args.dist.into(),
                 args.all,
@@ -117,6 +117,7 @@ pub(crate) fn run_test_command(
             ),
             tokio::signal::ctrl_c(),
         ));
+
         if resolve_interruptible(result, &mut *reporter)?.is_none() {
             return Ok(ExitStatus::Interrupted);
         }
@@ -170,7 +171,7 @@ pub(crate) fn run_test_command(
             log_level,
             tests,
             &discovered.hooks,
-            resolved_maxfail,
+            maxfail,
             args.workers,
             args.dist.into(),
             Some(discovery_duration),
@@ -178,6 +179,7 @@ pub(crate) fn run_test_command(
         ),
         tokio::signal::ctrl_c(),
     ));
+
     let Some(summary) = resolve_interruptible(result, &mut *reporter)? else {
         return Ok(ExitStatus::Interrupted);
     };

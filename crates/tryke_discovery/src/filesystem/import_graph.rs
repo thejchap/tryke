@@ -83,7 +83,7 @@ impl ImportGraph {
                 for importer in importers {
                     if visited.insert(importer.clone()) {
                         trace!(
-                            "import_graph: {} invalidated by change to {}",
+                            "Import_graph: {} invalidated by change to {}",
                             importer.display(),
                             file.display()
                         );

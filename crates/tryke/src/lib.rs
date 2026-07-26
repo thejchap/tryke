@@ -6,6 +6,7 @@ use std::process::{ExitCode, Termination};
 
 use clap::{CommandFactory, Parser};
 use log::debug;
+use tokio_util::sync::CancellationToken;
 
 use cli::{Cli, Commands};
 use commands::{
@@ -33,7 +34,7 @@ impl Termination for ExitStatus {
     }
 }
 
-pub fn run() -> anyhow::Result<ExitStatus> {
+pub async fn run() -> anyhow::Result<ExitStatus> {
     let cli = Cli::parse();
     let cli_filter = cli.global.verbose.log_level_filter();
     let tryke_log = env::var("TRYKE_LOG").ok();
@@ -56,8 +57,40 @@ pub fn run() -> anyhow::Result<ExitStatus> {
     let global = cli.global;
 
     match command {
-        Commands::Test(args) => run_test_command(args, &global, origin),
-        Commands::Server(args) => run_server_command(args, &global),
+        Commands::Test(args) => {
+            let cancellation = CancellationToken::new();
+            let command = run_test_command(args, &global, origin, cancellation.clone());
+            tokio::pin!(command);
+
+            tokio::select! {
+                biased;
+                signal = tokio::signal::ctrl_c() => {
+                    signal?;
+                    cancellation.cancel();
+                    command.await?;
+
+                    Ok(ExitStatus::Interrupted)
+                }
+                result = &mut command => result,
+            }
+        }
+        Commands::Server(args) => {
+            let cancellation = CancellationToken::new();
+            let command = run_server_command(args, &global, cancellation.clone());
+            tokio::pin!(command);
+
+            tokio::select! {
+                biased;
+                signal = tokio::signal::ctrl_c() => {
+                    signal?;
+                    cancellation.cancel();
+                    command.await?;
+
+                    Ok(ExitStatus::Interrupted)
+                }
+                result = &mut command => result,
+            }
+        }
         Commands::Clean(args) => run_clean_command(args, &global),
         Commands::Graph(args) => run_graph_command(args, &global),
     }

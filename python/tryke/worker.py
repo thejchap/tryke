@@ -41,10 +41,11 @@ just trusts the incoming list and does not re-parse source.
 4. After every test in a module has run, the runner sends
    `finalize_hooks` and the executor runs `per="scope"` teardown.
 5. In watch/server mode, file changes do not reach the worker over the
-   wire — the runner instead kills this subprocess and respawns it,
-   replaying `register_hooks` on the fresh process. `importlib.reload`
-   is not used; a clean interpreter is the only reliable way to drop
-   classes and closures captured under the old definitions.
+   wire — the runner instead kills this subprocess and respawns it.
+   Each work unit installs its current hook metadata before execution,
+   and only that active unit's metadata is replayed after a crash.
+   `importlib.reload` is not used; a clean interpreter is the only
+   reliable way to drop classes and closures captured under old definitions.
 """
 
 from __future__ import annotations
@@ -306,8 +307,8 @@ class Worker:
 
         Any previously-cached :class:`HookExecutor` for this module is
         dropped so the next test rebuilds fixtures from the fresh
-        metadata — this matters when the runner re-registers the same
-        module (e.g. after a worker respawn during watch/server mode).
+        metadata — this matters when consecutive work units carry different
+        metadata for the same module.
         """
         if not isinstance(hooks, list):
             return
@@ -331,7 +332,7 @@ class Worker:
         self._hook_metadata[module_name] = typed
         # Invalidate any cached executor for this module.
         self._executors.pop(module_name, None)
-        _log.debug("register_hooks: module=%s hook_count=%d", module_name, len(hooks))
+        _log.debug("Register hooks: module=%s hook_count=%d", module_name, len(hooks))
 
     def _finalize_hooks(self, module_name: str) -> None:
         """Run scope-level teardown for a module's `per="scope"` fixtures."""
@@ -435,7 +436,7 @@ def _configure_logging_from_env() -> None:
 
 def main() -> None:
     _configure_logging_from_env()
-    _log.debug("worker main: starting (pid=%d)", os.getpid())
+    _log.debug("Worker main: starting (pid=%d)", os.getpid())
     Worker(sys.stdin, sys.stdout).run()
 
 

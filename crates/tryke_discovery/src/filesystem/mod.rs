@@ -93,6 +93,19 @@ pub(crate) fn collect_python_files_restricted(
     paths
 }
 
+/// Sort tests by source position while preserving case declaration order.
+pub(crate) fn sort_tests(tests: &mut [TestItem]) {
+    tests.sort_by(|left, right| {
+        left.file_path
+            .cmp(&right.file_path)
+            .then_with(|| left.module_path.cmp(&right.module_path))
+            .then_with(|| left.line_number.cmp(&right.line_number))
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.case_index.cmp(&right.case_index))
+            .then_with(|| left.case_label.cmp(&right.case_label))
+    });
+}
+
 pub(crate) fn discover_file_from_ast(
     root: &Path,
     src_roots: &[PathBuf],
@@ -125,17 +138,17 @@ fn parse_tests_from_file(root: &Path, src_roots: &[PathBuf], file: &Path) -> Par
 
 #[must_use]
 pub fn discover_from(start: &Path) -> Vec<TestItem> {
-    let config = tryke_config::TrykeConfig::discover(start);
-    let root = config.root();
-    let src_roots = config.src_roots();
-    discover_from_with_options(root, &config.discovery.exclude, &src_roots)
+    let project = tryke_config::Project::discover(start);
+    let root = project.root();
+    let src_roots = project.src_roots();
+    discover_from_with_options(root, &project.discovery().exclude, &src_roots)
 }
 
 #[must_use]
 pub fn discover_from_with_excludes(start: &Path, excludes: &[String]) -> Vec<TestItem> {
-    let config = tryke_config::TrykeConfig::discover(start);
-    let root = config.root();
-    let src_roots = config.src_roots();
+    let project = tryke_config::Project::discover(start);
+    let root = project.root();
+    let src_roots = project.src_roots();
     discover_from_with_options(root, excludes, &src_roots)
 }
 
@@ -152,11 +165,7 @@ pub fn discover_from_with_options(
         .map(|f| parse_tests_from_file(root, src_roots, f))
         .collect();
     let mut tests: Vec<TestItem> = parsed.into_iter().flat_map(|p| p.tests).collect();
-    tests.sort_by(|a, b| {
-        a.file_path
-            .cmp(&b.file_path)
-            .then(a.line_number.cmp(&b.line_number))
-    });
+    sort_tests(&mut tests);
     tests
 }
 
@@ -169,34 +178,24 @@ pub fn discover() -> std::io::Result<Vec<TestItem>> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
-    use tempfile::TempDir;
+    use tryke_testing::TestProject;
 
     use super::*;
 
-    fn make_tree(files: &[&str]) -> TempDir {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
-        for rel in files {
-            let path = dir.path().join(rel);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).expect("create_dir_all");
-            }
-            fs::write(&path, "").expect("write file");
-        }
-        dir
+    fn make_tree(files: &[&str]) -> TestProject {
+        TestProject::with_files(files.iter().copied().map(|path| (path, "")))
+            .expect("create test project")
     }
 
     fn make_discoverer(root: &Path) -> Discoverer {
         let src_roots = tryke_config::DiscoveryConfig::default().src_roots(root);
-        Discoverer::new(root, src_roots, &[], None)
+        Discoverer::from_parts(root, src_roots, &[], None)
     }
 
     #[test]
     fn collects_py_files_only() {
-        let dir = make_tree(&["a.py", "b.txt", "sub/c.py"]);
-        let mut files = collect_python_files(dir.path(), &[]);
+        let project = make_tree(&["a.py", "b.txt", "sub/c.py"]);
+        let mut files = collect_python_files(project.root(), &[]);
         files.sort();
         assert_eq!(files.len(), 2);
         assert!(files.iter().all(|p| p.extension().unwrap() == "py"));
@@ -204,17 +203,19 @@ mod tests {
 
     #[test]
     fn respects_ignore_files() {
-        let dir = make_tree(&["a.py", "ignored/b.py"]);
-        fs::write(dir.path().join(".ignore"), "ignored/\n").expect("write .ignore");
-        let files = collect_python_files(dir.path(), &[]);
+        let project = make_tree(&["a.py", "ignored/b.py"]);
+        project
+            .write(".ignore", "ignored/\n")
+            .expect("write .ignore");
+        let files = collect_python_files(project.root(), &[]);
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("a.py"));
     }
 
     #[test]
     fn collect_python_files_respects_custom_excludes() {
-        let dir = make_tree(&["a.py", "generated/suites/test_generated.py"]);
-        let mut files = collect_python_files(dir.path(), &["generated/suites".into()]);
+        let project = make_tree(&["a.py", "generated/suites/test_generated.py"]);
+        let mut files = collect_python_files(project.root(), &["generated/suites".into()]);
         files.sort();
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with("a.py"));
@@ -222,22 +223,16 @@ mod tests {
 
     #[test]
     fn discover_from_finds_tests_in_given_dir() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
-        fs::write(
-            dir.path().join("test_example.py"),
-            "@test\ndef test_hello():\n    pass\n",
-        )
-        .expect("write test file");
-        let items = discover_from(dir.path());
+        let project =
+            TestProject::with_files([("test_example.py", "@test\ndef test_hello():\n    pass\n")])
+                .expect("create test project");
+        let items = discover_from(project.root());
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "test_hello");
     }
 
     #[test]
     fn discover_from_returns_tests_in_line_order() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
         let source = "\
 @test
 def test_third():
@@ -251,8 +246,9 @@ def test_first():
 def test_second():
     pass
 ";
-        fs::write(dir.path().join("test_order.py"), source).expect("write test file");
-        let items = discover_from(dir.path());
+        let project =
+            TestProject::with_files([("test_order.py", source)]).expect("create test project");
+        let items = discover_from(project.root());
         assert_eq!(items.len(), 3);
         assert_eq!(items[0].name, "test_third");
         assert_eq!(items[1].name, "test_first");
@@ -263,10 +259,44 @@ def test_second():
     }
 
     #[test]
+    fn discoverer_returns_tests_in_deterministic_file_and_case_order() {
+        let project = TestProject::with_files([
+            ("z_test.py", "@test\ndef test_last_file():\n    pass\n"),
+            (
+                "a_test.py",
+                r#"@test.cases(
+    test.case("declared first", value=1),
+    test.case("declared second", value=2),
+)
+def test_cases(value: int):
+    pass
+
+@test
+def test_after_cases():
+    pass
+"#,
+            ),
+        ])
+        .expect("create test project");
+        let mut discoverer = make_discoverer(project.root());
+
+        let tests = discoverer.rediscover();
+        let ids: Vec<String> = tests.iter().map(TestItem::id).collect();
+
+        assert_eq!(
+            ids,
+            [
+                "a_test.py::test_cases[declared first]",
+                "a_test.py::test_cases[declared second]",
+                "a_test.py::test_after_cases",
+                "z_test.py::test_last_file",
+            ]
+        );
+        assert_eq!(discoverer.tests(), tests);
+    }
+
+    #[test]
     fn imports_inside_guard_are_in_graph() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
-        fs::write(dir.path().join("helpers.py"), "VALUE = 1\n").expect("write helpers.py");
         let user_src = "\
 from tryke_guard import __TRYKE_TESTING__
 
@@ -278,11 +308,13 @@ if __TRYKE_TESTING__:
     def uses_helpers():
         expect(helpers.VALUE).to_equal(1)
 ";
-        fs::write(dir.path().join("user.py"), user_src).expect("write user.py");
+        let project =
+            TestProject::with_files([("helpers.py", "VALUE = 1\n"), ("user.py", user_src)])
+                .expect("create test project");
 
-        let mut discoverer = make_discoverer(dir.path());
+        let mut discoverer = make_discoverer(project.root());
         discoverer.rediscover();
-        let changed = vec![dir.path().join("helpers.py")];
+        let changed = vec![project.root().join("helpers.py")];
         let tests = discoverer.tests_for_changed(&changed);
         let names: Vec<&str> = tests.iter().map(|t| t.name.as_str()).collect();
         assert!(
@@ -293,8 +325,6 @@ if __TRYKE_TESTING__:
 
     #[test]
     fn dynamic_import_inside_guard_does_not_mark_always_dirty() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
         let guarded_dyn = "\
 from tryke_guard import __TRYKE_TESTING__
 
@@ -306,9 +336,10 @@ if __TRYKE_TESTING__:
     def ok():
         mod = importlib.import_module('os')
 ";
-        fs::write(dir.path().join("test_guarded_dyn.py"), guarded_dyn).expect("write");
+        let project = TestProject::with_files([("test_guarded_dyn.py", guarded_dyn)])
+            .expect("create test project");
 
-        let mut discoverer = make_discoverer(dir.path());
+        let mut discoverer = make_discoverer(project.root());
         discoverer.rediscover();
         let files = discoverer.dynamic_import_files();
         let names: Vec<&str> = files
@@ -324,8 +355,6 @@ if __TRYKE_TESTING__:
 
     #[test]
     fn unguarded_dynamic_import_still_marks_always_dirty() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
         let raw_dyn = "\
 import importlib
 mod = importlib.import_module('os')
@@ -333,9 +362,10 @@ from tryke import test
 @test
 def t(): pass
 ";
-        fs::write(dir.path().join("test_raw_dyn.py"), raw_dyn).expect("write");
+        let project =
+            TestProject::with_files([("test_raw_dyn.py", raw_dyn)]).expect("create test project");
 
-        let mut discoverer = make_discoverer(dir.path());
+        let mut discoverer = make_discoverer(project.root());
         discoverer.rediscover();
         let files = discoverer.dynamic_import_files();
         let names: Vec<&str> = files

@@ -108,11 +108,10 @@ pub struct CleanCacheReport {
 /// Returns any filesystem error encountered while deleting the cache directory
 /// or cache files, except missing cache paths which are treated as already
 /// clean.
-pub fn clean_project_cache(config: &tryke_config::TrykeConfig) -> io::Result<CleanCacheReport> {
-    let cache_dir = config.cache_dir();
-    match cache_dir.as_deref() {
+pub fn clean_project_cache(project: &tryke_config::Project) -> io::Result<CleanCacheReport> {
+    match project.cache_dir() {
         Some(cache_dir) => clean_custom_cache_dir(cache_dir),
-        None => clean_default_cache_dir(config.root()),
+        None => clean_default_cache_dir(project.root()),
     }
 }
 
@@ -363,8 +362,8 @@ mod tests {
         fs::write(state_dir.join(".gitignore"), b"# created by tryke\n*\n")
             .expect("write gitignore");
 
-        let config = tryke_config::TrykeConfig::discover(dir.path());
-        let report = clean_project_cache(&config).expect("clean cache");
+        let project = tryke_config::Project::discover(dir.path());
+        let report = clean_project_cache(&project).expect("clean cache");
 
         assert_eq!(report.cache_dir, cache_dir);
         assert_eq!(report.removed_entries, 1);
@@ -387,8 +386,8 @@ mod tests {
         fs::create_dir_all(&cache_dir).expect("create cache dir");
         fs::write(cache_dir.join("discovery-v1.bin"), b"cache").expect("write cache");
 
-        let config = tryke_config::TrykeConfig::discover(&subdir);
-        let report = clean_project_cache(&config).expect("clean cache");
+        let project = tryke_config::Project::discover(&subdir);
+        let report = clean_project_cache(&project).expect("clean cache");
 
         assert_eq!(report.cache_dir, cache_dir);
         assert_eq!(report.removed_entries, 1);
@@ -405,14 +404,14 @@ mod tests {
         fs::write(cache_dir.join("keep-me.txt"), b"user data").expect("write user data");
         fs::write(cache_dir.join(".gitignore"), b"custom\n").expect("write user gitignore");
 
-        let config = tryke_config::TrykeConfig::load(
-            dir.path(),
-            tryke_config::ConfigOverrides {
-                cache_dir: Some(cache_dir.clone()),
-                ..tryke_config::ConfigOverrides::default()
-            },
-        );
-        let report = clean_project_cache(&config).expect("clean custom cache");
+        let mut metadata = tryke_config::ProjectMetadata::new(dir.path());
+        metadata.apply_configuration_file();
+        metadata.apply_cli_args(tryke_config::TrykeOptions {
+            cache_dir: Some(cache_dir.clone()),
+            ..tryke_config::TrykeOptions::default()
+        });
+        let project = tryke_config::Project::from_metadata(metadata);
+        let report = clean_project_cache(&project).expect("clean custom cache");
 
         assert_eq!(report.cache_dir, cache_dir);
         assert_eq!(report.removed_entries, 2);

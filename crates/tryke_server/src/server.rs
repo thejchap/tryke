@@ -189,7 +189,7 @@ mod tests {
         io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, ReadHalf, WriteHalf},
         time,
     };
-    use tryke_testing::python_bin as test_python_bin;
+    use tryke_testing::{TestProject, python_bin as test_python_bin};
 
     use super::*;
 
@@ -199,14 +199,14 @@ mod tests {
     /// Spawn a server over an in-memory duplex pipe and return the client
     /// halves of the session, mirroring how an editor owns the stdio of a
     /// spawned `tryke server` child.
-    fn start_server() -> (ClientWriter, ClientReader, tempfile::TempDir) {
+    fn start_server() -> (ClientWriter, ClientReader, TestProject) {
         start_server_inner(None)
     }
 
     fn start_server_with_manual_file_watcher() -> (
         ClientWriter,
         ClientReader,
-        tempfile::TempDir,
+        TestProject,
         mpsc::UnboundedSender<FileChangeBatch>,
     ) {
         let (changes_tx, changes_rx) = mpsc::unbounded_channel();
@@ -216,18 +216,18 @@ mod tests {
 
     fn start_server_inner(
         manual_changes: Option<mpsc::UnboundedReceiver<FileChangeBatch>>,
-    ) -> (ClientWriter, ClientReader, tempfile::TempDir) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
-        let root = dir.path().to_path_buf();
+    ) -> (ClientWriter, ClientReader, TestProject) {
+        let dir = TestProject::new().expect("create test project");
+        let root = dir.root().to_path_buf();
         let src_roots = vec![root.clone()];
         let python = test_python_bin();
         let (client, server_side) = tokio::io::duplex(1 << 16);
         let (server_r, server_w) = tokio::io::split(server_side);
         tokio::spawn(async move {
             let worker_pool =
-                WorkerPool::spawn(1, &python, &root, None, LevelFilter::Off, false).await;
-            let discoverer = Discoverer::new(&root, src_roots, &[], None);
+                WorkerPool::spawn_from_parts(1, &python, &root, None, LevelFilter::Off, false)
+                    .await;
+            let discoverer = Discoverer::from_parts(&root, src_roots, &[], None);
             let server = Server::with_transport(worker_pool, discoverer, server_r, server_w);
             let server = match manual_changes {
                 Some(changes) => server.with_manual_file_watcher(changes),
@@ -258,17 +258,17 @@ mod tests {
 
     #[tokio::test]
     async fn stdin_eof_shuts_server_down() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
-        let root = dir.path().to_path_buf();
+        let dir = TestProject::new().expect("create test project");
+        let root = dir.root().to_path_buf();
         let src_roots = vec![root.clone()];
         let python = test_python_bin();
         let (client, server_side) = tokio::io::duplex(1 << 16);
         let (server_r, server_w) = tokio::io::split(server_side);
         let handle = tokio::spawn(async move {
             let worker_pool =
-                WorkerPool::spawn(1, &python, &root, None, LevelFilter::Off, false).await;
-            let discoverer = Discoverer::new(&root, src_roots, &[], None);
+                WorkerPool::spawn_from_parts(1, &python, &root, None, LevelFilter::Off, false)
+                    .await;
+            let discoverer = Discoverer::from_parts(&root, src_roots, &[], None);
             Server::with_transport(worker_pool, discoverer, server_r, server_w)
                 .without_file_watcher()
                 .serve()
@@ -385,7 +385,7 @@ mod tests {
     #[tokio::test]
     async fn run_after_did_change_uses_fresh_module() {
         let (mut w, mut r, dir) = start_server();
-        let test_file = dir.path().join("test_match.py");
+        let test_file = dir.root().join("test_match.py");
 
         fs::write(&test_file, match_body("set")).unwrap();
         let resp = did_change_then_run(&mut w, &mut r, &test_file, "set").await;
@@ -417,7 +417,7 @@ mod tests {
     #[tokio::test]
     async fn manually_triggered_file_change_refreshes_discovery() {
         let (mut w, mut r, dir, changes) = start_server_with_manual_file_watcher();
-        let test_file = dir.path().join("test_match.py");
+        let test_file = dir.root().join("test_match.py");
 
         w.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"ping\"}\n")
             .await
@@ -460,8 +460,8 @@ mod tests {
     #[tokio::test]
     async fn repeated_runs_reexecute_module_imports() {
         let (mut w, mut r, dir) = start_server();
-        let test_file = dir.path().join("test_import.py");
-        let counter_file = dir.path().join("imports.txt");
+        let test_file = dir.root().join("test_import.py");
+        let counter_file = dir.root().join("imports.txt");
         let counter_literal = serde_json::to_string(&counter_file).expect("serialize counter path");
         fs::write(
             &test_file,

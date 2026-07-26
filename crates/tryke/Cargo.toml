@@ -33,5 +33,4 @@ tryke_watcher = { workspace = true }
 [dev-dependencies]
 insta = { version = "1", features = ["filters"] }
 serde_json = "1"
-tempfile = "3"
 tryke_testing = { workspace = true }

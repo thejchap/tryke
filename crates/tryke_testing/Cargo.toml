@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+tempfile = "3"
 tryke_config = { workspace = true }
 
 [lints]

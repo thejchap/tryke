@@ -507,7 +507,7 @@ mod tests {
     };
     use tryke_discovery::Discoverer;
     use tryke_runner::WorkerPool;
-    use tryke_testing::python_bin as test_python_bin;
+    use tryke_testing::{TestProject, python_bin as test_python_bin};
 
     use super::*;
 
@@ -545,15 +545,13 @@ mod tests {
         }
     }
 
-    fn make_root() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
-        dir
+    fn make_root() -> TestProject {
+        TestProject::new().expect("create test project")
     }
 
     async fn make_pool() -> Arc<WorkerPool> {
         Arc::new(
-            WorkerPool::spawn(
+            WorkerPool::spawn_from_parts(
                 1,
                 &test_python_bin(),
                 std::path::Path::new("."),
@@ -633,9 +631,14 @@ mod tests {
     async fn ping_returns_pong() {
         let dir = make_root();
         let (tx, _rx) = mpsc::channel(16);
-        let root = dir.path();
+        let root = dir.root();
         let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
-        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
+        let disc = Arc::new(Mutex::new(Discoverer::from_parts(
+            root,
+            src_roots,
+            &[],
+            None,
+        )));
         let pool = make_pool().await;
         let run_lock = make_run_lock();
         let resp = handle_request(
@@ -655,12 +658,17 @@ mod tests {
     #[tokio::test]
     async fn discover_returns_tests() {
         let dir = make_root();
-        fs::write(dir.path().join("test_x.py"), "@test\ndef test_x(): pass\n")
+        fs::write(dir.root().join("test_x.py"), "@test\ndef test_x(): pass\n")
             .expect("write test file");
         let (tx, _rx) = mpsc::channel(16);
-        let root = dir.path();
+        let root = dir.root();
         let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
-        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
+        let disc = Arc::new(Mutex::new(Discoverer::from_parts(
+            root,
+            src_roots,
+            &[],
+            None,
+        )));
         let pool = make_pool().await;
         let run_lock = make_run_lock();
         let resp = handle_request(
@@ -684,12 +692,17 @@ mod tests {
         // must not drop the response (which would hang a client that sent
         // an `id`).
         let dir = make_root();
-        fs::write(dir.path().join("test_x.py"), "@test\ndef test_x(): pass\n")
+        fs::write(dir.root().join("test_x.py"), "@test\ndef test_x(): pass\n")
             .expect("write test file");
         let (tx, _rx) = mpsc::channel(16);
-        let root = dir.path();
+        let root = dir.root();
         let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
-        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
+        let disc = Arc::new(Mutex::new(Discoverer::from_parts(
+            root,
+            src_roots,
+            &[],
+            None,
+        )));
         let pool = make_pool().await;
         let run_lock = make_run_lock();
         let resp = handle_request(
@@ -711,9 +724,14 @@ mod tests {
     async fn run_enqueues_notifications() {
         let dir = make_root();
         let (tx, mut rx) = mpsc::channel(64);
-        let root = dir.path();
+        let root = dir.root();
         let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
-        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
+        let disc = Arc::new(Mutex::new(Discoverer::from_parts(
+            root,
+            src_roots,
+            &[],
+            None,
+        )));
         let pool = make_pool().await;
         let run_lock = make_run_lock();
         handle_request(
@@ -741,9 +759,14 @@ mod tests {
     async fn run_without_run_id_returns_invalid_params() {
         let dir = make_root();
         let (tx, _rx) = mpsc::channel(16);
-        let root = dir.path();
+        let root = dir.root();
         let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
-        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
+        let disc = Arc::new(Mutex::new(Discoverer::from_parts(
+            root,
+            src_roots,
+            &[],
+            None,
+        )));
         let pool = make_pool().await;
         let run_lock = make_run_lock();
         let resp = handle_request(
@@ -764,9 +787,14 @@ mod tests {
     async fn run_notifications_include_run_id() {
         let dir = make_root();
         let (tx, mut rx) = mpsc::channel(64);
-        let root = dir.path();
+        let root = dir.root();
         let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
-        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
+        let disc = Arc::new(Mutex::new(Discoverer::from_parts(
+            root,
+            src_roots,
+            &[],
+            None,
+        )));
         let pool = make_pool().await;
         let run_lock = make_run_lock();
         let resp = handle_request(
@@ -797,11 +825,16 @@ mod tests {
     #[tokio::test]
     async fn run_uses_cached_tests_not_rediscover() {
         let dir = make_root();
-        fs::write(dir.path().join("test_x.py"), "@test\ndef test_x(): pass\n")
+        fs::write(dir.root().join("test_x.py"), "@test\ndef test_x(): pass\n")
             .expect("write initial file");
-        let root = dir.path();
+        let root = dir.root();
         let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
-        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
+        let disc = Arc::new(Mutex::new(Discoverer::from_parts(
+            root,
+            src_roots,
+            &[],
+            None,
+        )));
 
         // Populate cache via discover
         let (tx, _rx) = mpsc::channel(64);
@@ -818,7 +851,7 @@ mod tests {
         .unwrap();
 
         // Write a new file to disk without calling discover again
-        fs::write(dir.path().join("test_y.py"), "@test\ndef test_y(): pass\n")
+        fs::write(dir.root().join("test_y.py"), "@test\ndef test_y(): pass\n")
             .expect("write second file");
 
         // Run should return only cached tests (test_x), not pick up test_y
@@ -856,12 +889,17 @@ mod tests {
         //   2. It enqueues a `discover_complete` so the client refreshes
         //      its UI.
         let dir = make_root();
-        let test_file = dir.path().join("test_x.py");
+        let test_file = dir.root().join("test_x.py");
         fs::write(&test_file, "@test\ndef test_x(): pass\n").expect("write test file");
         let (tx, mut rx) = mpsc::channel(16);
-        let root = dir.path();
+        let root = dir.root();
         let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
-        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
+        let disc = Arc::new(Mutex::new(Discoverer::from_parts(
+            root,
+            src_roots,
+            &[],
+            None,
+        )));
         // Populate discovery so `affected_modules` returns non-empty.
         disc.lock().await.rediscover();
 
@@ -902,12 +940,17 @@ mod tests {
         // Panic-button form: client doesn't know which files changed.
         // Server should re-scan everything.
         let dir = make_root();
-        fs::write(dir.path().join("test_y.py"), "@test\ndef test_y(): pass\n")
+        fs::write(dir.root().join("test_y.py"), "@test\ndef test_y(): pass\n")
             .expect("write test file");
         let (tx, _rx) = mpsc::channel(16);
-        let root = dir.path();
+        let root = dir.root();
         let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
-        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
+        let disc = Arc::new(Mutex::new(Discoverer::from_parts(
+            root,
+            src_roots,
+            &[],
+            None,
+        )));
         let pool = make_pool().await;
         let run_lock = make_run_lock();
 
@@ -929,9 +972,14 @@ mod tests {
     async fn did_change_without_params_returns_invalid_params() {
         let dir = make_root();
         let (tx, _rx) = mpsc::channel(16);
-        let root = dir.path();
+        let root = dir.root();
         let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
-        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
+        let disc = Arc::new(Mutex::new(Discoverer::from_parts(
+            root,
+            src_roots,
+            &[],
+            None,
+        )));
         let pool = make_pool().await;
         let run_lock = make_run_lock();
         let resp = handle_request(
@@ -961,15 +1009,20 @@ mod tests {
         // should reach discovery.
         let dir = make_root();
         let outside = tempfile::tempdir().expect("outside tempdir");
-        let inside_file = dir.path().join("test_inside.py");
+        let inside_file = dir.root().join("test_inside.py");
         let outside_file = outside.path().join("test_outside.py");
         fs::write(&inside_file, "@test\ndef test_inside(): pass\n").expect("write inside");
         fs::write(&outside_file, "@test\ndef test_outside(): pass\n").expect("write outside");
 
         let (tx, _rx) = mpsc::channel(16);
-        let root = dir.path();
+        let root = dir.root();
         let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
-        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
+        let disc = Arc::new(Mutex::new(Discoverer::from_parts(
+            root,
+            src_roots,
+            &[],
+            None,
+        )));
         disc.lock().await.rediscover();
         let pool = make_pool().await;
         let run_lock = make_run_lock();
@@ -1002,16 +1055,16 @@ mod tests {
         // Discoverer constructed with an explicit exclude (mirroring
         // `[tool.tryke] exclude = ["vendored/**"]`). The path we send
         // lives under that excluded prefix.
-        let excluded_dir = dir.path().join("vendored");
+        let excluded_dir = dir.root().join("vendored");
         fs::create_dir(&excluded_dir).expect("mkdir");
         let excluded_file = excluded_dir.join("test_vendored.py");
         fs::write(&excluded_file, "@test\ndef test_v(): pass\n").expect("write");
 
         let (tx, _rx) = mpsc::channel(16);
-        let root = dir.path();
+        let root = dir.root();
         let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
         let excludes = vec!["vendored/**".to_string()];
-        let disc = Arc::new(Mutex::new(Discoverer::new(
+        let disc = Arc::new(Mutex::new(Discoverer::from_parts(
             root, src_roots, &excludes, None,
         )));
         disc.lock().await.rediscover();
@@ -1039,14 +1092,19 @@ mod tests {
         // A `did_change` for non-Python files (README.md, pyproject.toml,
         // config dotfiles) must not enter discovery.
         let dir = make_root();
-        let readme = dir.path().join("README.md");
-        let pyproject = dir.path().join("pyproject.toml"); // already exists from make_root
+        let readme = dir.root().join("README.md");
+        let pyproject = dir.root().join("pyproject.toml"); // already exists from make_root
         fs::write(&readme, "# project\n").expect("write readme");
 
         let (tx, _rx) = mpsc::channel(16);
-        let root = dir.path();
+        let root = dir.root();
         let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
-        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
+        let disc = Arc::new(Mutex::new(Discoverer::from_parts(
+            root,
+            src_roots,
+            &[],
+            None,
+        )));
         disc.lock().await.rediscover();
         let pool = make_pool().await;
         let run_lock = make_run_lock();
@@ -1076,9 +1134,14 @@ mod tests {
         fs::write(&outside_file, "@test\ndef test_outside(): pass\n").expect("write outside");
 
         let (tx, _rx) = mpsc::channel(16);
-        let root = dir.path();
+        let root = dir.root();
         let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
-        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
+        let disc = Arc::new(Mutex::new(Discoverer::from_parts(
+            root,
+            src_roots,
+            &[],
+            None,
+        )));
         let pool = make_pool().await;
         let run_lock = make_run_lock();
 
@@ -1108,7 +1171,8 @@ mod tests {
         // `/var → /private/var` is the common trigger). New behaviour:
         // canonicalise the parent and join the file name, so the
         // workspace prefix is normalised even when the leaf is gone.
-        let dir = make_root();
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
         // Create then delete a file so canonicalize(file) will fail
         // but canonicalize(parent) succeeds. Discovery doesn't need
         // to know about it — we're testing the filter, not discovery.
@@ -1119,7 +1183,12 @@ mod tests {
         let (tx, _rx) = mpsc::channel(16);
         let root = dir.path();
         let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
-        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
+        let disc = Arc::new(Mutex::new(Discoverer::from_parts(
+            root,
+            src_roots,
+            &[],
+            None,
+        )));
         disc.lock().await.rediscover();
         let pool = make_pool().await;
         let run_lock = make_run_lock();
@@ -1156,12 +1225,17 @@ mod tests {
         // permanently stale until the FS watcher fires (which may
         // never happen if changes are still pending).
         let dir = make_root();
-        fs::write(dir.path().join("test_x.py"), "@test\ndef test_x(): pass\n")
+        fs::write(dir.root().join("test_x.py"), "@test\ndef test_x(): pass\n")
             .expect("write test file");
         let (tx, mut rx) = mpsc::channel(16);
-        let root = dir.path();
+        let root = dir.root();
         let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
-        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
+        let disc = Arc::new(Mutex::new(Discoverer::from_parts(
+            root,
+            src_roots,
+            &[],
+            None,
+        )));
         let pool = make_pool().await;
         let run_lock = make_run_lock();
 
@@ -1195,9 +1269,14 @@ mod tests {
     async fn unknown_method_returns_error() {
         let dir = make_root();
         let (tx, _rx) = mpsc::channel(16);
-        let root = dir.path();
+        let root = dir.root();
         let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
-        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
+        let disc = Arc::new(Mutex::new(Discoverer::from_parts(
+            root,
+            src_roots,
+            &[],
+            None,
+        )));
         let pool = make_pool().await;
         let run_lock = make_run_lock();
         let resp = handle_request(
@@ -1219,9 +1298,14 @@ mod tests {
         // A single session must see both the run notifications and the
         // id-bearing response on the same stream.
         let dir = make_root();
-        let root = dir.path();
+        let root = dir.root();
         let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
-        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
+        let disc = Arc::new(Mutex::new(Discoverer::from_parts(
+            root,
+            src_roots,
+            &[],
+            None,
+        )));
         let pool = make_pool().await;
         let (outbound_tx, outbound_rx) = mpsc::channel::<Bytes>(64);
         let run_lock = make_run_lock();
@@ -1274,9 +1358,14 @@ mod tests {
     #[tokio::test]
     async fn connection_handler_reports_writer_disconnect() {
         let dir = make_root();
-        let root = dir.path();
+        let root = dir.root();
         let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
-        let discoverer = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
+        let discoverer = Arc::new(Mutex::new(Discoverer::from_parts(
+            root,
+            src_roots,
+            &[],
+            None,
+        )));
         let pool = make_pool().await;
         let (outbound_tx, outbound_rx) = mpsc::channel(1);
         let run_lock = make_run_lock();
@@ -1310,14 +1399,19 @@ mod tests {
     async fn run_with_filter_restricts_tests() {
         let dir = make_root();
         fs::write(
-            dir.path().join("test_x.py"),
+            dir.root().join("test_x.py"),
             "@test\ndef test_alpha(): pass\n\n@test\ndef test_beta(): pass\n",
         )
         .expect("write test file");
         let (tx, mut rx) = mpsc::channel(64);
-        let root = dir.path();
+        let root = dir.root();
         let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
-        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
+        let disc = Arc::new(Mutex::new(Discoverer::from_parts(
+            root,
+            src_roots,
+            &[],
+            None,
+        )));
         // Populate cache
         disc.lock().await.rediscover();
         let pool = make_pool().await;
@@ -1354,14 +1448,19 @@ mod tests {
         // carries run_id=A, and same for B.
         let dir = make_root();
         fs::write(
-            dir.path().join("test_x.py"),
+            dir.root().join("test_x.py"),
             "@test\ndef test_alpha(): pass\n\n@test\ndef test_beta(): pass\n",
         )
         .expect("write test file");
         let (tx, mut rx) = mpsc::channel(256);
-        let root = dir.path();
+        let root = dir.root();
         let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
-        let disc = Arc::new(Mutex::new(Discoverer::new(root, src_roots, &[], None)));
+        let disc = Arc::new(Mutex::new(Discoverer::from_parts(
+            root,
+            src_roots,
+            &[],
+            None,
+        )));
         disc.lock().await.rediscover();
         let pool = make_pool().await;
         let run_lock = make_run_lock();

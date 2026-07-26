@@ -8,6 +8,7 @@ use log::{LevelFilter, debug, trace, warn};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::Stream;
 use tokio_stream::wrappers::UnboundedReceiverStream;
+use tryke_config::Project;
 use tryke_types::{HookItem, TestOutcome, TestResult};
 
 use crate::protocol::RegisterHooksParams;
@@ -91,7 +92,28 @@ pub struct WorkerPool {
     ctrl_txs: Vec<mpsc::UnboundedSender<WorkerCtrl>>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct WorkerPoolOptions<'a> {
+    pub size: usize,
+    pub python_path: Option<&'a [PathBuf]>,
+    pub log_level: LevelFilter,
+    pub warm: bool,
+}
+
 impl WorkerPool {
+    /// Spawn a worker pool using the project's resolved root and Python interpreter.
+    pub async fn spawn(project: &Project, options: WorkerPoolOptions<'_>) -> Self {
+        Self::spawn_from_parts(
+            options.size,
+            project.python(),
+            project.root(),
+            options.python_path,
+            options.log_level,
+            options.warm,
+        )
+        .await
+    }
+
     /// Spawns a pool whose workers receive `TRYKE_LOG=<log_level>`.
     ///
     /// Pass `LevelFilter::Off` to leave workers silent (the env var is
@@ -103,7 +125,7 @@ impl WorkerPool {
     /// `python_path` overrides the default path of `root` plus its `python`
     /// directory when present. If `warm` is true, this method also waits for
     /// every Python subprocess to start before returning.
-    pub async fn spawn(
+    pub async fn spawn_from_parts(
         size: usize,
         python_bin: &str,
         root: &Path,
@@ -562,7 +584,7 @@ mod tests {
     use std::path::PathBuf;
 
     use tokio_stream::StreamExt;
-    use tryke_testing::python_bin as test_python_bin;
+    use tryke_testing::{TestProject, python_bin as test_python_bin};
     use tryke_types::{FixturePer, HookItem, TestItem};
 
     use super::*;
@@ -595,12 +617,10 @@ mod tests {
     /// NOT be retried (no double-execution of side effects).
     #[tokio::test]
     async fn worker_crash_replays_hooks_and_does_not_double_execute() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        let project = TestProject::new().expect("create test project");
 
-        let crash_counter = dir.path().join("CRASH_COUNT");
+        let crash_counter = project.root().join("CRASH_COUNT");
         let crash_counter_escaped = crash_counter.to_string_lossy().replace('\\', "\\\\");
-        let test_file = dir.path().join("test_crash.py");
         let source = format!(
             r#"from tryke import test, fixture, Depends, expect
 
@@ -625,7 +645,9 @@ def test_third(n: int = Depends(counter)) -> None:
     expect(n).to_equal(42)
 "#
         );
-        std::fs::write(&test_file, source).expect("write test file");
+        let test_file = project
+            .write("test_crash.py", source)
+            .expect("write test file");
 
         let hook = HookItem {
             name: "counter".into(),
@@ -645,11 +667,11 @@ def test_third(n: int = Depends(counter)) -> None:
             hooks: vec![hook],
         };
 
-        let python_path = [dir.path().to_path_buf(), python_package_dir()];
-        let pool = WorkerPool::spawn(
+        let python_path = [project.root().to_path_buf(), python_package_dir()];
+        let pool = WorkerPool::spawn_from_parts(
             1,
             &test_python_bin(),
-            dir.path(),
+            project.root(),
             Some(&python_path),
             LevelFilter::Off,
             true,
@@ -703,12 +725,10 @@ def test_third(n: int = Depends(counter)) -> None:
     /// interpreter is in play.
     #[tokio::test]
     async fn restart_workers_runs_module_body_on_fresh_interpreter() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        let project = TestProject::new().expect("create test project");
 
-        let counter_file = dir.path().join("IMPORT_COUNT");
+        let counter_file = project.root().join("IMPORT_COUNT");
         let counter_escaped = counter_file.to_string_lossy().replace('\\', "\\\\");
-        let test_file = dir.path().join("test_restart_state.py");
         let source = format!(
             r#"from tryke import test, expect
 
@@ -721,7 +741,9 @@ def test_noop() -> None:
     expect(1).to_equal(1)
 "#
         );
-        std::fs::write(&test_file, source).expect("write test file");
+        let test_file = project
+            .write("test_restart_state.py", source)
+            .expect("write test file");
 
         let make_unit = || WorkUnit {
             tests: vec![make_test_item(
@@ -732,11 +754,11 @@ def test_noop() -> None:
             hooks: vec![],
         };
 
-        let python_path = [dir.path().to_path_buf(), python_package_dir()];
-        let pool = WorkerPool::spawn(
+        let python_path = [project.root().to_path_buf(), python_package_dir()];
+        let pool = WorkerPool::spawn_from_parts(
             1,
             &test_python_bin(),
-            dir.path(),
+            project.root(),
             Some(&python_path),
             LevelFilter::Off,
             true,
@@ -801,23 +823,23 @@ def test_noop() -> None:
     async fn worker_missing_tryke_surfaces_python_error_in_outcome() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        let project = TestProject::new().expect("create test project");
 
-        let fake_python = dir.path().join("fake_python.sh");
-        std::fs::write(
-            &fake_python,
-            "#!/bin/sh\n\
+        let fake_python = project
+            .write(
+                "fake_python.sh",
+                "#!/bin/sh\n\
              echo \"$0: Error while finding module specification for \
              'tryke.worker' (ModuleNotFoundError: No module named 'tryke')\" >&2\n\
              exit 1\n",
-        )
-        .expect("write fake python");
+            )
+            .expect("write fake python");
         std::fs::set_permissions(&fake_python, std::fs::Permissions::from_mode(0o755))
             .expect("chmod fake python");
 
-        let test_file = dir.path().join("test_no_tryke.py");
-        std::fs::write(&test_file, "def test_noop(): pass\n").expect("write test file");
+        let test_file = project
+            .write("test_no_tryke.py", "def test_noop(): pass\n")
+            .expect("write test file");
 
         // Hook on the same module forces `handle_unit` through
         // `register_hooks_for_unit` → `ensure_worker` (spawn ok) →
@@ -840,11 +862,11 @@ def test_noop() -> None:
             hooks: vec![hook],
         };
 
-        let python_path = [dir.path().to_path_buf()];
-        let pool = WorkerPool::spawn(
+        let python_path = [project.root().to_path_buf()];
+        let pool = WorkerPool::spawn_from_parts(
             1,
             fake_python.to_str().expect("fake python path"),
-            dir.path(),
+            project.root(),
             Some(&python_path),
             LevelFilter::Off,
             false,
@@ -882,14 +904,13 @@ def test_noop() -> None:
     /// watcher can fire before the user triggers any test run.
     #[tokio::test]
     async fn restart_workers_with_no_live_processes_acks() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
+        let project = TestProject::new().expect("create test project");
 
-        let python_path = [dir.path().to_path_buf(), python_package_dir()];
-        let pool = WorkerPool::spawn(
+        let python_path = [project.root().to_path_buf(), python_package_dir()];
+        let pool = WorkerPool::spawn_from_parts(
             2,
             &test_python_bin(),
-            dir.path(),
+            project.root(),
             Some(&python_path),
             LevelFilter::Off,
             false,

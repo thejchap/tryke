@@ -10,9 +10,11 @@ pub enum DistMode {
     /// Tests from the same file may run on different workers.
     #[default]
     Test,
+
     /// All tests from a file go to one worker. Module state is
     /// deterministic within a file. Tests run sequentially per file.
     File,
+
     /// Tests within a `describe()` group go to one worker.
     /// Different groups from the same file may run on different workers.
     Group,
@@ -23,6 +25,7 @@ pub enum DistMode {
 #[derive(Debug)]
 pub struct WorkUnit {
     pub tests: Vec<TestItem>,
+
     /// Hooks relevant to the tests in this unit, sent once before execution.
     pub hooks: Vec<HookItem>,
 }

@@ -1,27 +1,48 @@
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    env,
+};
 
 use anyhow::Result;
-use tryke_config::TrykeConfig;
-use tryke_discovery::Discoverer;
+use tryke_config::{Project, ProjectMetadata};
+use tryke_discovery::{Discoverer, resolve_changed_files};
 use tryke_types::HookItem;
 
-use crate::git::resolve_changed_files;
+use crate::ExitStatus;
+use crate::cli::{GlobalArgs, GraphArgs};
 
-pub fn run_graph(
-    config: &TrykeConfig,
+pub(crate) fn run_graph_command(args: GraphArgs, global: &GlobalArgs) -> Result<ExitStatus> {
+    if args.base_branch.is_some() && !args.changed {
+        return Err(anyhow::anyhow!("--base-branch requires --changed"));
+    }
+
+    let cwd = env::current_dir()?;
+    let mut metadata = ProjectMetadata::new(args.root.as_deref().unwrap_or(&cwd));
+    metadata.apply_configuration_file();
+    metadata.apply_cli_args(args.project_options(global));
+    let project = Project::from_metadata(metadata);
+
+    if args.fixtures {
+        run_fixture_graph(&project)?;
+    } else {
+        render_graph(
+            &project,
+            args.connected_only,
+            args.changed,
+            args.base_branch.as_deref(),
+        )?;
+    }
+    Ok(ExitStatus::Success)
+}
+
+fn render_graph(
+    project: &Project,
     connected_only: bool,
     changed: bool,
     base_branch: Option<&str>,
 ) -> Result<()> {
-    let root_path = config.root();
-    let src_roots = config.src_roots();
-    let cache_dir = config.cache_dir();
-    let mut discoverer = Discoverer::new(
-        root_path,
-        src_roots,
-        &config.discovery.exclude,
-        cache_dir.as_deref(),
-    );
+    let root_path = project.root();
+    let mut discoverer = Discoverer::new(project);
     discoverer.rediscover();
 
     let changed_files = if changed {
@@ -44,6 +65,7 @@ pub fn run_graph(
         .as_ref()
         .map(|paths| discoverer.affected_files(paths))
         .unwrap_or_default();
+
     let changed_set = changed_files
         .as_ref()
         .map(|paths| {
@@ -102,20 +124,12 @@ pub fn run_graph(
 ///
 /// For each discovered hook, prints its qualified name, the hooks it
 /// depends on (its `Depends(...)` parameters), and the hooks that depend
-/// on it — mirroring the shape of [`run_graph`] for imports. Unresolved
+/// on it — mirroring the shape of [`render_graph`] for imports. Unresolved
 /// dependency names (references to hooks that don't exist in any
 /// discovered module) are printed with a `?` suffix so users can spot
 /// typos or missing fixtures without reading through test output.
-pub fn run_fixture_graph(config: &TrykeConfig) -> Result<()> {
-    let root_path = config.root();
-    let src_roots = config.src_roots();
-    let cache_dir = config.cache_dir();
-    let mut discoverer = Discoverer::new(
-        root_path,
-        src_roots,
-        &config.discovery.exclude,
-        cache_dir.as_deref(),
-    );
+fn run_fixture_graph(project: &Project) -> Result<()> {
+    let mut discoverer = Discoverer::new(project);
     discoverer.rediscover();
 
     let hooks = discoverer.hooks();
@@ -200,47 +214,45 @@ pub fn run_fixture_graph(config: &TrykeConfig) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
+    use tryke_testing::TestProject;
+
     use super::*;
 
     #[test]
-    fn run_graph_prints_entries() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
-        std::fs::write(dir.path().join("utils.py"), "def helper(): pass\n").expect("write");
-        std::fs::write(
-            dir.path().join("test_foo.py"),
-            "from utils import helper\n@test\ndef test_foo(): pass\n",
-        )
-        .expect("write");
-        let config = TrykeConfig::discover(dir.path());
-        assert!(run_graph(&config, false, false, None).is_ok());
+    fn render_graph_prints_entries() -> io::Result<()> {
+        let fixture = TestProject::with_files([
+            ("utils.py", "def helper(): pass\n"),
+            (
+                "test_foo.py",
+                "from utils import helper\n@test\ndef test_foo(): pass\n",
+            ),
+        ])?;
+        let project = fixture.project();
+        assert!(render_graph(&project, false, false, None).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn run_graph_connected_only() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
-        std::fs::write(dir.path().join("utils.py"), "def helper(): pass\n").expect("write");
-        std::fs::write(
-            dir.path().join("test_foo.py"),
-            "from utils import helper\n@test\ndef test_foo(): pass\n",
-        )
-        .expect("write");
-        std::fs::write(
-            dir.path().join("test_isolated.py"),
-            "@test\ndef test_isolated(): pass\n",
-        )
-        .expect("write");
-        let config = TrykeConfig::discover(dir.path());
-        assert!(run_graph(&config, true, false, None).is_ok());
+    fn render_graph_connected_only() -> io::Result<()> {
+        let fixture = TestProject::with_files([
+            ("utils.py", "def helper(): pass\n"),
+            (
+                "test_foo.py",
+                "from utils import helper\n@test\ndef test_foo(): pass\n",
+            ),
+            ("test_isolated.py", "@test\ndef test_isolated(): pass\n"),
+        ])?;
+        let project = fixture.project();
+        assert!(render_graph(&project, true, false, None).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn run_fixture_graph_prints_entries() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
-        std::fs::write(
-            dir.path().join("test_fixtures.py"),
+    fn run_fixture_graph_prints_entries() -> io::Result<()> {
+        let fixture = TestProject::with_files([(
+            "test_fixtures.py",
             "from tryke import fixture, Depends, test\n\
              @fixture\n\
              def db():\n    yield 1\n\
@@ -248,22 +260,17 @@ mod tests {
              def session(conn=Depends(db)):\n    yield conn\n\
              @test\n\
              def test_it(s=Depends(session)):\n    pass\n",
-        )
-        .expect("write");
-        let config = TrykeConfig::discover(dir.path());
-        assert!(run_fixture_graph(&config).is_ok());
+        )])?;
+        let project = fixture.project();
+        assert!(run_fixture_graph(&project).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn run_fixture_graph_empty() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
-        std::fs::write(
-            dir.path().join("test_empty.py"),
-            "@test\ndef test_it(): pass\n",
-        )
-        .expect("write");
-        let config = TrykeConfig::discover(dir.path());
-        assert!(run_fixture_graph(&config).is_ok());
+    fn run_fixture_graph_empty() -> io::Result<()> {
+        let fixture = TestProject::with_files([("test_empty.py", "@test\ndef test_it(): pass\n")])?;
+        let project = fixture.project();
+        assert!(run_fixture_graph(&project).is_ok());
+        Ok(())
     }
 }

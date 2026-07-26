@@ -42,12 +42,15 @@ impl DiscoveryConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct ConfigOverrides {
+/// Raw, unresolved project options from a configuration layer.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+pub struct TrykeOptions {
+    pub exclude: Option<Vec<String>>,
+    pub src: Option<Vec<String>>,
     pub python: Option<String>,
     pub cache_dir: Option<PathBuf>,
-    pub exclude: Vec<String>,
-    pub include: Vec<String>,
+    #[serde(skip)]
+    pub include: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -74,134 +77,270 @@ impl EnvironmentConfig {
     }
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ProjectSettings {
+    pub discovery: DiscoveryConfig,
+    python: String,
+    cache_dir: Option<PathBuf>,
+    src_roots: Vec<PathBuf>,
+}
+
+impl ProjectSettings {
+    /// Return the resolved Python interpreter used to spawn worker processes.
+    #[must_use]
+    pub fn python(&self) -> &str {
+        &self.python
+    }
+
+    /// Return the resolved persistent discovery cache directory.
+    #[must_use]
+    pub fn cache_dir(&self) -> Option<&Path> {
+        self.cache_dir.as_deref()
+    }
+
+    /// Return the resolved source roots used for import resolution.
+    #[must_use]
+    pub fn src_roots(&self) -> Vec<PathBuf> {
+        self.src_roots.clone()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ConfigValue<T> {
-    value: T,
+struct OptionsLayer {
+    options: TrykeOptions,
     relative_to: PathBuf,
 }
 
-impl<T> ConfigValue<T> {
-    fn new(value: T, relative_to: &Path) -> Self {
+impl OptionsLayer {
+    fn new(options: TrykeOptions, relative_to: &Path) -> Self {
         Self {
-            value,
+            options,
             relative_to: relative_to.to_path_buf(),
         }
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct TrykeConfig {
-    pub discovery: DiscoveryConfig,
-    project_root: PathBuf,
-    python: Option<ConfigValue<String>>,
-    cache_dir: Option<ConfigValue<PathBuf>>,
-    environment: EnvironmentConfig,
+/// Project identity and unresolved configuration layers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectMetadata {
+    root: PathBuf,
+    config_file: Option<PathBuf>,
+    options: OptionsLayer,
+    override_options: Option<OptionsLayer>,
 }
 
-impl TrykeConfig {
+impl ProjectMetadata {
+    /// Initialize project metadata with its resolved project root.
     #[must_use]
-    pub fn discover(start: &Path) -> Self {
-        Self::load(start, ConfigOverrides::default())
+    pub fn new(start: &Path) -> Self {
+        let root = resolve_project_root(start);
+        Self {
+            options: OptionsLayer::new(TrykeOptions::default(), &root),
+            root,
+            config_file: None,
+            override_options: None,
+        }
     }
 
-    #[must_use]
-    pub fn load(start: &Path, overrides: ConfigOverrides) -> Self {
-        let project_root = resolve_project_root(start);
-        let config_root = find_config_root(&project_root);
+    /// Apply the closest discovered `[tool.tryke]` configuration.
+    pub fn apply_configuration_file(&mut self) {
+        self.config_file = None;
+        self.options = OptionsLayer::new(TrykeOptions::default(), &self.root);
 
-        let file = config_root
-            .as_deref()
-            .and_then(|root| fs::read_to_string(root.join("pyproject.toml")).ok())
+        let Some(config_root) = find_config_root(&self.root) else {
+            return;
+        };
+        let config_path = config_root.join("pyproject.toml");
+        let Some(options) = fs::read_to_string(&config_path)
+            .ok()
             .and_then(|contents| parse_toml(&contents))
-            .unwrap_or_default();
-
-        let value_root = config_root.as_deref().unwrap_or(&project_root);
-
-        let exclude = if overrides.exclude.is_empty() {
-            let includes = overrides
-                .include
-                .iter()
-                .collect::<std::collections::HashSet<_>>();
-            file.exclude
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|entry| !includes.contains(entry))
-                .collect()
-        } else {
-            overrides.exclude
+        else {
+            return;
         };
 
-        let python = overrides
-            .python
-            .map(|value| ConfigValue::new(value, &project_root))
-            .or_else(|| file.python.map(|value| ConfigValue::new(value, value_root)));
-
-        let cache_dir = overrides
-            .cache_dir
-            .map(|value| ConfigValue::new(value, &project_root))
-            .or_else(|| {
-                file.cache_dir
-                    .map(|value| ConfigValue::new(value, value_root))
-            });
-
-        Self {
-            discovery: DiscoveryConfig {
-                exclude,
-                src: file.src.unwrap_or_else(|| vec![".".into()]),
-            },
-            project_root,
-            python,
-            cache_dir,
-            environment: EnvironmentConfig::from_env(),
-        }
+        self.options = OptionsLayer::new(options, &config_root);
+        self.config_file = Some(config_path);
     }
 
-    /// Resolves the Python interpreter used to spawn worker processes.
-    ///
-    /// Precedence follows ty's environment discovery: CLI override,
-    /// `[tool.tryke] python`, `VIRTUAL_ENV`, a child Conda environment,
-    /// project `.venv`, a base Conda environment, then the platform's
-    /// default Python command from `PATH`.
-    #[must_use]
-    pub fn python(&self) -> String {
-        if let Some(value) = self.python.as_ref() {
-            return resolve_python_value(&value.value, &value.relative_to);
-        }
-        if let Some(prefix) = self.environment.virtual_env.as_deref() {
-            return python_in_environment(prefix).to_string_lossy().into_owned();
-        }
-        if let Some(prefix) = self.environment.conda_child.as_deref() {
-            return python_in_environment(prefix).to_string_lossy().into_owned();
-        }
-        if !self.project_root.as_os_str().is_empty() {
-            let venv = self.project_root.join(".venv");
-            if venv.is_dir() {
-                return python_in_environment(&venv).to_string_lossy().into_owned();
-            }
-        }
-        if let Some(prefix) = self.environment.conda_base.as_deref() {
-            return python_in_environment(prefix).to_string_lossy().into_owned();
-        }
-        default_python().to_owned()
+    /// Apply CLI arguments as the highest-precedence configuration layer.
+    pub fn apply_cli_args(&mut self, options: TrykeOptions) {
+        self.override_options = Some(OptionsLayer::new(options, &self.root));
     }
 
-    /// Resolves the persistent discovery cache directory.
-    #[must_use]
-    pub fn cache_dir(&self) -> Option<PathBuf> {
-        self.cache_dir
-            .as_ref()
-            .map(|value| anchor_path(&value.value, &value.relative_to))
-    }
-
-    #[must_use]
-    pub fn src_roots(&self) -> Vec<PathBuf> {
-        self.discovery.src_roots(&self.project_root)
-    }
-
+    /// Return the resolved project root.
     #[must_use]
     pub fn root(&self) -> &Path {
-        &self.project_root
+        &self.root
     }
+
+    /// Return the applied project configuration file, if one was found.
+    #[must_use]
+    pub fn config_file(&self) -> Option<&Path> {
+        self.config_file.as_deref()
+    }
+
+    /// Return the raw options loaded from the project configuration.
+    #[must_use]
+    pub fn options(&self) -> &TrykeOptions {
+        &self.options.options
+    }
+
+    /// Return the highest-precedence CLI options, if applied.
+    #[must_use]
+    pub fn override_options(&self) -> Option<&TrykeOptions> {
+        self.override_options.as_ref().map(|layer| &layer.options)
+    }
+}
+
+/// Runtime project state retaining both metadata and resolved settings.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Project {
+    metadata: ProjectMetadata,
+    settings: ProjectSettings,
+}
+
+impl Project {
+    /// Resolve runtime settings while retaining the metadata that produced them.
+    #[must_use]
+    pub fn from_metadata(metadata: ProjectMetadata) -> Self {
+        Self::from_metadata_with_environment(metadata, &EnvironmentConfig::from_env())
+    }
+
+    fn from_metadata_with_environment(
+        metadata: ProjectMetadata,
+        environment: &EnvironmentConfig,
+    ) -> Self {
+        let settings = resolve_settings(&metadata, environment);
+        Self { metadata, settings }
+    }
+
+    /// Discover and resolve a project without CLI overrides.
+    #[must_use]
+    pub fn discover(start: &Path) -> Self {
+        let mut metadata = ProjectMetadata::new(start);
+        metadata.apply_configuration_file();
+        Self::from_metadata(metadata)
+    }
+
+    /// Return the unresolved project metadata.
+    #[must_use]
+    pub fn metadata(&self) -> &ProjectMetadata {
+        &self.metadata
+    }
+
+    /// Return the resolved runtime settings.
+    #[must_use]
+    pub fn settings(&self) -> &ProjectSettings {
+        &self.settings
+    }
+
+    /// Return the project root.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        self.metadata.root()
+    }
+
+    /// Return the resolved discovery settings.
+    #[must_use]
+    pub fn discovery(&self) -> &DiscoveryConfig {
+        &self.settings.discovery
+    }
+
+    /// Return the resolved Python interpreter.
+    #[must_use]
+    pub fn python(&self) -> &str {
+        self.settings.python()
+    }
+
+    /// Return the resolved persistent discovery cache directory.
+    #[must_use]
+    pub fn cache_dir(&self) -> Option<&Path> {
+        self.settings.cache_dir()
+    }
+
+    /// Return the resolved source roots.
+    #[must_use]
+    pub fn src_roots(&self) -> Vec<PathBuf> {
+        self.settings.src_roots()
+    }
+}
+
+fn resolve_settings(
+    metadata: &ProjectMetadata,
+    environment: &EnvironmentConfig,
+) -> ProjectSettings {
+    let project_options = &metadata.options.options;
+    let override_options = metadata
+        .override_options
+        .as_ref()
+        .map(|layer| &layer.options);
+
+    let override_exclude = override_options.and_then(|options| options.exclude.as_ref());
+    let mut exclude = override_exclude
+        .cloned()
+        .or_else(|| project_options.exclude.clone())
+        .unwrap_or_default();
+    if override_exclude.is_none()
+        && let Some(includes) = override_options.and_then(|options| options.include.as_ref())
+    {
+        let includes = includes.iter().collect::<std::collections::HashSet<_>>();
+        exclude.retain(|entry| !includes.contains(entry));
+    }
+
+    let src = override_options
+        .and_then(|options| options.src.clone())
+        .or_else(|| project_options.src.clone())
+        .unwrap_or_else(|| vec![".".into()]);
+
+    let python = resolve_layered_value(metadata, |options| options.python.as_deref()).map_or_else(
+        || resolve_environment_python(metadata.root(), environment),
+        |(value, relative_to)| resolve_python_value(value, relative_to),
+    );
+    let cache_dir = resolve_layered_value(metadata, |options| options.cache_dir.as_deref())
+        .map(|(value, relative_to)| anchor_path(value, relative_to));
+
+    let discovery = DiscoveryConfig { exclude, src };
+    let src_roots = discovery.src_roots(metadata.root());
+
+    ProjectSettings {
+        discovery,
+        python,
+        cache_dir,
+        src_roots,
+    }
+}
+
+fn resolve_layered_value<'a, T: ?Sized>(
+    metadata: &'a ProjectMetadata,
+    value: impl Fn(&'a TrykeOptions) -> Option<&'a T>,
+) -> Option<(&'a T, &'a Path)> {
+    metadata
+        .override_options
+        .as_ref()
+        .and_then(|layer| value(&layer.options).map(|value| (value, layer.relative_to.as_path())))
+        .or_else(|| {
+            value(&metadata.options.options)
+                .map(|value| (value, metadata.options.relative_to.as_path()))
+        })
+}
+
+fn resolve_environment_python(root: &Path, environment: &EnvironmentConfig) -> String {
+    if let Some(prefix) = environment.virtual_env.as_deref() {
+        return python_in_environment(prefix).to_string_lossy().into_owned();
+    }
+    if let Some(prefix) = environment.conda_child.as_deref() {
+        return python_in_environment(prefix).to_string_lossy().into_owned();
+    }
+    if !root.as_os_str().is_empty() {
+        let venv = root.join(".venv");
+        if venv.is_dir() {
+            return python_in_environment(&venv).to_string_lossy().into_owned();
+        }
+    }
+    if let Some(prefix) = environment.conda_base.as_deref() {
+        return python_in_environment(prefix).to_string_lossy().into_owned();
+    }
+    default_python().to_owned()
 }
 
 fn default_python() -> &'static str {
@@ -344,7 +483,7 @@ fn parse_level(s: Option<&str>) -> Option<log::LevelFilter> {
     s.and_then(|v| v.trim().parse::<log::LevelFilter>().ok())
 }
 
-fn parse_toml(contents: &str) -> Option<RawTrykeConfig> {
+fn parse_toml(contents: &str) -> Option<TrykeOptions> {
     toml::from_str::<PyprojectToml>(contents).ok()?.tool?.tryke
 }
 
@@ -355,15 +494,7 @@ struct PyprojectToml {
 
 #[derive(Debug, Default, Deserialize)]
 struct PyprojectTool {
-    tryke: Option<RawTrykeConfig>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct RawTrykeConfig {
-    exclude: Option<Vec<String>>,
-    src: Option<Vec<String>>,
-    python: Option<String>,
-    cache_dir: Option<PathBuf>,
+    tryke: Option<TrykeOptions>,
 }
 
 #[cfg(test)]
@@ -378,10 +509,85 @@ mod tests {
         tempfile::tempdir().expect("tempdir")
     }
 
-    fn load_without_environment(start: &Path, overrides: ConfigOverrides) -> TrykeConfig {
-        let mut config = TrykeConfig::load(start, overrides);
-        config.environment = EnvironmentConfig::default();
-        config
+    fn load_without_environment(start: &Path, overrides: TrykeOptions) -> Project {
+        let mut metadata = ProjectMetadata::new(start);
+        metadata.apply_configuration_file();
+        metadata.apply_cli_args(overrides);
+        Project::from_metadata_with_environment(metadata, &EnvironmentConfig::default())
+    }
+
+    #[test]
+    fn project_metadata_applies_layers_in_order() {
+        let dir = tempdir();
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.tryke]\n\
+             exclude = [\"from-file\"]\n\
+             src = [\"python\"]\n\
+             python = \".venv/bin/python\"\n\
+             cache_dir = \".file-cache\"\n",
+        )
+        .expect("write pyproject");
+
+        let mut metadata = ProjectMetadata::new(dir.path());
+        assert_eq!(metadata.options.options, TrykeOptions::default());
+        assert_eq!(metadata.config_file(), None);
+
+        metadata.apply_configuration_file();
+        let config_path = metadata.root().join("pyproject.toml");
+        assert_eq!(metadata.config_file(), Some(config_path.as_path()));
+        assert_eq!(
+            metadata.options.options.exclude,
+            Some(vec!["from-file".into()])
+        );
+        assert_eq!(metadata.options.options.src, Some(vec!["python".into()]));
+
+        metadata.apply_cli_args(TrykeOptions {
+            python: Some("cli-python".into()),
+            cache_dir: Some(PathBuf::from(".cli-cache")),
+            exclude: Some(vec!["from-cli".into()]),
+            ..TrykeOptions::default()
+        });
+
+        let project =
+            Project::from_metadata_with_environment(metadata, &EnvironmentConfig::default());
+        assert_eq!(
+            project.metadata().options().exclude,
+            Some(vec!["from-file".into()])
+        );
+        assert_eq!(
+            project
+                .metadata()
+                .override_options()
+                .and_then(|options| options.exclude.as_ref()),
+            Some(&vec!["from-cli".into()])
+        );
+        assert_eq!(project.discovery().exclude, vec!["from-cli"]);
+        assert_eq!(project.python(), "cli-python");
+        assert_eq!(
+            project.cache_dir(),
+            Some(project.root().join(".cli-cache").as_path())
+        );
+    }
+
+    #[test]
+    fn project_metadata_cli_include_removes_file_exclude() {
+        let dir = tempdir();
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.tryke]\nexclude = [\"generated\", \"vendor\"]\n",
+        )
+        .expect("write pyproject");
+
+        let mut metadata = ProjectMetadata::new(dir.path());
+        metadata.apply_configuration_file();
+        metadata.apply_cli_args(TrykeOptions {
+            include: Some(vec!["generated".into()]),
+            ..TrykeOptions::default()
+        });
+
+        let project = Project::from_metadata(metadata);
+        assert_eq!(project.discovery().exclude, vec!["vendor"]);
     }
 
     #[test]
@@ -404,8 +610,8 @@ mod tests {
     fn loads_default_src_when_unset() {
         let dir = tempdir();
         fs::write(dir.path().join("pyproject.toml"), "[tool.tryke]\n").expect("write pyproject");
-        let config = load_without_environment(dir.path(), ConfigOverrides::default());
-        assert_eq!(config.discovery.src, vec!["."]);
+        let config = load_without_environment(dir.path(), TrykeOptions::default());
+        assert_eq!(config.discovery().src, vec!["."]);
     }
 
     #[test]
@@ -494,10 +700,10 @@ mod tests {
         )
         .expect("write nested pyproject");
 
-        let config = load_without_environment(&nested, ConfigOverrides::default());
-        assert_eq!(config.discovery, DiscoveryConfig::default());
-        assert_eq!(config.python, None);
-        assert_eq!(config.cache_dir, None);
+        let config = load_without_environment(&nested, TrykeOptions::default());
+        assert_eq!(config.discovery(), &DiscoveryConfig::default());
+        assert_eq!(config.metadata.options.options.python, None);
+        assert_eq!(config.cache_dir(), None);
     }
 
     #[test]
@@ -516,8 +722,8 @@ mod tests {
         )
         .expect("write nested pyproject");
 
-        let config = load_without_environment(&nested, ConfigOverrides::default());
-        assert_eq!(config.discovery.exclude, vec!["generated/suites"]);
+        let config = load_without_environment(&nested, TrykeOptions::default());
+        assert_eq!(config.discovery().exclude, vec!["generated/suites"]);
     }
 
     #[test]
@@ -536,8 +742,8 @@ mod tests {
         )
         .expect("write nested pyproject");
 
-        let config = load_without_environment(&nested, ConfigOverrides::default());
-        assert_eq!(config.discovery.exclude, vec!["generated"]);
+        let config = load_without_environment(&nested, TrykeOptions::default());
+        assert_eq!(config.discovery().exclude, vec!["generated"]);
     }
 
     #[test]
@@ -550,12 +756,12 @@ mod tests {
         .expect("write pyproject");
         let config = load_without_environment(
             dir.path(),
-            ConfigOverrides {
-                exclude: vec!["build".into()],
-                ..ConfigOverrides::default()
+            TrykeOptions {
+                exclude: Some(vec!["build".into()]),
+                ..TrykeOptions::default()
             },
         );
-        assert_eq!(config.discovery.exclude, vec!["build"]);
+        assert_eq!(config.discovery().exclude, vec!["build"]);
     }
 
     #[test]
@@ -568,12 +774,26 @@ mod tests {
         .expect("write pyproject");
         let config = load_without_environment(
             dir.path(),
-            ConfigOverrides {
-                include: vec!["generated".into()],
-                ..ConfigOverrides::default()
+            TrykeOptions {
+                include: Some(vec!["generated".into()]),
+                ..TrykeOptions::default()
             },
         );
-        assert_eq!(config.discovery.exclude, vec!["build"]);
+        assert_eq!(config.discovery().exclude, vec!["build"]);
+    }
+
+    #[test]
+    fn cli_includes_do_not_modify_cli_excludes() {
+        let dir = tempdir();
+        let config = load_without_environment(
+            dir.path(),
+            TrykeOptions {
+                exclude: Some(vec!["generated".into()]),
+                include: Some(vec!["generated".into()]),
+                ..TrykeOptions::default()
+            },
+        );
+        assert_eq!(config.discovery().exclude, vec!["generated"]);
     }
 
     #[test]
@@ -586,7 +806,7 @@ mod tests {
         .expect("write pyproject");
         let nested = dir.path().join("subdir");
         fs::create_dir_all(&nested).expect("create nested");
-        let config = load_without_environment(&nested, ConfigOverrides::default());
+        let config = load_without_environment(&nested, TrykeOptions::default());
         let expected = dir
             .path()
             .canonicalize()
@@ -605,7 +825,7 @@ mod tests {
             "[tool.tryke]\npython = \"/usr/bin/python3.13\"\n",
         )
         .expect("write pyproject");
-        let config = load_without_environment(dir.path(), ConfigOverrides::default());
+        let config = load_without_environment(dir.path(), TrykeOptions::default());
         assert_eq!(config.python(), "/usr/bin/python3.13");
     }
 
@@ -619,16 +839,13 @@ mod tests {
         .expect("write pyproject");
         let nested = dir.path().join("subdir");
         fs::create_dir_all(&nested).expect("create nested");
-        let config = load_without_environment(&nested, ConfigOverrides::default());
-        assert_eq!(
-            config.cache_dir(),
-            Some(
-                dir.path()
-                    .canonicalize()
-                    .expect("canonical config root")
-                    .join(".cache/tryke")
-            )
-        );
+        let config = load_without_environment(&nested, TrykeOptions::default());
+        let expected = dir
+            .path()
+            .canonicalize()
+            .expect("canonical config root")
+            .join(".cache/tryke");
+        assert_eq!(config.cache_dir(), Some(expected.as_path()));
     }
 
     #[test]
@@ -639,8 +856,8 @@ mod tests {
             "[tool.tryke]\ncache_dir = \"/tmp/tryke-cache\"\n",
         )
         .expect("write pyproject");
-        let config = load_without_environment(dir.path(), ConfigOverrides::default());
-        assert_eq!(config.cache_dir(), Some(PathBuf::from("/tmp/tryke-cache")));
+        let config = load_without_environment(dir.path(), TrykeOptions::default());
+        assert_eq!(config.cache_dir(), Some(Path::new("/tmp/tryke-cache")));
     }
 
     #[test]
@@ -653,9 +870,9 @@ mod tests {
         .expect("write pyproject");
         let config = load_without_environment(
             dir.path(),
-            ConfigOverrides {
+            TrykeOptions {
                 python: Some("/from/cli".into()),
-                ..ConfigOverrides::default()
+                ..TrykeOptions::default()
             },
         );
         assert_eq!(config.python(), "/from/cli");
@@ -666,9 +883,9 @@ mod tests {
         let dir = tempdir();
         let config = load_without_environment(
             dir.path(),
-            ConfigOverrides {
+            TrykeOptions {
                 python: Some(".venv/bin/python".into()),
-                ..ConfigOverrides::default()
+                ..TrykeOptions::default()
             },
         );
         assert_eq!(
@@ -687,18 +904,18 @@ mod tests {
         let active = dir.path().join("active");
         let project = dir.path().join("project");
         fs::create_dir_all(project.join(".venv")).expect("create project venv");
-        let config = TrykeConfig {
-            project_root: project,
-            environment: EnvironmentConfig {
+        let metadata = ProjectMetadata::new(&project);
+        let project = Project::from_metadata_with_environment(
+            metadata,
+            &EnvironmentConfig {
                 virtual_env: Some(active.clone()),
                 conda_child: None,
                 conda_base: None,
             },
-            ..TrykeConfig::default()
-        };
+        );
 
         assert_eq!(
-            config.python(),
+            project.python(),
             python_in_environment(&active).to_string_lossy()
         );
     }
@@ -709,18 +926,18 @@ mod tests {
         let conda = dir.path().join("conda");
         let project = dir.path().join("project");
         fs::create_dir_all(project.join(".venv")).expect("create project venv");
-        let config = TrykeConfig {
-            project_root: project,
-            environment: EnvironmentConfig {
+        let metadata = ProjectMetadata::new(&project);
+        let project = Project::from_metadata_with_environment(
+            metadata,
+            &EnvironmentConfig {
                 virtual_env: None,
                 conda_child: Some(conda.clone()),
                 conda_base: None,
             },
-            ..TrykeConfig::default()
-        };
+        );
 
         assert_eq!(
-            config.python(),
+            project.python(),
             python_in_environment(&conda).to_string_lossy()
         );
     }
@@ -731,19 +948,19 @@ mod tests {
         let conda = dir.path().join("conda");
         let venv = dir.path().join(".venv");
         fs::create_dir(&venv).expect("create project venv");
-        let config = TrykeConfig {
-            project_root: dir.path().to_path_buf(),
-            environment: EnvironmentConfig {
+        let metadata = ProjectMetadata::new(dir.path());
+        let project = Project::from_metadata_with_environment(
+            metadata,
+            &EnvironmentConfig {
                 virtual_env: None,
                 conda_child: None,
                 conda_base: Some(conda),
             },
-            ..TrykeConfig::default()
-        };
+        );
 
         assert_eq!(
-            config.python(),
-            python_in_environment(&venv).to_string_lossy()
+            project.python(),
+            python_in_environment(&project.root().join(".venv")).to_string_lossy()
         );
     }
 
@@ -752,14 +969,14 @@ mod tests {
         let dir = tempdir();
         let venv = dir.path().join(".venv");
         fs::create_dir(&venv).expect("create project venv");
-        let config = TrykeConfig {
-            project_root: dir.path().to_path_buf(),
-            ..TrykeConfig::default()
-        };
+        let project = Project::from_metadata_with_environment(
+            ProjectMetadata::new(dir.path()),
+            &EnvironmentConfig::default(),
+        );
 
         assert_eq!(
-            config.python(),
-            python_in_environment(&venv).to_string_lossy()
+            project.python(),
+            python_in_environment(&project.root().join(".venv")).to_string_lossy()
         );
     }
 
@@ -768,15 +985,17 @@ mod tests {
         let dir = tempdir();
         let venv = dir.path().join(".venv");
         fs::create_dir(&venv).expect("create project venv");
-        let config = TrykeConfig {
-            project_root: dir.path().to_path_buf(),
-            python: Some(ConfigValue::new(".venv".into(), dir.path())),
-            ..TrykeConfig::default()
-        };
+        let mut metadata = ProjectMetadata::new(dir.path());
+        metadata.apply_cli_args(TrykeOptions {
+            python: Some(".venv".into()),
+            ..TrykeOptions::default()
+        });
+        let project =
+            Project::from_metadata_with_environment(metadata, &EnvironmentConfig::default());
 
         assert_eq!(
-            config.python(),
-            python_in_environment(&venv).to_string_lossy()
+            project.python(),
+            python_in_environment(&project.root().join(".venv")).to_string_lossy()
         );
     }
 
@@ -792,26 +1011,33 @@ mod tests {
         fs::create_dir_all(venv_python.parent().expect("venv parent")).expect("create venv");
         fs::write(&managed, "").expect("write managed python");
         symlink(&managed, &venv_python).expect("link venv python");
-        let config = TrykeConfig {
-            project_root: dir.path().to_path_buf(),
-            python: Some(ConfigValue::new(".venv/bin/python".into(), dir.path())),
-            ..TrykeConfig::default()
-        };
+        let mut metadata = ProjectMetadata::new(dir.path());
+        metadata.apply_cli_args(TrykeOptions {
+            python: Some(".venv/bin/python".into()),
+            ..TrykeOptions::default()
+        });
+        let project =
+            Project::from_metadata_with_environment(metadata, &EnvironmentConfig::default());
 
-        assert_eq!(config.python(), venv_python.to_string_lossy());
+        let resolved_venv_python = project.root().join(".venv/bin/python");
+        assert_eq!(project.python(), resolved_venv_python.to_string_lossy());
         assert_ne!(
-            Path::new(&config.python())
+            Path::new(project.python())
                 .canonicalize()
                 .expect("canonical python"),
-            PathBuf::from(config.python())
+            PathBuf::from(project.python())
         );
     }
 
     #[test]
     fn python_defaults_to_platform_command() {
-        let config = TrykeConfig::default();
+        let dir = tempdir();
+        let project = Project::from_metadata_with_environment(
+            ProjectMetadata::new(dir.path()),
+            &EnvironmentConfig::default(),
+        );
         let expected = if cfg!(windows) { "python" } else { "python3" };
-        assert_eq!(config.python(), expected);
+        assert_eq!(project.python(), expected);
     }
 
     #[test]
@@ -824,18 +1050,22 @@ mod tests {
         .expect("write pyproject");
         let config = load_without_environment(
             dir.path(),
-            ConfigOverrides {
+            TrykeOptions {
                 cache_dir: Some(PathBuf::from("/from/cli")),
-                ..ConfigOverrides::default()
+                ..TrykeOptions::default()
             },
         );
-        assert_eq!(config.cache_dir(), Some(PathBuf::from("/from/cli")));
+        assert_eq!(config.cache_dir(), Some(Path::new("/from/cli")));
     }
 
     #[test]
     fn cache_dir_defaults_to_none() {
-        let config = TrykeConfig::default();
-        assert_eq!(config.cache_dir(), None);
+        let dir = tempdir();
+        let project = Project::from_metadata_with_environment(
+            ProjectMetadata::new(dir.path()),
+            &EnvironmentConfig::default(),
+        );
+        assert_eq!(project.cache_dir(), None);
     }
 
     #[test]
@@ -846,7 +1076,7 @@ mod tests {
             "[tool.tryke]\npython = \"python3\"\n",
         )
         .expect("write pyproject");
-        let config = load_without_environment(dir.path(), ConfigOverrides::default());
+        let config = load_without_environment(dir.path(), TrykeOptions::default());
         assert_eq!(config.python(), "python3");
     }
 
@@ -859,7 +1089,7 @@ mod tests {
             "[tool.tryke]\npython = 'C:foo\\python.exe'\n",
         )
         .expect("write pyproject");
-        let config = load_without_environment(dir.path(), ConfigOverrides::default());
+        let config = load_without_environment(dir.path(), TrykeOptions::default());
         assert_eq!(config.python(), "C:foo\\python.exe");
     }
 

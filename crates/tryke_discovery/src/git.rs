@@ -24,6 +24,7 @@ fn git_paths(root: &Path, args: &[&str]) -> Option<Vec<PathBuf>> {
 /// Collect changed files from git relative to `root`.
 /// Includes tracked changes since HEAD and untracked files.
 /// Returns `None` if git is unavailable or a command fails.
+#[must_use]
 pub fn git_changed_files(root: &Path) -> Option<Vec<PathBuf>> {
     let tracked = git_paths(root, &["diff", "--name-only", "HEAD"])?;
     let untracked = git_paths(root, &["ls-files", "--others", "--exclude-standard"])?;
@@ -41,6 +42,7 @@ pub fn git_changed_files(root: &Path) -> Option<Vec<PathBuf>> {
 /// Uses three-dot merge-base diff so only the branch's own changes appear.
 /// Also includes untracked files (not captured by the diff).
 /// Returns `None` if git is unavailable or a command fails.
+#[must_use]
 pub fn git_branch_changed_files(root: &Path, base: &str) -> Option<Vec<PathBuf>> {
     let diff_spec = format!("{base}...HEAD");
     let branch_diff = git_paths(root, &["diff", "--name-only", &diff_spec])?;
@@ -56,6 +58,7 @@ pub fn git_branch_changed_files(root: &Path, base: &str) -> Option<Vec<PathBuf>>
 }
 
 /// Resolve changed files using either branch mode or HEAD mode.
+#[must_use]
 pub fn resolve_changed_files(root: &Path, base_branch: Option<&str>) -> Option<Vec<PathBuf>> {
     match base_branch {
         Some(base) => git_branch_changed_files(root, base),
@@ -74,7 +77,7 @@ pub(crate) mod test_helpers {
                 .current_dir(dir)
                 .status()
                 .expect("run git");
-            assert!(status.success(), "git {:?} failed", args);
+            assert!(status.success(), "git {args:?} failed");
         }
 
         run(dir, &["init"]);
@@ -89,7 +92,7 @@ pub(crate) mod test_helpers {
             .current_dir(dir)
             .status()
             .expect("run git");
-        assert!(status.success(), "git {:?} failed", args);
+        assert!(status.success(), "git {args:?} failed");
     }
 
     /// Seed a git repo with an initial commit containing `pyproject.toml`

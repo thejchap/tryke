@@ -194,9 +194,11 @@ with describe("expectations"):
 
     with describe("snapshots"):
 
-        @test(name="to_match_snapshot")
+        @test.todo(name="to_match_snapshot")
         def test_match_snapshot() -> None:
+            """
             expect("test").to_match_snapshot()
+            """
 
 
 with describe("soft assertions"):

@@ -1,7 +1,7 @@
 use std::fs;
 use std::process::ExitCode;
 
-use tryke::cli_docs::{docs_path, normalize_generated_markdown, render_cli_reference};
+use tryke_dev::{docs_path, normalize_generated_markdown, render_cli_reference};
 
 fn main() -> ExitCode {
     let check = std::env::args().skip(1).any(|arg| arg == "--check");

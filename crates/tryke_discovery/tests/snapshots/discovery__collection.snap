@@ -1,0 +1,848 @@
+---
+source: crates/tryke_discovery/tests/discovery.rs
+expression: output
+---
+{
+  "event": "collect_complete",
+  "tests": [
+    {
+      "display_name": "doctest: (module)",
+      "doctest_object": "",
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "line_number": 1,
+      "module_path": "collection",
+      "name": "__module__"
+    },
+    {
+      "display_name": null,
+      "expected_assertions": [
+        {
+          "args": [
+            "2"
+          ],
+          "end_column": 29,
+          "end_line": 42,
+          "expected_arg_span": [
+            23,
+            1
+          ],
+          "expected_arg_value": "2",
+          "expression": "expect(1 + 1).to_equal(2)",
+          "label": null,
+          "line": 42,
+          "matcher": "to_equal",
+          "negated": false,
+          "start_column": 4,
+          "subject": "1 + 1",
+          "subject_span": [
+            7,
+            5
+          ]
+        }
+      ],
+      "file_path": "collection.py",
+      "line_number": 40,
+      "module_path": "collection",
+      "name": "test_addition"
+    },
+    {
+      "display_name": "Readable subtraction",
+      "expected_assertions": [
+        {
+          "args": [
+            "2"
+          ],
+          "end_column": 29,
+          "end_line": 47,
+          "expected_arg_span": [
+            23,
+            1
+          ],
+          "expected_arg_value": "2",
+          "expression": "expect(3 - 1).to_equal(2)",
+          "label": null,
+          "line": 47,
+          "matcher": "to_equal",
+          "negated": false,
+          "start_column": 4,
+          "subject": "3 - 1",
+          "subject_span": [
+            7,
+            5
+          ]
+        }
+      ],
+      "file_path": "collection.py",
+      "line_number": 45,
+      "module_path": "collection",
+      "name": "test_subtraction"
+    },
+    {
+      "display_name": null,
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "line_number": 50,
+      "module_path": "collection",
+      "name": "test_call_form"
+    },
+    {
+      "display_name": "Keyword display name",
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "line_number": 55,
+      "module_path": "collection",
+      "name": "test_keyword_metadata",
+      "tags": [
+        "unit",
+        "metadata"
+      ]
+    },
+    {
+      "display_name": "Display name from a docstring.",
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "line_number": 60,
+      "module_path": "collection",
+      "name": "test_docstring_display_name"
+    },
+    {
+      "display_name": "Aliased decorator",
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "line_number": 65,
+      "module_path": "collection",
+      "name": "test_symbol_alias"
+    },
+    {
+      "display_name": "Qualified decorator",
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "line_number": 70,
+      "module_path": "collection",
+      "name": "test_qualified_decorator"
+    },
+    {
+      "display_name": null,
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "line_number": 75,
+      "module_path": "collection",
+      "name": "test_async_function"
+    },
+    {
+      "display_name": null,
+      "expected_assertions": [
+        {
+          "args": [
+            "5"
+          ],
+          "end_column": 29,
+          "end_line": 82,
+          "expected_arg_span": [
+            23,
+            1
+          ],
+          "expected_arg_value": "5",
+          "expression": "expect(value).to_equal(5)",
+          "label": null,
+          "line": 82,
+          "matcher": "to_equal",
+          "negated": false,
+          "start_column": 4,
+          "subject": "value",
+          "subject_span": [
+            7,
+            5
+          ]
+        }
+      ],
+      "file_path": "collection.py",
+      "line_number": 80,
+      "module_path": "collection",
+      "name": "test_default_dependency"
+    },
+    {
+      "display_name": null,
+      "expected_assertions": [
+        {
+          "args": [
+            "\"ready\""
+          ],
+          "end_column": 35,
+          "end_line": 89,
+          "expected_arg_span": [
+            23,
+            7
+          ],
+          "expected_arg_value": "\"ready\"",
+          "expression": "expect(value).to_equal(\"ready\")",
+          "label": null,
+          "line": 89,
+          "matcher": "to_equal",
+          "negated": false,
+          "start_column": 4,
+          "subject": "value",
+          "subject_span": [
+            7,
+            5
+          ]
+        }
+      ],
+      "file_path": "collection.py",
+      "line_number": 85,
+      "module_path": "collection",
+      "name": "test_annotated_dependency"
+    },
+    {
+      "display_name": "Rich assertion shapes",
+      "expected_assertions": [
+        {
+          "args": [],
+          "end_column": 53,
+          "end_line": 95,
+          "expression": "expect(value, \"non-null value\").not_.to_be_none()",
+          "label": "non-null value",
+          "line": 95,
+          "matcher": "to_be_none",
+          "negated": true,
+          "start_column": 4,
+          "subject": "value",
+          "subject_span": [
+            7,
+            5
+          ]
+        },
+        {
+          "args": [
+            "other=3"
+          ],
+          "end_column": 5,
+          "end_line": 101,
+          "expected_arg_span": [
+            87,
+            7
+          ],
+          "expected_arg_value": "3",
+          "expression": "expect(\n        expr=value,\n        name=\"multiline equality\",\n    ).to_equal(\n        other=3,\n    )",
+          "label": "multiline equality",
+          "line": 96,
+          "matcher": "to_equal",
+          "negated": false,
+          "start_column": 4,
+          "subject": "value",
+          "subject_span": [
+            21,
+            5
+          ]
+        },
+        {
+          "args": [
+            "2"
+          ],
+          "end_column": 35,
+          "end_line": 102,
+          "expected_arg_span": [
+            29,
+            1
+          ],
+          "expected_arg_value": "2",
+          "expression": "expect([1, 2, 3]).to_contain(2)",
+          "label": null,
+          "line": 102,
+          "matcher": "to_contain",
+          "negated": false,
+          "start_column": 4,
+          "subject": "[1, 2, 3]",
+          "subject_span": [
+            7,
+            9
+          ]
+        },
+        {
+          "args": [
+            "ValueError"
+          ],
+          "end_column": 58,
+          "end_line": 103,
+          "expected_arg_span": [
+            43,
+            10
+          ],
+          "expected_arg_value": "ValueError",
+          "expression": "expect(lambda: int(\"not-an-int\")).to_raise(ValueError)",
+          "label": null,
+          "line": 103,
+          "matcher": "to_raise",
+          "negated": false,
+          "start_column": 4,
+          "subject": "lambda: int(\"not-an-int\")",
+          "subject_span": [
+            7,
+            25
+          ]
+        }
+      ],
+      "file_path": "collection.py",
+      "line_number": 92,
+      "module_path": "collection",
+      "name": "test_assertion_shapes"
+    },
+    {
+      "case_index": 0,
+      "case_label": "one plus one",
+      "display_name": "Typed cases",
+      "expected_assertions": [
+        {
+          "args": [
+            "expected"
+          ],
+          "end_column": 43,
+          "end_line": 113,
+          "expected_arg_span": [
+            30,
+            8
+          ],
+          "expected_arg_value": "expected",
+          "expression": "expect(left + right).to_equal(expected)",
+          "label": null,
+          "line": 113,
+          "matcher": "to_equal",
+          "negated": false,
+          "start_column": 4,
+          "subject": "left + right",
+          "subject_span": [
+            7,
+            12
+          ]
+        }
+      ],
+      "file_path": "collection.py",
+      "line_number": 106,
+      "module_path": "collection",
+      "name": "test_typed_cases"
+    },
+    {
+      "case_index": 1,
+      "case_label": "known bug",
+      "display_name": "Typed cases",
+      "expected_assertions": [
+        {
+          "args": [
+            "expected"
+          ],
+          "end_column": 43,
+          "end_line": 113,
+          "expected_arg_span": [
+            30,
+            8
+          ],
+          "expected_arg_value": "expected",
+          "expression": "expect(left + right).to_equal(expected)",
+          "label": null,
+          "line": 113,
+          "matcher": "to_equal",
+          "negated": false,
+          "start_column": 4,
+          "subject": "left + right",
+          "subject_span": [
+            7,
+            12
+          ]
+        }
+      ],
+      "file_path": "collection.py",
+      "line_number": 106,
+      "module_path": "collection",
+      "name": "test_typed_cases",
+      "xfail": "Issue #42"
+    },
+    {
+      "case_index": 2,
+      "case_label": "temporarily disabled",
+      "display_name": "Typed cases",
+      "expected_assertions": [
+        {
+          "args": [
+            "expected"
+          ],
+          "end_column": 43,
+          "end_line": 113,
+          "expected_arg_span": [
+            30,
+            8
+          ],
+          "expected_arg_value": "expected",
+          "expression": "expect(left + right).to_equal(expected)",
+          "label": null,
+          "line": 113,
+          "matcher": "to_equal",
+          "negated": false,
+          "start_column": 4,
+          "subject": "left + right",
+          "subject_span": [
+            7,
+            12
+          ]
+        }
+      ],
+      "file_path": "collection.py",
+      "line_number": 106,
+      "module_path": "collection",
+      "name": "test_typed_cases",
+      "skip": "Flaky"
+    },
+    {
+      "case_index": 3,
+      "case_label": "not implemented",
+      "display_name": "Typed cases",
+      "expected_assertions": [
+        {
+          "args": [
+            "expected"
+          ],
+          "end_column": 43,
+          "end_line": 113,
+          "expected_arg_span": [
+            30,
+            8
+          ],
+          "expected_arg_value": "expected",
+          "expression": "expect(left + right).to_equal(expected)",
+          "label": null,
+          "line": 113,
+          "matcher": "to_equal",
+          "negated": false,
+          "start_column": 4,
+          "subject": "left + right",
+          "subject_span": [
+            7,
+            12
+          ]
+        }
+      ],
+      "file_path": "collection.py",
+      "line_number": 106,
+      "module_path": "collection",
+      "name": "test_typed_cases",
+      "todo": "Pending"
+    },
+    {
+      "case_index": 0,
+      "case_label": "zero",
+      "display_name": null,
+      "expected_assertions": [
+        {
+          "args": [
+            "expected"
+          ],
+          "end_column": 46,
+          "end_line": 122,
+          "expected_arg_span": [
+            33,
+            8
+          ],
+          "expected_arg_value": "expected",
+          "expression": "expect(number * number).to_equal(expected)",
+          "label": null,
+          "line": 122,
+          "matcher": "to_equal",
+          "negated": false,
+          "start_column": 4,
+          "subject": "number * number",
+          "subject_span": [
+            7,
+            15
+          ]
+        }
+      ],
+      "file_path": "collection.py",
+      "line_number": 116,
+      "module_path": "collection",
+      "name": "test_keyword_cases"
+    },
+    {
+      "case_index": 1,
+      "case_label": "one",
+      "display_name": null,
+      "expected_assertions": [
+        {
+          "args": [
+            "expected"
+          ],
+          "end_column": 46,
+          "end_line": 122,
+          "expected_arg_span": [
+            33,
+            8
+          ],
+          "expected_arg_value": "expected",
+          "expression": "expect(number * number).to_equal(expected)",
+          "label": null,
+          "line": 122,
+          "matcher": "to_equal",
+          "negated": false,
+          "start_column": 4,
+          "subject": "number * number",
+          "subject_span": [
+            7,
+            15
+          ]
+        }
+      ],
+      "file_path": "collection.py",
+      "line_number": 116,
+      "module_path": "collection",
+      "name": "test_keyword_cases"
+    },
+    {
+      "case_index": 2,
+      "case_label": "three",
+      "display_name": null,
+      "expected_assertions": [
+        {
+          "args": [
+            "expected"
+          ],
+          "end_column": 46,
+          "end_line": 122,
+          "expected_arg_span": [
+            33,
+            8
+          ],
+          "expected_arg_value": "expected",
+          "expression": "expect(number * number).to_equal(expected)",
+          "label": null,
+          "line": 122,
+          "matcher": "to_equal",
+          "negated": false,
+          "start_column": 4,
+          "subject": "number * number",
+          "subject_span": [
+            7,
+            15
+          ]
+        }
+      ],
+      "file_path": "collection.py",
+      "line_number": 116,
+      "module_path": "collection",
+      "name": "test_keyword_cases"
+    },
+    {
+      "case_index": 0,
+      "case_label": "empty",
+      "display_name": null,
+      "expected_assertions": [
+        {
+          "args": [
+            "expected"
+          ],
+          "end_column": 42,
+          "end_line": 132,
+          "expected_arg_span": [
+            29,
+            8
+          ],
+          "expected_arg_value": "expected",
+          "expression": "expect(value).to_have_length(expected)",
+          "label": null,
+          "line": 132,
+          "matcher": "to_have_length",
+          "negated": false,
+          "start_column": 4,
+          "subject": "value",
+          "subject_span": [
+            7,
+            5
+          ]
+        }
+      ],
+      "file_path": "collection.py",
+      "line_number": 125,
+      "module_path": "collection",
+      "name": "test_list_cases"
+    },
+    {
+      "case_index": 1,
+      "case_label": "word",
+      "display_name": null,
+      "expected_assertions": [
+        {
+          "args": [
+            "expected"
+          ],
+          "end_column": 42,
+          "end_line": 132,
+          "expected_arg_span": [
+            29,
+            8
+          ],
+          "expected_arg_value": "expected",
+          "expression": "expect(value).to_have_length(expected)",
+          "label": null,
+          "line": 132,
+          "matcher": "to_have_length",
+          "negated": false,
+          "start_column": 4,
+          "subject": "value",
+          "subject_span": [
+            7,
+            5
+          ]
+        }
+      ],
+      "file_path": "collection.py",
+      "line_number": 125,
+      "module_path": "collection",
+      "name": "test_list_cases"
+    },
+    {
+      "case_index": 0,
+      "case_label": "lowercase",
+      "display_name": null,
+      "expected_assertions": [
+        {
+          "args": [
+            "expected"
+          ],
+          "end_column": 44,
+          "end_line": 140,
+          "expected_arg_span": [
+            31,
+            8
+          ],
+          "expected_arg_value": "expected",
+          "expression": "expect(value.upper()).to_equal(expected)",
+          "label": null,
+          "line": 140,
+          "matcher": "to_equal",
+          "negated": false,
+          "start_column": 4,
+          "subject": "value.upper()",
+          "subject_span": [
+            7,
+            13
+          ]
+        }
+      ],
+      "file_path": "collection.py",
+      "line_number": 135,
+      "module_path": "collection",
+      "name": "test_qualified_cases"
+    },
+    {
+      "case_index": 1,
+      "case_label": "mixed case",
+      "display_name": null,
+      "expected_assertions": [
+        {
+          "args": [
+            "expected"
+          ],
+          "end_column": 44,
+          "end_line": 140,
+          "expected_arg_span": [
+            31,
+            8
+          ],
+          "expected_arg_value": "expected",
+          "expression": "expect(value.upper()).to_equal(expected)",
+          "label": null,
+          "line": 140,
+          "matcher": "to_equal",
+          "negated": false,
+          "start_column": 4,
+          "subject": "value.upper()",
+          "subject_span": [
+            7,
+            13
+          ]
+        }
+      ],
+      "file_path": "collection.py",
+      "line_number": 135,
+      "module_path": "collection",
+      "name": "test_qualified_cases"
+    },
+    {
+      "display_name": null,
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "groups": [
+        "Calculator",
+        "addition"
+      ],
+      "line_number": 146,
+      "module_path": "collection",
+      "name": "test_grouped_integers"
+    },
+    {
+      "display_name": null,
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "groups": [
+        "Calculator",
+        "subtraction"
+      ],
+      "line_number": 152,
+      "module_path": "collection",
+      "name": "test_grouped_negative_result"
+    },
+    {
+      "display_name": null,
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "groups": [
+        "Aliased group"
+      ],
+      "line_number": 159,
+      "module_path": "collection",
+      "name": "test_aliased_group"
+    },
+    {
+      "display_name": null,
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "groups": [
+        "Qualified group",
+        "Nested"
+      ],
+      "line_number": 167,
+      "module_path": "collection",
+      "name": "test_qualified_group",
+      "tags": [
+        "qualified"
+      ]
+    },
+    {
+      "display_name": "Not supported on Windows",
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "line_number": 172,
+      "module_path": "collection",
+      "name": "test_platform_feature",
+      "skip": "Not supported on Windows"
+    },
+    {
+      "display_name": null,
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "line_number": 177,
+      "module_path": "collection",
+      "name": "test_bare_skip",
+      "skip": ""
+    },
+    {
+      "display_name": null,
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "line_number": 182,
+      "module_path": "collection",
+      "name": "test_skip_keyword_metadata",
+      "skip": "Administrative only",
+      "tags": [
+        "admin"
+      ]
+    },
+    {
+      "display_name": null,
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "line_number": 187,
+      "module_path": "collection",
+      "name": "test_conditional_skip"
+    },
+    {
+      "display_name": "Implement the new API",
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "line_number": 192,
+      "module_path": "collection",
+      "name": "test_new_api",
+      "todo": "Implement the new API"
+    },
+    {
+      "display_name": null,
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "line_number": 197,
+      "module_path": "collection",
+      "name": "test_bare_todo",
+      "todo": ""
+    },
+    {
+      "display_name": "Upstream issue",
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "line_number": 202,
+      "module_path": "collection",
+      "name": "test_known_failure",
+      "xfail": "Upstream issue"
+    },
+    {
+      "display_name": null,
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "line_number": 207,
+      "module_path": "collection",
+      "name": "test_bare_xfail",
+      "xfail": ""
+    },
+    {
+      "display_name": null,
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "line_number": 212,
+      "module_path": "collection",
+      "name": "test_tagged",
+      "tags": [
+        "slow",
+        "integration"
+      ]
+    },
+    {
+      "display_name": null,
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "line_number": 219,
+      "module_path": "collection",
+      "name": "test_bare_testing_guard"
+    },
+    {
+      "display_name": null,
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "line_number": 226,
+      "module_path": "collection",
+      "name": "test_qualified_testing_guard"
+    },
+    {
+      "display_name": "doctest: documented_sum",
+      "doctest_object": "documented_sum",
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "line_number": 231,
+      "module_path": "collection",
+      "name": "documented_sum"
+    },
+    {
+      "display_name": "doctest: Calculator",
+      "doctest_object": "Calculator",
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "line_number": 240,
+      "module_path": "collection",
+      "name": "Calculator"
+    },
+    {
+      "display_name": "doctest: Calculator.double",
+      "doctest_object": "Calculator.double",
+      "expected_assertions": [],
+      "file_path": "collection.py",
+      "line_number": 249,
+      "module_path": "collection",
+      "name": "Calculator.double"
+    }
+  ]
+}

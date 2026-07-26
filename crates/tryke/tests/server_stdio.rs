@@ -2,12 +2,13 @@
 //! 2.0 over the real binary's stdin/stdout, the way an editor plugin owns
 //! a spawned server child.
 
-use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, channel};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use tryke_testing::TestProject;
 
 fn match_body() -> &'static str {
     "from tryke import describe, expect, test\n\
@@ -22,27 +23,27 @@ struct ServerSession {
     child: Child,
     stdin: Option<ChildStdin>,
     lines: Receiver<String>,
-    _dir: tempfile::TempDir,
+    _project: TestProject,
 }
 
 impl ServerSession {
-    fn spawn() -> Self {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(dir.path().join("pyproject.toml"), "").expect("write pyproject.toml");
-        fs::write(dir.path().join("test_match.py"), match_body()).expect("write test file");
+    fn spawn() -> io::Result<Self> {
+        let project = TestProject::with_files([("test_match.py", match_body())])?;
 
         let mut child = Command::new(env!("CARGO_BIN_EXE_tryke"))
             .args(["server", "--root"])
-            .arg(dir.path())
+            .arg(project.root())
             .args(["--python", &tryke_testing::python_bin()])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn tryke server");
+            .spawn()?;
 
         let stdin = child.stdin.take();
-        let stdout = child.stdout.take().expect("child stdout piped");
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("child stdout was not piped"))?;
         // A reader thread decouples blocking pipe reads from the test's
         // per-line timeouts. It exits on EOF when the server shuts down.
         let (tx, rx) = channel();
@@ -55,20 +56,21 @@ impl ServerSession {
             }
         });
 
-        Self {
+        Ok(Self {
             child,
             stdin,
             lines: rx,
-            _dir: dir,
-        }
+            _project: project,
+        })
     }
 
-    fn send(&mut self, request: &str) {
-        let stdin = self.stdin.as_mut().expect("stdin still open");
-        stdin
-            .write_all(format!("{request}\n").as_bytes())
-            .expect("write request");
-        stdin.flush().expect("flush request");
+    fn send(&mut self, request: &str) -> io::Result<()> {
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "server stdin is closed"))?;
+        stdin.write_all(format!("{request}\n").as_bytes())?;
+        stdin.flush()
     }
 
     /// Read frames until one carries an `id` (the response — notifications
@@ -89,12 +91,12 @@ impl ServerSession {
     }
 
     /// Close stdin (EOF) and wait for the child to exit.
-    fn close_and_wait(&mut self) -> std::process::ExitStatus {
+    fn close_and_wait(&mut self) -> io::Result<std::process::ExitStatus> {
         drop(self.stdin.take());
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            if let Some(status) = self.child.try_wait().expect("try_wait") {
-                return status;
+            if let Some(status) = self.child.try_wait()? {
+                return Ok(status);
             }
             assert!(
                 Instant::now() < deadline,
@@ -113,16 +115,16 @@ impl Drop for ServerSession {
 }
 
 #[test]
-fn server_speaks_json_rpc_over_stdio() {
-    let mut session = ServerSession::spawn();
+fn server_speaks_json_rpc_over_stdio() -> io::Result<()> {
+    let mut session = ServerSession::spawn()?;
 
     // Ping → pong.
-    session.send(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#);
+    session.send(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#)?;
     let pong = session.read_response();
     assert_eq!(pong["result"], "pong", "unexpected ping response: {pong}");
 
     // Run → summary with the one passing test, echoing our run_id.
-    session.send(r#"{"jsonrpc":"2.0","id":2,"method":"run","params":{"run_id":"e2e"}}"#);
+    session.send(r#"{"jsonrpc":"2.0","id":2,"method":"run","params":{"run_id":"e2e"}}"#)?;
     let run = session.read_response();
     assert_eq!(
         run["result"]["run_id"], "e2e",
@@ -134,9 +136,10 @@ fn server_speaks_json_rpc_over_stdio() {
     );
 
     // EOF on stdin shuts the server down cleanly (exit code 0).
-    let status = session.close_and_wait();
+    let status = session.close_and_wait()?;
     assert!(
         status.success(),
         "server must exit cleanly on EOF: {status}"
     );
+    Ok(())
 }

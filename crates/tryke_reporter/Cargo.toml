@@ -14,14 +14,12 @@ default = ["terminal"]
 terminal = [
   "dep:clearscreen",
   "dep:console",
-  "dep:ctrlc",
   "dep:indicatif",
 ]
 
 [dependencies]
 clearscreen = { version = "4.0.6", optional = true }
 console = { workspace = true, optional = true }
-ctrlc = { workspace = true, optional = true }
 indicatif = { workspace = true, optional = true }
 log = "0.4"
 miette = { workspace = true }

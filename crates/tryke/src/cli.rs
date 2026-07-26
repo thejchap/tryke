@@ -240,7 +240,7 @@ pub(crate) struct TestArgs {
     /// import graph forward to find every test that transitively
     /// depends on a changed module. Combine with `--base-branch` to
     /// diff against a branch instead of the working tree.
-    #[arg(long, conflicts_with_all = ["changed_first", "watch"])]
+    #[arg(long, conflicts_with = "watch", group = "changed_selection")]
     pub(crate) changed: bool,
 
     /// Run changed tests first, then the remaining tests.
@@ -248,7 +248,7 @@ pub(crate) struct TestArgs {
     /// Same affected-set computation as `--changed`, but unaffected
     /// tests are appended to the run rather than skipped. Gives fast
     /// feedback on the diff while still verifying the full suite.
-    #[arg(long, conflicts_with_all = ["changed", "watch"])]
+    #[arg(long, conflicts_with = "watch", group = "changed_selection")]
     pub(crate) changed_first: bool,
 
     /// Base branch for `--changed` / `--changed-first` diff.
@@ -256,7 +256,7 @@ pub(crate) struct TestArgs {
     /// Compares against `git merge-base <base> HEAD` instead of the
     /// working tree. Typical CI usage: `--changed --base-branch
     /// origin/main`.
-    #[arg(long)]
+    #[arg(long, requires = "changed_selection")]
     pub(crate) base_branch: Option<String>,
 
     /// Stop after the first failing test.
@@ -458,7 +458,7 @@ pub(crate) struct GraphArgs {
     pub(crate) changed: bool,
 
     /// Base branch for `--changed`. Uses `git merge-base` diff.
-    #[arg(long)]
+    #[arg(long, requires = "changed")]
     pub(crate) base_branch: Option<String>,
 
     /// Print the fixture dependency graph instead of the import graph.
@@ -617,6 +617,29 @@ mod tests {
         assert!(Cli::try_parse_from(["tryke", "test", "--changed", "--changed-first"]).is_err());
         assert!(Cli::try_parse_from(["tryke", "test", "--all"]).is_err());
         assert!(Cli::try_parse_from(["tryke", "test", "--now"]).is_err());
+    }
+
+    #[test]
+    fn base_branch_requires_change_selection() {
+        assert!(matches!(
+            Cli::try_parse_from(["tryke", "test", "--base-branch", "main"]),
+            Err(error) if error.kind() == clap::error::ErrorKind::MissingRequiredArgument
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["tryke", "graph", "--base-branch", "main"]),
+            Err(error) if error.kind() == clap::error::ErrorKind::MissingRequiredArgument
+        ));
+
+        assert!(
+            Cli::try_parse_from(["tryke", "test", "--changed", "--base-branch", "main"]).is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["tryke", "test", "--changed-first", "--base-branch", "main",])
+                .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["tryke", "graph", "--changed", "--base-branch", "main"]).is_ok()
+        );
     }
 
     #[test]

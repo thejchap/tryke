@@ -65,12 +65,6 @@ pub(crate) async fn run_test_command(
     logging: LogConfig,
     cancellation: CancellationToken,
 ) -> Result<ExitStatus> {
-    if args.base_branch.is_some() && !args.changed && !args.changed_first {
-        return Err(anyhow::anyhow!(
-            "--base-branch requires --changed or --changed-first"
-        ));
-    }
-
     let log_level = logging.level();
     let verbosity = logging.reporter_verbosity();
 

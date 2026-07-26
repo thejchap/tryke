@@ -12,10 +12,6 @@ use crate::ExitStatus;
 use crate::cli::{GlobalArgs, GraphArgs};
 
 pub(crate) fn run_graph_command(args: GraphArgs, global: &GlobalArgs) -> Result<ExitStatus> {
-    if args.base_branch.is_some() && !args.changed {
-        return Err(anyhow::anyhow!("--base-branch requires --changed"));
-    }
-
     let cwd = env::current_dir()?;
     let mut metadata = ProjectMetadata::new(args.root.as_deref().unwrap_or(&cwd));
     metadata.apply_configuration_file();

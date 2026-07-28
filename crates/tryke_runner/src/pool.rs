@@ -1,84 +1,24 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use log::{LevelFilter, debug, trace, warn};
+use log::{LevelFilter, warn};
 
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::{JoinError, JoinSet};
 use tokio_stream::Stream;
 use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_util::sync::CancellationToken;
 use tryke_config::Project;
-use tryke_types::{HookItem, TestOutcome, TestResult};
+use tryke_types::TestResult;
 
-use crate::protocol::RegisterHooksParams;
 use crate::schedule::WorkUnit;
-use crate::worker::WorkerProcess;
+use crate::worker::{Worker, WorkerCtrl, WorkerMsg};
 
 const WORKER_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
-const WORKER_SPAWN_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Per-worker-task state: the (optional) live Python process plus a cache of
-/// the most recent `register_hooks` call per module. The cache exists so
-/// that a freshly-spawned worker (after a crash) can be brought back to the
-/// same hook-registration state as the one it replaces — otherwise
-/// subsequent tests in the same unit would silently run without their
-/// `before_each` / `after_each` fixtures.
-struct WorkerState {
-    process: Option<WorkerProcess>,
-    hook_cache: HashMap<String, RegisterHooksParams>,
-    /// Most recent spawn or hook-replay failure, captured so
-    /// `run_single_test` can surface the real reason (and any worker
-    /// stderr) instead of the opaque "worker unavailable" placeholder.
-    /// Cleared once we have a live worker again so we don't replay a
-    /// stale error against an unrelated test.
-    last_failure: Option<String>,
-}
-
-impl WorkerState {
-    fn new() -> Self {
-        Self {
-            process: None,
-            hook_cache: HashMap::new(),
-            last_failure: None,
-        }
-    }
-}
-
-/// Build the user-facing message for a worker error, appending captured
-/// stderr (if any) so the python-side traceback is visible to the user
-/// without needing to enable debug logging. The actual python crash —
-/// e.g. `ModuleNotFoundError: No module named 'tryke'` when the worker
-/// venv is missing the package — only ever appears on the worker's
-/// stderr pipe, so suppressing it here is what makes spawn failures look
-/// like an opaque "worker unavailable".
-fn format_worker_failure(prefix: &str, err: &dyn std::fmt::Display, stderr: &str) -> String {
-    let mut msg = format!("{prefix}: {err}");
-    let trimmed = stderr.trim();
-    if !trimmed.is_empty() {
-        msg.push_str("\nworker stderr:\n");
-        msg.push_str(trimmed);
-    }
-    msg
-}
-
-enum WorkerMsg {
-    Unit(WorkUnit, mpsc::UnboundedSender<TestResult>),
-    Shutdown,
-}
-
-/// Control messages delivered on a per-worker channel.
-///
-/// `Ping` and `Restart` are fan-out operations: every worker must
-/// receive exactly one. Routing them through the shared work-stealing
-/// channel would let a single fast worker grab all N messages while
-/// other workers remained on stale Python processes — defeating the
-/// guarantee that watch/server-mode reloads run on a fresh interpreter.
-/// A dedicated channel per worker eliminates that race.
-enum WorkerCtrl {
-    Ping(oneshot::Sender<()>),
-    Restart(oneshot::Sender<()>),
-}
+const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub struct WorkerPool {
     /// Sender channel for work units
@@ -90,6 +30,39 @@ pub struct WorkerPool {
     ///
     /// One per-worker to distribute messages to all.
     ctrl_txs: Vec<mpsc::UnboundedSender<WorkerCtrl>>,
+
+    /// Pool-wide shutdown signal, observed ahead of both work and control messages.
+    shutdown: CancellationToken,
+
+    /// Every worker task remains owned by the pool until shutdown completes.
+    ///
+    /// A `JoinSet` rather than `tokio_util`'s `TaskTracker`: the pool is a
+    /// fixed-size set of tasks whose `JoinError`s we want to report, and
+    /// `JoinSet` also gives us `abort_all` for the `Drop` path. `TaskTracker`
+    /// discards task outcomes, which would turn a panicking worker into a
+    /// silently short run instead of a shutdown error.
+    workers: JoinSet<()>,
+}
+
+#[must_use = "dropping a worker run cancels its submitted work"]
+pub struct WorkerRun {
+    results: UnboundedReceiverStream<TestResult>,
+    cancel: CancellationToken,
+}
+
+impl Stream for WorkerRun {
+    type Item = TestResult;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.results).poll_next(cx)
+    }
+}
+
+impl Drop for WorkerRun {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -101,7 +74,6 @@ pub struct WorkerPoolOptions<'a> {
 }
 
 impl WorkerPool {
-    /// Spawn a worker pool using the project's resolved root and Python interpreter.
     pub async fn spawn(project: &Project, options: WorkerPoolOptions<'_>) -> Self {
         Self::spawn_from_parts(
             options.size,
@@ -114,17 +86,6 @@ impl WorkerPool {
         .await
     }
 
-    /// Spawns a pool whose workers receive `TRYKE_LOG=<log_level>`.
-    ///
-    /// Pass `LevelFilter::Off` to leave workers silent (the env var is
-    /// then not set on the child, so the worker's
-    /// `_configure_logging_from_env` no-ops). Production callers use
-    /// `tryke_config::worker_log_level` to derive this from CLI flags
-    /// + the `TRYKE_LOG` env var.
-    ///
-    /// `python_path` overrides the default path of `root` plus its `python`
-    /// directory when present. If `warm` is true, this method also waits for
-    /// every Python subprocess to start before returning.
     pub async fn spawn_from_parts(
         size: usize,
         python_bin: &str,
@@ -151,752 +112,302 @@ impl WorkerPool {
         );
         let (work_tx, work_rx) = async_channel::unbounded();
         let mut ctrl_txs = Vec::with_capacity(size);
+        let shutdown = CancellationToken::new();
+        let mut workers = JoinSet::new();
 
         for _ in 0..size {
-            let bin = python_bin.clone();
             let work_rx = work_rx.clone();
+            let shutdown = shutdown.clone();
             let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
             ctrl_txs.push(ctrl_tx);
-
-            tokio::spawn(worker_task(
-                bin,
+            let worker = Worker::new(
+                python_bin.clone(),
                 python_path.clone(),
                 root.clone(),
                 log_level,
-                work_rx,
-                ctrl_rx,
-            ));
+            );
+
+            workers.spawn(worker.run(work_rx, ctrl_rx, shutdown));
         }
 
-        let pool = Self { work_tx, ctrl_txs };
+        let pool = Self {
+            work_tx,
+            ctrl_txs,
+            shutdown,
+            workers,
+        };
 
-        if warm {
-            pool.warm().await;
+        // Pre-warming is best-effort: a worker that misses the deadline just
+        // pays interpreter startup on its first unit. Unlike a missed restart
+        // it cannot leave stale code behind, so it must not fail construction.
+        if warm && let Err(error) = pool.warm().await {
+            warn!("{error:#}");
         }
 
         pool
     }
 
-    /// Submit any number of `WorkUnit`s to the worker pool
-    ///
-    /// A `WorkUnit` is an atomic group of tests to be run sequentially on a single worker
-    /// Returns a stream
-    pub fn submit(&self, units: Vec<WorkUnit>) -> impl Stream<Item = TestResult> + use<> {
+    pub fn submit(&self, units: Vec<WorkUnit>) -> WorkerRun {
         let (stream_tx, stream_rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
 
         for unit in units {
-            let _ = self
-                .work_tx
-                .send_blocking(WorkerMsg::Unit(unit, stream_tx.clone()));
+            // `try_send`, not `send_blocking`: every caller is async, and
+            // async-channel documents `send_blocking` as deadlock-prone in an
+            // async context. On an unbounded channel the only failure is a
+            // closed channel (the pool is shutting down); the unit's
+            // `result_tx` clone drops with the message, so the run's stream
+            // ends early instead of hanging.
+            let _ = self.work_tx.try_send(WorkerMsg::Unit {
+                unit,
+                result_tx: stream_tx.clone(),
+                cancel: cancel.clone(),
+            });
         }
 
-        UnboundedReceiverStream::new(stream_rx)
+        WorkerRun {
+            results: UnboundedReceiverStream::new(stream_rx),
+            cancel,
+        }
     }
 
-    /// Send one ctrl message per worker and await every ack.
-    ///
-    /// `build` is the ctrl-variant constructor (e.g. `WorkerCtrl::Ping`)
-    /// — taking it as a function pointer lets `warm` and
-    /// `restart_workers` share this whole fan-out path.
-    ///
-    /// If a worker task has died (ctrl channel receiver dropped), its
-    /// `send` returns `Err`; we skip its ack rather than push a future
-    /// that will never resolve, which would hang the watcher/server.
+    /// Send `build`'s control message to every worker, returning the indices
+    /// of workers that did not acknowledge before the shared deadline.
     async fn fanout_ctrl_with_timeout(
         &self,
         build: fn(oneshot::Sender<()>) -> WorkerCtrl,
         timeout: Duration,
-    ) -> bool {
-        let mut ack_rxs = Vec::with_capacity(self.ctrl_txs.len());
-        for ctrl_tx in &self.ctrl_txs {
+    ) -> Vec<usize> {
+        let mut pending = Vec::with_capacity(self.ctrl_txs.len());
+        for (index, ctrl_tx) in self.ctrl_txs.iter().enumerate() {
             let (ack_tx, ack_rx) = oneshot::channel();
             if ctrl_tx.send(build(ack_tx)).is_ok() {
-                ack_rxs.push(ack_rx);
+                pending.push((index, ack_rx));
             }
         }
-        tokio::time::timeout(timeout, async {
-            for ack_rx in ack_rxs {
-                let _ = ack_rx.await;
+
+        // One deadline for the whole fan-out: the messages are already in
+        // flight, so awaiting the acks in sequence costs no extra wall time.
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut unacked = Vec::new();
+        for (index, ack_rx) in pending {
+            // A dropped ack sender means the worker task exited and killed its
+            // interpreter on the way out — nothing stale is left behind, so
+            // that is not a control failure. Only the deadline counts.
+            if tokio::time::timeout_at(deadline, ack_rx).await.is_err() {
+                unacked.push(index);
+            }
+        }
+        unacked
+    }
+
+    /// `timeout` is a parameter rather than a direct read of
+    /// [`WORKER_CONTROL_TIMEOUT`] so the failure path stays testable without a
+    /// five-second wall-clock wait.
+    async fn fanout_ctrl(
+        &self,
+        operation: &str,
+        build: fn(oneshot::Sender<()>) -> WorkerCtrl,
+        timeout: Duration,
+    ) -> Result<()> {
+        let unacked = self.fanout_ctrl_with_timeout(build, timeout).await;
+        if unacked.is_empty() {
+            return Ok(());
+        }
+        Err(anyhow!(
+            "worker control operation '{operation}' timed out after {timeout:?}; \
+             {}/{} workers did not acknowledge (workers {unacked:?})",
+            unacked.len(),
+            self.ctrl_txs.len(),
+        ))
+    }
+
+    /// Replace every Python subprocess with a clean, pre-warmed process.
+    ///
+    /// Hook metadata belongs to work units, so the fresh processes stay
+    /// unconfigured until their next unit installs its current registrations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a worker fails to acknowledge the restart within
+    /// [`WORKER_CONTROL_TIMEOUT`]. A worker only misses that deadline while it
+    /// is still executing a unit, which means it is still holding the *old*
+    /// interpreter — so the caller must not present the next run's results as
+    /// reflecting current source.
+    pub async fn restart_workers(&self) -> Result<()> {
+        self.fanout_ctrl("restart", WorkerCtrl::Restart, WORKER_CONTROL_TIMEOUT)
+            .await?;
+
+        // Warming is an optimization, not a correctness guarantee — see the
+        // note in `spawn_from_parts`.
+        if let Err(error) = self.warm().await {
+            warn!("{error:#}");
+        }
+
+        Ok(())
+    }
+
+    async fn warm(&self) -> Result<()> {
+        self.fanout_ctrl("warm", WorkerCtrl::Ping, WORKER_CONTROL_TIMEOUT)
+            .await
+    }
+
+    /// Shut down every worker process and await every worker task.
+    ///
+    /// Workers get one second *in total* to terminate cleanly — they stop
+    /// concurrently, so a per-worker budget would multiply the wait by the
+    /// pool size. Tasks still running past that deadline are aborted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a worker task panicked, or if any task had to be
+    /// aborted because it outlived the shutdown deadline.
+    pub async fn shutdown(mut self) -> Result<()> {
+        self.shutdown.cancel();
+
+        let mut workers = std::mem::take(&mut self.workers);
+        let mut failures = Vec::new();
+
+        let drained = tokio::time::timeout(WORKER_SHUTDOWN_TIMEOUT, async {
+            while let Some(result) = workers.join_next().await {
+                record_join_result(result, &mut failures);
             }
         })
-        .await
-        .is_ok()
-    }
-
-    async fn fanout_ctrl(&self, operation: &str, build: fn(oneshot::Sender<()>) -> WorkerCtrl) {
-        if !self
-            .fanout_ctrl_with_timeout(build, WORKER_CONTROL_TIMEOUT)
-            .await
-        {
-            // A control timeout means at least one worker did not ack a
-            // restart/warm, undermining the "fresh workers each run"
-            // guarantee — surface it at warn so it's visible by default.
-            warn!(
-                "worker control operation '{operation}' timed out after {WORKER_CONTROL_TIMEOUT:?}"
-            );
-        }
-    }
-
-    /// Replace every worker subprocess with a fresh, responsive process.
-    ///
-    /// This is how watch and server mode pick up code changes: rather than
-    /// trying to mutate a live interpreter with `importlib.reload` (which is
-    /// brittle once classes/closures/decorator-bound state from the old
-    /// definitions are referenced from elsewhere), we drop the whole process
-    /// and let it re-import everything on the next `run_test`. The fresh
-    /// process replays cached `register_hooks` calls so fixtures keep
-    /// working — same path as crash recovery.
-    pub async fn restart_workers(&self) {
-        self.fanout_ctrl("restart", WorkerCtrl::Restart).await;
-        self.warm().await;
-    }
-
-    /// Pre-spawn all worker processes in parallel so Python startup
-    /// latency is not on the critical path of the first tests.
-    async fn warm(&self) {
-        self.fanout_ctrl("warm", WorkerCtrl::Ping).await;
-    }
-
-    pub fn shutdown(self) {
-        for _ in 0..self.ctrl_txs.len() {
-            let _ = self.work_tx.send_blocking(WorkerMsg::Shutdown);
-        }
-    }
-}
-
-pub use tryke_types::path_to_module;
-
-async fn spawn_worker_process(
-    python_bin: &str,
-    path_refs: &[&Path],
-    root: &Path,
-    log_level: LevelFilter,
-) -> Result<WorkerProcess> {
-    let python_bin = python_bin.to_owned();
-    let python_paths = path_refs
-        .iter()
-        .map(|path| (*path).to_path_buf())
-        .collect::<Vec<_>>();
-    let root = root.to_path_buf();
-    let spawn = tokio::task::spawn_blocking(move || {
-        let path_refs = python_paths
-            .iter()
-            .map(PathBuf::as_path)
-            .collect::<Vec<_>>();
-        WorkerProcess::spawn(&python_bin, &path_refs, &root, log_level)
-    });
-
-    match tokio::time::timeout(WORKER_SPAWN_TIMEOUT, spawn).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(error)) => Err(anyhow!("worker spawn task failed: {error}")),
-        Err(_) => Err(anyhow!(
-            "worker process spawn timed out after {WORKER_SPAWN_TIMEOUT:?}"
-        )),
-    }
-}
-
-/// Ensure a worker process is live, spawning one if needed and replaying
-/// every cached `register_hooks` call before returning it. Replay guarantees
-/// that after a crash-and-respawn, subsequent tests still see their
-/// fixtures — without replay, the fresh worker would have empty hook
-/// metadata and silently skip `before_each` / `after_each`.
-async fn ensure_worker<'a>(
-    state: &'a mut WorkerState,
-    python_bin: &str,
-    path_refs: &[&Path],
-    root: &Path,
-    log_level: LevelFilter,
-) -> Option<&'a mut WorkerProcess> {
-    if state.process.is_some() {
-        return state.process.as_mut();
-    }
-    trace!("worker_task: spawning process");
-    let mut w = match spawn_worker_process(python_bin, path_refs, root, log_level).await {
-        Ok(w) => w,
-        Err(e) => {
-            let msg = format_worker_failure(
-                &format!("failed to spawn python worker ({python_bin} -m tryke.worker)"),
-                &e,
-                "",
-            );
-            debug!("worker_task: {msg}");
-            state.last_failure = Some(msg);
-            return None;
-        }
-    };
-    for (module, params) in &state.hook_cache {
-        if let Err(e) = w.register_hooks(params.clone()).await {
-            // Drain stderr before dropping the dead worker — otherwise
-            // the python traceback that explains *why* replay failed
-            // (e.g. ModuleNotFoundError on the worker side) goes with
-            // it and the user sees only "Broken pipe".
-            let stderr_output = w.drain_stderr().await;
-            let msg = format_worker_failure(
-                &format!("hook replay failed for module {module}"),
-                &e,
-                &stderr_output,
-            );
-            debug!("worker_task: {msg}");
-            state.last_failure = Some(msg);
-            // Worker is in an inconsistent state (some modules registered,
-            // some not). Drop it so the next attempt starts from scratch
-            // rather than silently running tests without fixtures.
-            return None;
-        }
-    }
-    state.last_failure = None;
-    state.process = Some(w);
-    state.process.as_mut()
-}
-
-/// Execute a single test on the worker. On any RPC error we respawn the
-/// worker (replaying cached hooks) for the next test but do NOT retry the
-/// failing test — a retry could double-execute side effects if the test
-/// partially ran before the crash. The failing test is surfaced as
-/// `TestOutcome::Error` with the worker's stderr attached for diagnosis.
-async fn run_single_test(
-    state: &mut WorkerState,
-    python_bin: &str,
-    path_refs: &[&Path],
-    root: &Path,
-    log_level: LevelFilter,
-    test: tryke_types::TestItem,
-    result_tx: &mpsc::UnboundedSender<TestResult>,
-) {
-    let Some(w) = ensure_worker(state, python_bin, path_refs, root, log_level).await else {
-        let message = state
-            .last_failure
-            .clone()
-            .unwrap_or_else(|| "worker unavailable (spawn or hook replay failed)".into());
-        let _ = result_tx.send(TestResult {
-            test,
-            outcome: TestOutcome::Error { message },
-            duration: Duration::ZERO,
-            stdout: String::new(),
-            stderr: String::new(),
-        });
-        return;
-    };
-    match w.run_test(&test).await {
-        Ok(result) => {
-            trace!("worker_task: test {} done", test.name);
-            let _ = result_tx.send(result);
-        }
-        Err(err) => {
-            debug!("worker_task: run_test error for {}: {err}", test.name);
-            let stderr_output = w.drain_stderr().await;
-            // Drop the dead worker; the next call to `ensure_worker` will
-            // spawn a fresh one and replay cached hooks so the remaining
-            // tests in this unit keep their fixtures.
-            state.process = None;
-            let message = format_worker_failure("worker error", &err, &stderr_output);
-            let _ = result_tx.send(TestResult {
-                test,
-                outcome: TestOutcome::Error { message },
-                duration: Duration::ZERO,
-                stdout: String::new(),
-                stderr: stderr_output,
-            });
-        }
-    }
-}
-
-/// Send `register_hooks` to the worker for each unique module in the work
-/// unit, caching the call so any respawn later in the unit can replay it.
-async fn register_hooks_for_unit(
-    state: &mut WorkerState,
-    python_bin: &str,
-    path_refs: &[&Path],
-    root: &Path,
-    log_level: LevelFilter,
-    hooks: &[HookItem],
-    tests: &[tryke_types::TestItem],
-) {
-    let mut seen = std::collections::HashSet::new();
-    for test in tests {
-        if !seen.insert(test.module_path.clone()) {
-            continue;
-        }
-        let module_hooks: Vec<crate::protocol::HookWire> = hooks
-            .iter()
-            .filter(|h| h.module_path == test.module_path)
-            .map(|h| crate::protocol::HookWire {
-                name: h.name.clone(),
-                per: serde_json::to_value(h.per)
-                    .ok()
-                    .and_then(|v| v.as_str().map(String::from))
-                    .unwrap_or_default(),
-                groups: h.groups.clone(),
-                depends_on: h.depends_on.clone(),
-                line_number: h.line_number,
-            })
-            .collect();
-
-        if module_hooks.is_empty() {
-            continue;
-        }
-
-        let params = RegisterHooksParams {
-            module: test.module_path.clone(),
-            hooks: module_hooks,
-        };
-        // Cache before sending so a respawn that races with this call can
-        // still replay the correct hooks.
-        state
-            .hook_cache
-            .insert(test.module_path.clone(), params.clone());
-
-        let Some(w) = ensure_worker(state, python_bin, path_refs, root, log_level).await else {
-            continue;
-        };
-        if let Err(e) = w.register_hooks(params).await {
-            // Drain stderr before dropping so the python traceback that
-            // killed the worker reaches the user-facing test result via
-            // `last_failure`, instead of being lost with the process.
-            let stderr_output = w.drain_stderr().await;
-            let msg = format_worker_failure(
-                &format!("register_hooks failed for module {}", test.module_path),
-                &e,
-                &stderr_output,
-            );
-            debug!("worker_task: {msg}");
-            state.last_failure = Some(msg);
-            // Worker is potentially wedged; drop it so the next test
-            // forces a respawn-with-replay.
-            state.process = None;
-        }
-    }
-}
-
-async fn handle_ctrl(
-    state: &mut WorkerState,
-    python_bin: &str,
-    path_refs: &[&Path],
-    root: &Path,
-    log_level: LevelFilter,
-    ctrl: WorkerCtrl,
-) {
-    match ctrl {
-        WorkerCtrl::Ping(ack_tx) => {
-            trace!("worker_task: ping (pre-warm)");
-            let _ = ensure_worker(state, python_bin, path_refs, root, log_level).await;
-            let _ = ack_tx.send(());
-        }
-        WorkerCtrl::Restart(ack_tx) => {
-            trace!("worker_task: restart");
-            if let Some(mut w) = state.process.take() {
-                w.shutdown().await;
-            }
-            let _ = ack_tx.send(());
-        }
-    }
-}
-
-async fn handle_unit(
-    state: &mut WorkerState,
-    python_bin: &str,
-    path_refs: &[&Path],
-    root: &Path,
-    log_level: LevelFilter,
-    unit: WorkUnit,
-    result_tx: mpsc::UnboundedSender<TestResult>,
-) {
-    if !unit.hooks.is_empty() {
-        register_hooks_for_unit(
-            state,
-            python_bin,
-            path_refs,
-            root,
-            log_level,
-            &unit.hooks,
-            &unit.tests,
-        )
         .await;
-    }
-    let finalize_modules: std::collections::HashSet<String> =
-        unit.tests.iter().map(|t| t.module_path.clone()).collect();
-    for test in unit.tests {
-        trace!("worker_task: running test {}", test.name);
-        run_single_test(
-            state, python_bin, path_refs, root, log_level, test, &result_tx,
-        )
-        .await;
-    }
-    for module in finalize_modules {
-        if let Some(w) = state.process.as_mut()
-            && let Err(e) = w.finalize_hooks(module).await
-        {
-            debug!("worker_task: finalize_hooks failed: {e}");
+
+        if drained.is_err() {
+            // Anything still alive is wedged (most likely in Python teardown).
+            // `shutdown` aborts the remainder and awaits the aborts, so the
+            // child processes are killed by `WorkerProcess::drop` before we
+            // return rather than outliving the pool.
+            let remaining = workers.len();
+            workers.shutdown().await;
+            failures.push(format!(
+                "{remaining} worker task(s) did not stop within \
+                 {WORKER_SHUTDOWN_TIMEOUT:?} and were aborted"
+            ));
+        }
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "Worker pool shutdown encountered task failures: {}",
+                failures.join("; ")
+            ))
         }
     }
 }
 
-async fn worker_task(
-    python_bin: String,
-    python_path: Vec<std::path::PathBuf>,
-    root: PathBuf,
-    log_level: LevelFilter,
-    work_rx: async_channel::Receiver<WorkerMsg>,
-    mut ctrl_rx: mpsc::UnboundedReceiver<WorkerCtrl>,
-) {
-    let path_refs: Vec<&Path> = python_path.iter().map(PathBuf::as_path).collect();
-    let mut state = WorkerState::new();
-
-    loop {
-        // `biased` guarantees control messages take priority once the
-        // current Unit (if any) finishes. Without it, `select!` could
-        // keep picking Units off the shared queue while a Restart sat
-        // in this worker's ctrl channel — leaving the worker on a stale
-        // interpreter for arbitrarily long.
-        tokio::select! {
-            biased;
-            ctrl = ctrl_rx.recv() => {
-                let Some(ctrl) = ctrl else { break };
-                handle_ctrl(&mut state, &python_bin, &path_refs, &root, log_level, ctrl).await;
-            }
-            msg = work_rx.recv() => {
-                match msg {
-                    Ok(WorkerMsg::Unit(unit, result_tx)) => {
-                        handle_unit(
-                            &mut state,
-                            &python_bin,
-                            &path_refs,
-                            &root,
-                            log_level,
-                            unit,
-                            result_tx,
-                        )
-                        .await;
-                    }
-                    Ok(WorkerMsg::Shutdown) | Err(_) => break,
-                }
-            }
-        }
+impl Drop for WorkerPool {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+        self.workers.abort_all();
     }
+}
 
-    if let Some(mut w) = state.process.take() {
-        w.shutdown().await;
+fn record_join_result(result: std::result::Result<(), JoinError>, failures: &mut Vec<String>) {
+    if let Err(error) = result {
+        let kind = if error.is_panic() {
+            "panicked"
+        } else {
+            "failed to join"
+        };
+        failures.push(format!("worker task {kind}: {error}"));
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
+    use log::LevelFilter;
     use tokio_stream::StreamExt;
-    use tryke_testing::{TestProject, python_bin as test_python_bin};
-    use tryke_types::{FixturePer, HookItem, TestItem};
+    use tryke_testing::{TestProject, python_bin as test_python_bin, workspace_root};
+    use tryke_types::TestItem;
 
     use super::*;
-    use crate::schedule::WorkUnit;
-
-    fn workspace_root() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()
-            .expect("workspace root")
-    }
+    use crate::schedule::{DistMode, partition_with_hooks};
 
     fn python_package_dir() -> PathBuf {
         workspace_root().join("python")
     }
 
-    fn make_test_item(module: &str, name: &str, file: &std::path::Path) -> TestItem {
-        TestItem {
-            name: name.to_string(),
-            module_path: module.to_string(),
-            file_path: Some(file.to_path_buf()),
-            ..TestItem::default()
+    /// A pool wired up with real control channels but no worker tasks, so the
+    /// control plane can be exercised without paying for interpreter startup.
+    ///
+    /// The returned receivers must be kept alive by the caller: dropping a
+    /// `ctrl_rx` closes its channel, which `fanout_ctrl_with_timeout` treats as
+    /// "worker already gone" rather than as a missed acknowledgement.
+    fn control_only_pool(
+        size: usize,
+    ) -> (
+        WorkerPool,
+        async_channel::Receiver<WorkerMsg>,
+        Vec<mpsc::UnboundedReceiver<WorkerCtrl>>,
+    ) {
+        let (work_tx, work_rx) = async_channel::unbounded();
+        let mut senders = Vec::with_capacity(size);
+        let mut receivers = Vec::with_capacity(size);
+        for _ in 0..size {
+            let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
+            senders.push(ctrl_tx);
+            receivers.push(ctrl_rx);
         }
+
+        let pool = WorkerPool {
+            work_tx,
+            ctrl_txs: senders,
+            shutdown: CancellationToken::new(),
+            workers: JoinSet::new(),
+        };
+
+        (pool, work_rx, receivers)
     }
 
-    /// End-to-end crash-recovery test: a middle test crashes the worker;
-    /// the failure must surface as `TestOutcome::Error` for exactly that
-    /// test, subsequent tests in the unit must still run with their
-    /// fixtures (hooks replayed on respawn), and the crashing test must
-    /// NOT be retried (no double-execution of side effects).
     #[tokio::test]
-    async fn worker_crash_replays_hooks_and_does_not_double_execute() {
-        let project = TestProject::new().expect("create test project");
+    async fn fanout_ctrl_reports_every_worker_that_never_acks() {
+        let (pool, _work_rx, _ctrl_rxs) = control_only_pool(3);
 
-        let crash_counter = project.root().join("CRASH_COUNT");
-        let crash_counter_escaped = crash_counter.to_string_lossy().replace('\\', "\\\\");
-        let source = format!(
-            r#"from tryke import test, fixture, Depends, expect
+        let unacked = pool
+            .fanout_ctrl_with_timeout(WorkerCtrl::Restart, Duration::from_millis(10))
+            .await;
 
-@fixture
-def counter() -> int:
-    return 42
-
-@test
-def test_first(n: int = Depends(counter)) -> None:
-    expect(n).to_equal(42)
-
-@test
-def test_crasher() -> None:
-    import os
-    with open("{crash_counter_escaped}", "a") as f:
-        f.write("x")
-        f.flush()
-    os._exit(1)
-
-@test
-def test_third(n: int = Depends(counter)) -> None:
-    expect(n).to_equal(42)
-"#
-        );
-        let test_file = project
-            .write("test_crash.py", source)
-            .expect("write test file");
-
-        let hook = HookItem {
-            name: "counter".into(),
-            module_path: "test_crash".into(),
-            per: FixturePer::Test,
-            groups: vec![],
-            depends_on: vec![],
-            line_number: None,
-        };
-        let tests = vec![
-            make_test_item("test_crash", "test_first", &test_file),
-            make_test_item("test_crash", "test_crasher", &test_file),
-            make_test_item("test_crash", "test_third", &test_file),
-        ];
-        let unit = WorkUnit {
-            tests,
-            hooks: vec![hook],
-        };
-
-        let python_path = [project.root().to_path_buf(), python_package_dir()];
-        let pool = WorkerPool::spawn_from_parts(
-            1,
-            &test_python_bin(),
-            project.root(),
-            Some(&python_path),
-            LevelFilter::Off,
-            true,
-        )
-        .await;
-
-        let mut results: Vec<TestResult> = pool.submit(vec![unit]).collect().await;
-        results.sort_by_key(|r| r.test.name.clone());
-
-        assert_eq!(results.len(), 3, "expected 3 results, got {results:?}");
-        // Sorted: test_crasher, test_first, test_third
-        let crasher = &results[0];
-        let first = &results[1];
-        let third = &results[2];
-
-        assert_eq!(crasher.test.name, "test_crasher");
-        assert!(
-            matches!(crasher.outcome, TestOutcome::Error { .. }),
-            "crasher should be Error, got {:?}",
-            crasher.outcome
-        );
-        assert!(
-            matches!(first.outcome, TestOutcome::Passed),
-            "first should pass (fixture wired), got {:?}",
-            first.outcome
-        );
-        assert!(
-            matches!(third.outcome, TestOutcome::Passed),
-            "third should pass after respawn+hook-replay, got {:?}",
-            third.outcome
-        );
-
-        let count = std::fs::read_to_string(&crash_counter).unwrap_or_default();
         assert_eq!(
-            count.len(),
-            1,
-            "crashing test must run exactly once (no retry), got {count:?}"
+            unacked,
+            vec![0, 1, 2],
+            "a silent worker must be identified, not just counted"
         );
-
-        pool.shutdown();
     }
 
-    /// Restarting the pool must yield a *fresh* Python interpreter — not
-    /// just an `importlib.reload`-mutated module. We prove this by
-    /// recording one tally mark per fresh import of the test module: the
-    /// module body increments a sidecar counter on every initial load.
-    /// Importlib.reload would re-run the body too, but in production it
-    /// leaves classes/closures bound to the old definitions in *other*
-    /// modules — the brittleness this rearchitecture exists to fix.
-    /// A second tally after `restart_workers` confirms a brand new
-    /// interpreter is in play.
     #[tokio::test]
-    async fn restart_workers_runs_module_body_on_fresh_interpreter() {
-        let project = TestProject::new().expect("create test project");
+    async fn fanout_ctrl_treats_a_departed_worker_as_acknowledged() {
+        // A closed control channel means the worker task exited and killed its
+        // interpreter on the way out. Nothing stale survives it, so it must not
+        // be reported as a control failure.
+        let (pool, _work_rx, ctrl_rxs) = control_only_pool(2);
+        drop(ctrl_rxs);
 
-        let counter_file = project.root().join("IMPORT_COUNT");
-        let counter_escaped = counter_file.to_string_lossy().replace('\\', "\\\\");
-        let source = format!(
-            r#"from tryke import test, expect
+        let unacked = pool
+            .fanout_ctrl_with_timeout(WorkerCtrl::Restart, Duration::from_millis(10))
+            .await;
 
-with open("{counter_escaped}", "a") as f:
-    f.write("x")
-    f.flush()
-
-@test
-def test_noop() -> None:
-    expect(1).to_equal(1)
-"#
-        );
-        let test_file = project
-            .write("test_restart_state.py", source)
-            .expect("write test file");
-
-        let make_unit = || WorkUnit {
-            tests: vec![make_test_item(
-                "test_restart_state",
-                "test_noop",
-                &test_file,
-            )],
-            hooks: vec![],
-        };
-
-        let python_path = [project.root().to_path_buf(), python_package_dir()];
-        let pool = WorkerPool::spawn_from_parts(
-            1,
-            &test_python_bin(),
-            project.root(),
-            Some(&python_path),
-            LevelFilter::Off,
-            true,
-        )
-        .await;
-
-        let r1: Vec<TestResult> = pool.submit(vec![make_unit()]).collect().await;
-        assert_eq!(r1.len(), 1);
-        assert!(
-            matches!(r1[0].outcome, TestOutcome::Passed),
-            "first run should pass, got {:?}",
-            r1[0].outcome
-        );
-
-        pool.restart_workers().await;
-
-        let r2: Vec<TestResult> = pool.submit(vec![make_unit()]).collect().await;
-        assert_eq!(r2.len(), 1);
-        assert!(
-            matches!(r2[0].outcome, TestOutcome::Passed),
-            "second run should pass on fresh interpreter, got {:?}",
-            r2[0].outcome
-        );
-
-        let count = std::fs::read_to_string(&counter_file).unwrap_or_default();
-        assert_eq!(
-            count.len(),
-            2,
-            "module body must run once per fresh interpreter \
-             (1 initial + 1 after restart_workers); got {count:?}"
-        );
-
-        pool.shutdown();
+        assert!(unacked.is_empty(), "got {unacked:?}");
     }
 
-    /// When the worker python dies during startup (e.g. project venv
-    /// without `tryke` installed prints `ModuleNotFoundError` and
-    /// exits), the user-facing error must include the python stderr —
-    /// not just the opaque "worker unavailable" placeholder that used
-    /// to be all the user saw. Regression test for the diagnosability
-    /// fix.
-    ///
-    /// The unit carries a `HookItem` on purpose: with `hooks: vec![]`,
-    /// `handle_unit` skips `register_hooks_for_unit` entirely and the
-    /// failure would surface via `run_single_test`'s `run_test` error
-    /// path — which already existed before this PR. To exercise the
-    /// new code (`register_hooks_for_unit` stashing `last_failure`
-    /// after `drain_stderr`, then `ensure_worker`'s replay loop
-    /// stashing again on respawn, then `run_single_test` reading
-    /// `last_failure` instead of the opaque placeholder) the test
-    /// needs a hook so `register_hooks_for_unit` actually runs.
-    ///
-    /// Unix-only: simulates the failing python with a shell script.
-    /// The workspace venv's python has `tryke` installed in editable
-    /// mode and its `.pth` file is searched regardless of PYTHONPATH,
-    /// so we can't reproduce the missing-module case with a real
-    /// interpreter. A stub `python_bin` is sufficient — what we're
-    /// testing is the rust-side error propagation, not python's
-    /// resolution rules.
-    #[cfg(unix)]
     #[tokio::test]
-    async fn worker_missing_tryke_surfaces_python_error_in_outcome() {
-        use std::os::unix::fs::PermissionsExt;
+    async fn fanout_ctrl_error_names_the_operation_and_the_silent_workers() {
+        let (pool, _work_rx, _ctrl_rxs) = control_only_pool(2);
 
-        let project = TestProject::new().expect("create test project");
+        let error = pool
+            .fanout_ctrl("restart", WorkerCtrl::Restart, Duration::from_millis(10))
+            .await
+            .expect_err("silent workers must fail the operation");
 
-        let fake_python = project
-            .write(
-                "fake_python.sh",
-                "#!/bin/sh\n\
-             echo \"$0: Error while finding module specification for \
-             'tryke.worker' (ModuleNotFoundError: No module named 'tryke')\" >&2\n\
-             exit 1\n",
-            )
-            .expect("write fake python");
-        std::fs::set_permissions(&fake_python, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod fake python");
-
-        let test_file = project
-            .write("test_no_tryke.py", "def test_noop(): pass\n")
-            .expect("write test file");
-
-        // Hook on the same module forces `handle_unit` through
-        // `register_hooks_for_unit` → `ensure_worker` (spawn ok) →
-        // `register_hooks` (RPC error) → `drain_stderr` → stash
-        // `last_failure` → drop process. Then `run_single_test` →
-        // `ensure_worker` → respawn ok → replay `register_hooks`
-        // (RPC error) → stash `last_failure` → return None →
-        // `run_single_test` surfaces `last_failure` as the outcome
-        // message. Without this hook the new path isn't exercised.
-        let hook = HookItem {
-            name: "noop".into(),
-            module_path: "test_no_tryke".into(),
-            per: FixturePer::Test,
-            groups: vec![],
-            depends_on: vec![],
-            line_number: None,
-        };
-        let unit = WorkUnit {
-            tests: vec![make_test_item("test_no_tryke", "test_noop", &test_file)],
-            hooks: vec![hook],
-        };
-
-        let python_path = [project.root().to_path_buf()];
-        let pool = WorkerPool::spawn_from_parts(
-            1,
-            fake_python.to_str().expect("fake python path"),
-            project.root(),
-            Some(&python_path),
-            LevelFilter::Off,
-            false,
-        )
-        .await;
-
-        let results: Vec<TestResult> = pool.submit(vec![unit]).collect().await;
-        assert_eq!(results.len(), 1);
-        let message = match &results[0].outcome {
-            TestOutcome::Error { message } => message.clone(),
-            other => panic!("expected Error outcome, got {other:?}"),
-        };
-        // `run_single_test`'s `last_failure` path produces this prefix
-        // — proves we went through `ensure_worker`'s replay loop, not
-        // through `run_test`'s direct error path which would say
-        // "worker error: …".
+        let message = format!("{error:#}");
+        assert!(message.contains("'restart'"), "{message}");
         assert!(
-            message.starts_with("hook replay failed for module test_no_tryke"),
-            "expected hook-replay prefix from ensure_worker.last_failure, got: {message}"
+            message.contains("2/2 workers did not acknowledge"),
+            "{message}"
         );
-        assert!(
-            message.contains("No module named 'tryke'"),
-            "missing python traceback in error message: {message}"
-        );
-        assert!(
-            message.contains("worker stderr:"),
-            "missing 'worker stderr:' header in error message: {message}"
-        );
-
-        pool.shutdown();
     }
 
     /// `restart_workers` on a cold pool must start every process and
@@ -905,7 +416,6 @@ def test_noop() -> None:
     #[tokio::test]
     async fn restart_workers_with_no_live_processes_acks() {
         let project = TestProject::new().expect("create test project");
-
         let python_path = [project.root().to_path_buf(), python_package_dir()];
         let pool = WorkerPool::spawn_from_parts(
             2,
@@ -916,26 +426,50 @@ def test_noop() -> None:
             false,
         )
         .await;
-        let restarted =
-            tokio::time::timeout(std::time::Duration::from_secs(10), pool.restart_workers()).await;
-        assert!(restarted.is_ok(), "restart_workers must ack within timeout");
 
-        pool.shutdown();
+        pool.restart_workers()
+            .await
+            .expect("restart_workers must ack within the control timeout");
+
+        pool.shutdown().await.expect("clean shutdown");
     }
 
     #[tokio::test]
-    async fn worker_control_fanout_times_out_when_a_worker_does_not_ack() {
-        let (work_tx, _work_rx) = async_channel::unbounded();
-        let (ctrl_tx, _ctrl_rx) = mpsc::unbounded_channel();
-        let pool = WorkerPool {
-            work_tx,
-            ctrl_txs: vec![ctrl_tx],
-        };
+    async fn shutdown_joins_every_warmed_worker() {
+        let project = TestProject::new().expect("create test project");
+        let python_path = [project.root().to_path_buf(), python_package_dir()];
+        let pool = WorkerPool::spawn_from_parts(
+            2,
+            &test_python_bin(),
+            project.root(),
+            Some(&python_path),
+            LevelFilter::Off,
+            true,
+        )
+        .await;
 
-        let acknowledged = pool
-            .fanout_ctrl_with_timeout(WorkerCtrl::Restart, Duration::from_millis(10))
-            .await;
+        pool.shutdown()
+            .await
+            .expect("warmed workers must join cleanly");
+    }
 
-        assert!(!acknowledged, "a missing worker ack must time out");
+    /// Regression guard for the `send_blocking` → `try_send` change: submitting
+    /// to a pool whose work channel has closed must yield an empty stream
+    /// rather than parking the calling runtime thread.
+    #[tokio::test]
+    async fn submit_to_a_closed_pool_ends_the_stream_instead_of_blocking() {
+        let (pool, work_rx, _ctrl_rxs) = control_only_pool(1);
+        drop(work_rx);
+        pool.work_tx.close();
+
+        let units = partition_with_hooks(vec![TestItem::default()], &[], DistMode::Test).units;
+        assert!(!units.is_empty(), "test setup should produce a work unit");
+
+        let results: Vec<TestResult> =
+            tokio::time::timeout(Duration::from_secs(5), pool.submit(units).collect())
+                .await
+                .expect("submit must not block on a closed channel");
+
+        assert!(results.is_empty(), "got {} results", results.len());
     }
 }

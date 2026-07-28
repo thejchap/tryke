@@ -1,8 +1,8 @@
 mod cli;
 mod commands;
+mod logging;
 
 use std::{
-    env,
     io::{self, Write},
     process::{ExitCode, Termination},
 };
@@ -10,11 +10,13 @@ use std::{
 use clap::{CommandFactory, Parser};
 use console::style;
 use log::debug;
+use tokio_util::sync::CancellationToken;
 
 use cli::{Cli, Commands};
 use commands::{
     CommandOrigin, run_clean_command, run_graph_command, run_server_command, run_test_command,
 };
+use logging::LogConfig;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExitStatus {
@@ -37,20 +39,14 @@ impl Termination for ExitStatus {
     }
 }
 
-pub fn run() -> ExitStatus {
-    try_run().unwrap_or_else(report_error)
+pub async fn run() -> ExitStatus {
+    try_run().await.unwrap_or_else(report_error)
 }
 
-fn try_run() -> anyhow::Result<ExitStatus> {
+async fn try_run() -> anyhow::Result<ExitStatus> {
     let cli = Cli::parse();
-    let cli_filter = cli.global.verbose.log_level_filter();
-    let tryke_log = env::var("TRYKE_LOG").ok();
-    let rust_default = tryke_config::rust_log_default(tryke_log.as_deref(), cli_filter);
-
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or(rust_default.as_str().to_ascii_lowercase()),
-    )
-    .init();
+    let logging = LogConfig::from_env(cli.global.verbose.log_level_filter())?;
+    logging.init_rust_logging();
 
     debug!("{cli:?}");
 
@@ -64,8 +60,40 @@ fn try_run() -> anyhow::Result<ExitStatus> {
     let global = cli.global;
 
     match command {
-        Commands::Test(args) => run_test_command(args, &global, origin),
-        Commands::Server(args) => run_server_command(args, &global),
+        Commands::Test(args) => {
+            let cancellation = CancellationToken::new();
+            let command = run_test_command(args, &global, origin, logging, cancellation.clone());
+            tokio::pin!(command);
+
+            tokio::select! {
+                biased;
+                signal = tokio::signal::ctrl_c() => {
+                    signal?;
+                    cancellation.cancel();
+                    command.await?;
+
+                    Ok(ExitStatus::Interrupted)
+                }
+                result = &mut command => result,
+            }
+        }
+        Commands::Server(args) => {
+            let cancellation = CancellationToken::new();
+            let command = run_server_command(args, &global, logging, cancellation.clone());
+            tokio::pin!(command);
+
+            tokio::select! {
+                biased;
+                signal = tokio::signal::ctrl_c() => {
+                    signal?;
+                    cancellation.cancel();
+                    command.await?;
+
+                    Ok(ExitStatus::Interrupted)
+                }
+                result = &mut command => result,
+            }
+        }
         Commands::Clean(args) => run_clean_command(args, &global),
         Commands::Graph(args) => run_graph_command(args, &global),
     }

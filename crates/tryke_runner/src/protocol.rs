@@ -30,6 +30,7 @@
 //! worker never needs to re-walk the AST itself.
 
 use serde::{Deserialize, Serialize};
+use tryke_types::{HookItem, TestItem};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -120,6 +121,32 @@ pub struct RegisterHooksParams {
     pub hooks: Vec<HookWire>,
 }
 
+impl RegisterHooksParams {
+    /// Build the hook-registration payload for one test's module.
+    #[must_use]
+    pub fn for_test(test_item: &TestItem, hook_items: &[HookItem]) -> Self {
+        let hooks = hook_items
+            .iter()
+            .filter(|hook| hook.module_path == test_item.module_path)
+            .map(|hook| HookWire {
+                name: hook.name.clone(),
+                per: serde_json::to_value(hook.per)
+                    .ok()
+                    .and_then(|value| value.as_str().map(String::from))
+                    .unwrap_or_default(),
+                groups: hook.groups.clone(),
+                depends_on: hook.depends_on.clone(),
+                line_number: hook.line_number,
+            })
+            .collect();
+
+        Self {
+            module: test_item.module_path.clone(),
+            hooks,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct FinalizeHooksParams {
     pub module: String,
@@ -132,3 +159,45 @@ pub struct RunDoctestParams {
 }
 
 pub use tryke_types::{AssertionWire, RunTestResultWire};
+
+#[cfg(test)]
+mod tests {
+    use tryke_types::FixturePer;
+
+    use super::*;
+
+    #[test]
+    fn register_hooks_params_for_test_filters_and_maps_module_hooks() {
+        let test_item = TestItem {
+            module_path: "tests.test_math".into(),
+            ..TestItem::default()
+        };
+        let matching = HookItem {
+            name: "database".into(),
+            module_path: test_item.module_path.clone(),
+            per: FixturePer::Scope,
+            groups: vec!["math".into()],
+            depends_on: vec!["connection".into()],
+            line_number: Some(12),
+        };
+        let other = HookItem {
+            name: "other".into(),
+            module_path: "tests.test_other".into(),
+            per: FixturePer::Test,
+            groups: vec![],
+            depends_on: vec![],
+            line_number: None,
+        };
+
+        let params = RegisterHooksParams::for_test(&test_item, &[matching, other]);
+
+        assert_eq!(params.module, test_item.module_path);
+        assert_eq!(params.hooks.len(), 1);
+        let hook = &params.hooks[0];
+        assert_eq!(hook.name, "database");
+        assert_eq!(hook.per, "scope");
+        assert_eq!(hook.groups, ["math"]);
+        assert_eq!(hook.depends_on, ["connection"]);
+        assert_eq!(hook.line_number, Some(12));
+    }
+}

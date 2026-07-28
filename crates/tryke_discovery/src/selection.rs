@@ -80,7 +80,7 @@ impl Discoverer {
         }
 
         if !options.paths.is_empty() && !options.changed && !options.changed_first {
-            debug!("path-restricted discovery: falling back to full discovery");
+            debug!("Path-restricted discovery: falling back to full discovery");
         }
 
         let all_tests = self.rediscover();
@@ -180,7 +180,7 @@ fn resolve_walk_roots(root: &Path, path_specs: &[PathSpec]) -> Option<Vec<PathBu
         };
         let Ok(resolved) = abs.canonicalize() else {
             debug!(
-                "path-restricted discovery: {} does not exist on disk",
+                "Path-restricted discovery: {} does not exist on disk",
                 abs.display()
             );
             return None;

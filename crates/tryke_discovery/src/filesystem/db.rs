@@ -92,7 +92,7 @@ fn count_discover_file_execution(path: &std::path::Path) {
 pub(crate) fn parse_file(db: &dyn Db, file: SourceFile) -> ParsedAst {
     let path = file.path(db);
     trace!(
-        "parsing {}",
+        "Parsing {}",
         path.strip_prefix(file.root(db)).unwrap_or(path).display()
     );
     ParsedAst::parse(file.text(db))

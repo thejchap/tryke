@@ -6,11 +6,12 @@ use std::{
 
 use anyhow::Result;
 use console::{Key, Term};
-use log::{LevelFilter, debug};
+use log::{LevelFilter, debug, warn};
 use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 use tryke_config::{Project, ProjectMetadata};
 use tryke_discovery::{Discoverer, DiscoveryOptions};
-use tryke_reporter::{Reporter, Verbosity, build_reporter, reporter::WatchIdleInfo};
+use tryke_reporter::{Reporter, build_reporter, reporter::WatchIdleInfo};
 use tryke_runner::{DistMode, WorkerPool, WorkerPoolOptions, partition_with_hooks};
 use tryke_types::{
     ChangedSelectionSummary, DiscoveryWarning, DiscoveryWarningKind, HookItem, RunSummary,
@@ -21,6 +22,7 @@ use tryke_watcher::{FileChangeBatch, FileWatcher};
 use super::CommandOrigin;
 use crate::ExitStatus;
 use crate::cli::{GlobalArgs, TestArgs};
+use crate::logging::LogConfig;
 
 #[derive(Debug, Eq, PartialEq)]
 enum Interruptible<T> {
@@ -30,14 +32,11 @@ enum Interruptible<T> {
 
 async fn run_interruptibly<T>(
     run: impl Future<Output = Result<T>>,
-    interrupt: impl Future<Output = std::io::Result<()>>,
+    cancellation: &CancellationToken,
 ) -> Result<Interruptible<T>> {
     tokio::select! {
         biased;
-        signal = interrupt => {
-            signal?;
-            Ok(Interruptible::Interrupted)
-        },
+        () = cancellation.cancelled() => Ok(Interruptible::Interrupted),
         result = run => result.map(Interruptible::Completed),
     }
 }
@@ -59,16 +58,15 @@ fn resolve_interruptible<T>(
     }
 }
 
-pub(crate) fn run_test_command(
+pub(crate) async fn run_test_command(
     args: TestArgs,
     global: &GlobalArgs,
     origin: CommandOrigin,
+    logging: LogConfig,
+    cancellation: CancellationToken,
 ) -> Result<ExitStatus> {
-    let cli_filter = global.verbose.log_level_filter();
-    let tryke_log = env::var("TRYKE_LOG").ok();
-    let rust_default = tryke_config::rust_log_default(tryke_log.as_deref(), cli_filter);
-    let log_level = tryke_config::worker_log_level(tryke_log.as_deref(), cli_filter);
-    let verbosity = Verbosity::from_level_filter(rust_default);
+    let log_level = logging.level();
+    let verbosity = logging.reporter_verbosity();
 
     let maxfail = if args.fail_fast {
         Some(1)
@@ -77,7 +75,6 @@ pub(crate) fn run_test_command(
     };
 
     let mut reporter = build_reporter(args.reporter.kind(), verbosity, global.no_progress);
-    let runtime = tokio::runtime::Runtime::new()?;
     let cwd = env::current_dir()?;
 
     let mut metadata = ProjectMetadata::new(args.root.as_deref().unwrap_or(&cwd));
@@ -97,20 +94,19 @@ pub(crate) fn run_test_command(
             TestFilter::from_args(&[], args.filter.as_deref(), args.markers.as_deref())
                 .map_err(|error| anyhow::anyhow!(error))?;
 
-        let result = runtime.block_on(run_interruptibly(
-            run_watch(
-                &mut *reporter,
-                &project,
-                log_level,
-                &test_filter,
-                maxfail,
-                args.workers,
-                args.dist.into(),
-                args.all,
-                args.now,
-            ),
-            tokio::signal::ctrl_c(),
-        ));
+        let result = run_watch(
+            &mut *reporter,
+            &project,
+            log_level,
+            &test_filter,
+            maxfail,
+            args.workers,
+            args.dist.into(),
+            args.all,
+            args.now,
+            &cancellation,
+        )
+        .await;
 
         if resolve_interruptible(result, &mut *reporter)?.is_none() {
             return Ok(ExitStatus::Interrupted);
@@ -158,21 +154,20 @@ pub(crate) fn run_test_command(
     //     mode: args.snapshot_mode.to_wire(),
     // })?;
 
-    let result = runtime.block_on(run_interruptibly(
-        run_tests(
-            &mut *reporter,
-            &project,
-            log_level,
-            tests,
-            &discovered.hooks,
-            maxfail,
-            args.workers,
-            args.dist.into(),
-            Some(discovery_duration),
-            changed_selection,
-        ),
-        tokio::signal::ctrl_c(),
-    ));
+    let result = run_tests(
+        &mut *reporter,
+        &project,
+        log_level,
+        tests,
+        &discovered.hooks,
+        maxfail,
+        args.workers,
+        args.dist.into(),
+        Some(discovery_duration),
+        changed_selection,
+        &cancellation,
+    )
+    .await;
 
     let Some(summary) = resolve_interruptible(result, &mut *reporter)? else {
         return Ok(ExitStatus::Interrupted);
@@ -197,7 +192,8 @@ async fn run_tests(
     dist: DistMode,
     discovery_duration: Option<Duration>,
     changed_selection: Option<ChangedSelectionSummary>,
-) -> Result<RunSummary> {
+    cancellation: &CancellationToken,
+) -> Result<Interruptible<RunSummary>> {
     let pool = WorkerPool::spawn(
         project,
         WorkerPoolOptions {
@@ -209,21 +205,34 @@ async fn run_tests(
     )
     .await;
 
-    let summary = report_cycle(
-        reporter,
-        tests,
-        hooks,
-        &pool,
-        maxfail,
-        dist,
-        discovery_duration,
-        changed_selection,
+    let run_result = run_interruptibly(
+        report_cycle(
+            reporter,
+            tests,
+            hooks,
+            &pool,
+            maxfail,
+            dist,
+            discovery_duration,
+            changed_selection,
+        ),
+        cancellation,
     )
-    .await?;
+    .await;
+    let shutdown_result = pool.shutdown().await;
 
-    pool.shutdown();
+    combine_shutdown(run_result, shutdown_result)
+}
 
-    Ok(summary)
+fn combine_shutdown<T>(result: Result<T>, shutdown_result: Result<()>) -> Result<T> {
+    match (result, shutdown_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(shutdown_error)) => Err(shutdown_error),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(shutdown_error)) => Err(error.context(format!(
+            "Worker pool shutdown also failed: {shutdown_error:#}"
+        ))),
+    }
 }
 
 fn flush_buffer(
@@ -482,11 +491,6 @@ fn clear_watch_results(reporter: &mut dyn Reporter) {
     });
 }
 
-/// Run a single watch cycle.
-///
-/// Test failures are non-fatal here: in watch
-/// mode the whole point is to iterate on failing tests, so we discard
-/// the run summary and any setup error and let the watcher keep running.
 async fn run_watch_cycle(
     reporter: &mut dyn Reporter,
     tests: Vec<tryke_types::TestItem>,
@@ -496,7 +500,18 @@ async fn run_watch_cycle(
     dist: DistMode,
     discovery_duration: Option<Duration>,
 ) {
-    pool.restart_workers().await;
+    // A worker that misses the restart deadline is still running the previous
+    // interpreter. Skipping the cycle costs the user a re-save; running it
+    // would report results from stale code as if they were current.
+    if let Err(error) = pool.restart_workers().await {
+        warn!("Watch: {error:#}");
+        reporter.on_watch_idle(&WatchIdleInfo {
+            hint: "Worker restart failed — skipped this run. Waiting for file changes...",
+            start_time: None,
+            discovery_duration: None,
+        });
+        return;
+    }
 
     if let Err(e) = report_cycle(
         reporter,
@@ -510,17 +525,10 @@ async fn run_watch_cycle(
     )
     .await
     {
-        debug!("watch: report_cycle errored: {e}");
+        debug!("Watch: report_cycle errored: {e}");
     }
 }
 
-/// Perform startup discovery and, when `run_now` is set, the initial
-/// test cycle. Discovery runs unconditionally so the import graph is
-/// ready to answer "which tests are affected?" on the first file
-/// change. When `run_now` is false we hand the reporter an idle frame
-/// (header + Tests/Start/Discovery block + IDLE badge) so the
-/// terminal communicates clearly that the watcher is alive and
-/// waiting.
 async fn run_initial_cycle(
     reporter: &mut dyn Reporter,
     discoverer: &mut Discoverer,
@@ -530,12 +538,6 @@ async fn run_initial_cycle(
     dist: DistMode,
     run_now: bool,
 ) {
-    // Arm before any reporter output so the deferred clear lands on
-    // the first warning, run-start, or idle frame — whichever fires
-    // first. The reporter's `flush_pending_clear` (called from each
-    // of those paths) consumes the flag, so warnings emitted just
-    // before `on_watch_idle` aren't wiped by a second clear inside
-    // the idle render.
     reporter.arm_clear();
 
     let disc_start = Instant::now();
@@ -574,11 +576,8 @@ async fn run_watch(
     dist: DistMode,
     all_tests: bool,
     run_now: bool,
-) -> Result<()> {
-    let root = project.root();
-    let excludes = &project.discovery().exclude;
-    let mut discoverer = Discoverer::new(project);
-
+    cancellation: &CancellationToken,
+) -> Result<Interruptible<()>> {
     let pool = WorkerPool::spawn(
         project,
         WorkerPoolOptions {
@@ -590,11 +589,48 @@ async fn run_watch(
     )
     .await;
 
+    let run_result = run_interruptibly(
+        run_watch_loop(
+            reporter,
+            project,
+            test_filter,
+            &pool,
+            maxfail,
+            dist,
+            all_tests,
+            run_now,
+        ),
+        cancellation,
+    )
+    .await;
+    let shutdown_result = pool.shutdown().await;
+
+    combine_shutdown(run_result, shutdown_result)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Watch options map directly to CLI flags; grouping into a struct would add indirection without clear benefit."
+)]
+async fn run_watch_loop(
+    reporter: &mut dyn Reporter,
+    project: &Project,
+    test_filter: &TestFilter,
+    pool: &WorkerPool,
+    maxfail: Option<usize>,
+    dist: DistMode,
+    all_tests: bool,
+    run_now: bool,
+) -> Result<()> {
+    let root = project.root();
+    let excludes = &project.discovery().exclude;
+    let mut discoverer = Discoverer::new(project);
+
     run_initial_cycle(
         reporter,
         &mut discoverer,
         test_filter,
-        &pool,
+        pool,
         maxfail,
         dist,
         run_now,
@@ -625,7 +661,7 @@ async fn run_watch(
                 let hooks = discoverer.hooks();
                 let disc_dur = Some(disc_start.elapsed());
                 emit_discovery_warnings(reporter, &discoverer);
-                run_watch_cycle(reporter, tests, &hooks, &pool, maxfail, dist, disc_dur).await;
+                run_watch_cycle(reporter, tests, &hooks, pool, maxfail, dist, disc_dur).await;
                 continue;
             }
             WatchLoopEvent::Command(WatchKeyAction::ClearResults) => {
@@ -637,7 +673,7 @@ async fn run_watch(
         };
 
         debug!(
-            "watch: file change batch — {} path(s) changed: {}",
+            "Watch: file change batch — {} path(s) changed: {}",
             paths.len(),
             paths
                 .iter()
@@ -646,48 +682,46 @@ async fn run_watch(
                 .join(", ")
         );
 
-        // Arm before the heavy rediscover so the previous cycle's
-        // output stays on screen while discovery + worker warmup
-        // happens. The reporter clears at the moment new content is
-        // about to land (warning, error, or run start), eliminating
-        // the blank-screen gap that's painful on large suites.
         reporter.arm_clear();
 
-        // Time the full discovery work — `apply_changes` is the
-        // expensive part on large suites, so it has to be inside the
-        // measured window for `disc_dur` to mean anything.
-        let disc_start = Instant::now();
-        let impact = discoverer.apply_changes(&paths);
-        let disc_dur = Some(disc_start.elapsed());
-        if impact.paths.is_empty() {
-            debug!("watch: no eligible paths after discovery filtering");
+        let discovery_start = Instant::now();
+        let change_impact = discoverer.apply_changes(&paths);
+        let discovery_duration = Some(discovery_start.elapsed());
+
+        if change_impact.paths.is_empty() {
+            debug!("Watch: no eligible paths after discovery filtering");
             continue;
         }
 
-        // When `--all` is set, rerun the full test set on every change instead
-        // of restricting to tests transitively affected by the changed files.
-        // Useful when the import graph misses dependencies (dynamic imports,
-        // string-referenced modules, external fixtures) or when debugging
-        // test ordering/flakiness.
         let raw_tests = if all_tests {
             discoverer.tests()
         } else {
-            impact.affected_tests
+            change_impact.affected_tests
         };
 
         let tests = test_filter.apply(raw_tests);
         let hooks = discoverer.hooks();
+
         emit_discovery_warnings(reporter, &discoverer);
-        run_watch_cycle(reporter, tests, &hooks, &pool, maxfail, dist, disc_dur).await;
+
+        run_watch_cycle(
+            reporter,
+            tests,
+            &hooks,
+            pool,
+            maxfail,
+            dist,
+            discovery_duration,
+        )
+        .await;
     }
 
-    pool.shutdown();
     Ok(())
 }
 
 #[cfg(test)]
 mod interrupt_tests {
-    use std::future::{pending, ready};
+    use std::future::ready;
 
     use super::*;
 
@@ -710,25 +744,20 @@ mod interrupt_tests {
 
     #[tokio::test]
     async fn interruption_takes_priority_and_cleans_up_reporter() -> Result<()> {
-        let result = run_interruptibly(
-            ready(Ok::<_, anyhow::Error>(())),
-            ready(Ok::<(), std::io::Error>(())),
-        )
-        .await;
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let result = run_interruptibly(ready(Ok::<_, anyhow::Error>(())), &cancellation).await;
         let mut reporter = CleanupReporter::default();
 
-        assert_eq!(resolve_interruptible(result, &mut reporter)?, None);
+        assert!(resolve_interruptible(result, &mut reporter)?.is_none());
         assert_eq!(reporter.cleanup_calls, 1);
         Ok(())
     }
 
     #[tokio::test]
     async fn completion_does_not_clean_up_reporter() -> Result<()> {
-        let result = run_interruptibly(
-            ready(Ok::<_, anyhow::Error>(42)),
-            pending::<std::io::Result<()>>(),
-        )
-        .await;
+        let cancellation = CancellationToken::new();
+        let result = run_interruptibly(ready(Ok::<_, anyhow::Error>(42)), &cancellation).await;
         let mut reporter = CleanupReporter::default();
 
         assert_eq!(resolve_interruptible(result, &mut reporter)?, Some(42));
@@ -806,7 +835,7 @@ mod watch_tests {
         // Returns () — the important behavior is that it does NOT propagate the
         // underlying `report_cycle` Err that `tryke test` relies on for exit code.
         run_watch_cycle(&mut reporter, tests, &[], &pool, None, DistMode::Test, None).await;
-        pool.shutdown();
+        pool.shutdown().await.expect("shut down worker pool");
         Ok(())
     }
 
@@ -864,7 +893,7 @@ mod watch_tests {
             run_now,
         )
         .await;
-        pool.shutdown();
+        pool.shutdown().await.expect("shut down worker pool");
         Ok(reporter)
     }
 
@@ -906,8 +935,15 @@ mod watch_tests {
 
 #[cfg(test)]
 mod execution_tests {
-    use std::{io, path::PathBuf};
+    use std::{
+        io,
+        path::PathBuf,
+        sync::Arc,
+        time::{Duration, Instant},
+    };
 
+    use anyhow::Context as _;
+    use tokio::sync::Notify;
     use tryke_config::{Project, ProjectMetadata, TrykeOptions};
     use tryke_discovery::{Discoverer, DiscoveryOptions};
     use tryke_reporter::{
@@ -916,6 +952,28 @@ mod execution_tests {
     use tryke_testing::{TestProject, python_bin as test_python_bin};
 
     use super::*;
+
+    struct CancellationReporter {
+        started: Arc<Notify>,
+        run_completes: usize,
+        cleanup_calls: usize,
+    }
+
+    impl Reporter for CancellationReporter {
+        fn on_run_start(&mut self, _tests: &[tryke_types::TestItem]) {
+            self.started.notify_one();
+        }
+
+        fn on_test_complete(&mut self, _result: &tryke_types::TestResult) {}
+
+        fn on_run_complete(&mut self, _summary: &RunSummary) {
+            self.run_completes += 1;
+        }
+
+        fn cleanup(&mut self) {
+            self.cleanup_calls += 1;
+        }
+    }
 
     fn configured_project(root: &std::path::Path) -> Project {
         let mut metadata = ProjectMetadata::new(root);
@@ -960,6 +1018,7 @@ mod execution_tests {
         let fixture = TestProject::new()?;
         let project = configured_project(fixture.root());
         let tests = discover_project(&project, DiscoveryOptions::default());
+        let cancellation = CancellationToken::new();
         let _ = run_tests(
             reporter,
             &project,
@@ -971,6 +1030,7 @@ mod execution_tests {
             DistMode::Test,
             None,
             None,
+            &cancellation,
         )
         .await;
         Ok(())
@@ -1040,7 +1100,7 @@ mod execution_tests {
                 .await
                 .is_ok()
         );
-        pool.shutdown();
+        pool.shutdown().await.expect("shut down worker pool");
         Ok(())
     }
 
@@ -1064,7 +1124,7 @@ mod execution_tests {
                 .await
                 .is_ok()
         );
-        pool.shutdown();
+        pool.shutdown().await.expect("shut down worker pool");
         Ok(())
     }
 
@@ -1081,6 +1141,7 @@ mod execution_tests {
                 ..DiscoveryOptions::default()
             },
         );
+        let cancellation = CancellationToken::new();
         assert!(
             run_tests(
                 &mut reporter,
@@ -1092,10 +1153,63 @@ mod execution_tests {
                 1,
                 DistMode::Test,
                 None,
-                None
+                None,
+                &cancellation,
             )
             .await
             .is_ok()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_active_test_and_awaits_shutdown() -> anyhow::Result<()> {
+        let fixture = TestProject::with_files([(
+            "test_sleep.py",
+            "import time\nfrom tryke import test\n\n@test\ndef test_sleep():\n    time.sleep(30)\n",
+        )])?;
+        let project = configured_project(fixture.root());
+        let mut discoverer = Discoverer::new(&project);
+        let tests = discoverer.rediscover();
+        let hooks = discoverer.hooks();
+
+        let started = Arc::new(Notify::new());
+        let mut reporter = CancellationReporter {
+            started: Arc::clone(&started),
+            run_completes: 0,
+            cleanup_calls: 0,
+        };
+        let cancellation = CancellationToken::new();
+        let cancel = cancellation.clone();
+        let cancel_task = tokio::spawn(async move {
+            started.notified().await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            cancel.cancel();
+        });
+
+        let start = Instant::now();
+        let result = run_tests(
+            &mut reporter,
+            &project,
+            LevelFilter::Off,
+            tests,
+            &hooks,
+            None,
+            1,
+            DistMode::Test,
+            None,
+            None,
+            &cancellation,
+        )
+        .await;
+        cancel_task.await.context("Join cancellation task")?;
+
+        assert!(resolve_interruptible(result, &mut reporter)?.is_none());
+        assert_eq!(reporter.cleanup_calls, 1);
+        assert_eq!(reporter.run_completes, 0);
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "Cancellation should not wait for the sleeping Python test",
         );
         Ok(())
     }
@@ -1160,7 +1274,7 @@ def test_failing():
             );
         }
 
-        pool.shutdown();
+        pool.shutdown().await.expect("shut down worker pool");
         Ok(())
     }
 
@@ -1202,7 +1316,7 @@ def test_failing():
             result.is_ok(),
             "expected Ok when all tests pass, got {result:?}"
         );
-        pool.shutdown();
+        pool.shutdown().await.expect("shut down worker pool");
         Ok(())
     }
 
@@ -1243,7 +1357,7 @@ def test_failing():
         .expect("report_cycle should not error on test failures");
         assert_eq!(summary.failed, 1, "expected one failed test");
         assert_eq!(summary.passed, 0);
-        pool.shutdown();
+        pool.shutdown().await.expect("shut down worker pool");
         Ok(())
     }
 }

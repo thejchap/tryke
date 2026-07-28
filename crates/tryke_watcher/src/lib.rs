@@ -62,7 +62,7 @@ impl ChangeQueue {
             paths.dedup();
             let paths = self.change_filter.filter(&paths);
             if paths.is_empty() {
-                debug!("file watcher: change batch had no meaningful changes");
+                debug!("File watcher: change batch had no meaningful changes");
                 continue;
             }
             return Ok(Some(FileChangeBatch { paths }));

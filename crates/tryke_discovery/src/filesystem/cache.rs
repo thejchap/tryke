@@ -196,12 +196,12 @@ impl DiskCache {
         let entries = match Self::try_load(&path) {
             Ok(entries) => entries,
             Err(err) => {
-                trace!("discovery cache load failed ({err}): starting empty");
+                trace!("Discovery cache load failed ({err}): starting empty");
                 HashMap::new()
             }
         };
         debug!(
-            "discovery cache loaded {} entries from {}",
+            "Discovery cache loaded {} entries from {}",
             entries.len(),
             path.display()
         );
@@ -218,7 +218,7 @@ impl DiskCache {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         if file.version != CACHE_VERSION {
             debug!(
-                "discovery cache version mismatch ({} vs {}): discarding",
+                "Discovery cache version mismatch ({} vs {}): discarding",
                 file.version, CACHE_VERSION
             );
             return Ok(HashMap::new());
@@ -283,7 +283,7 @@ impl DiskCache {
         fs::write(&tmp_path, &bytes)?;
         fs::rename(&tmp_path, path)?;
         debug!(
-            "discovery cache saved {} entries to {}",
+            "Discovery cache saved {} entries to {}",
             self.entries.len(),
             path.display()
         );

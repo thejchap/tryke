@@ -41,10 +41,11 @@ just trusts the incoming list and does not re-parse source.
 4. After every test in a module has run, the runner sends
    `finalize_hooks` and the executor runs `per="scope"` teardown.
 5. In watch/server mode, file changes do not reach the worker over the
-   wire — the runner instead kills this subprocess and respawns it,
-   replaying `register_hooks` on the fresh process. `importlib.reload`
-   is not used; a clean interpreter is the only reliable way to drop
-   classes and closures captured under the old definitions.
+   wire — the runner instead kills this subprocess and respawns it.
+   Each work unit installs its current hook metadata before execution,
+   and only that active unit's metadata is replayed after a crash.
+   `importlib.reload` is not used; a clean interpreter is the only
+   reliable way to drop classes and closures captured under old definitions.
 """
 
 from __future__ import annotations
@@ -306,8 +307,8 @@ class Worker:
 
         Any previously-cached :class:`HookExecutor` for this module is
         dropped so the next test rebuilds fixtures from the fresh
-        metadata — this matters when the runner re-registers the same
-        module (e.g. after a worker respawn during watch/server mode).
+        metadata — this matters when consecutive work units carry different
+        metadata for the same module.
         """
         if not isinstance(hooks, list):
             return
@@ -402,21 +403,19 @@ class Worker:
 
 
 def _configure_logging_from_env() -> None:
-    """Opt-in worker logging via ``TRYKE_LOG``.
+    """Configure worker logging from the resolved ``TRYKE_LOG`` level.
 
-    Off by default so normal test runs don't emit anything on stderr.
-    The rust runner sets ``TRYKE_LOG=<level>`` on the worker env when
-    ``-v`` (or ``TRYKE_LOG``) asks for cross-language verbosity, so
-    users typically don't set this directly. ``-q``/quiet does not
-    light up workers — workers stay silent unless the user explicitly
-    asked for more verbosity than the rust default ``warn``.
+    The Rust runner always sets ``TRYKE_LOG=<level>`` on the worker
+    environment. A directly invoked worker remains off when the variable
+    is absent, and ``OFF`` explicitly disables logging.
 
-    Accepts ``DEBUG`` / ``INFO`` / ``WARN`` / ``ERROR`` / ``TRACE``.
+    Accepts ``OFF`` / ``ERROR`` / ``WARN`` / ``INFO`` / ``DEBUG`` /
+    ``TRACE``.
     Output goes to stderr so it never contaminates the JSON-RPC stream
     on stdout.
     """
     level_name = os.environ.get("TRYKE_LOG", "").strip().upper()
-    if not level_name:
+    if not level_name or level_name == "OFF":
         return
     # Map TRACE to DEBUG since stdlib logging has no TRACE level.
     if level_name == "TRACE":
@@ -435,7 +434,7 @@ def _configure_logging_from_env() -> None:
 
 def main() -> None:
     _configure_logging_from_env()
-    _log.debug("worker main: starting (pid=%d)", os.getpid())
+    _log.debug("Worker main: starting (pid=%d)", os.getpid())
     Worker(sys.stdin, sys.stdout).run()
 
 

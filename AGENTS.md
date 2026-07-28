@@ -15,11 +15,10 @@ uv run cargo run -- test --reporter llm
 
 ## logging
 
-A single knob (`-v` / `-q` flags or `TRYKE_LOG` env) drives both rust
-and python verbosity. `RUST_LOG` is honored as a power-user override
-for the rust side only. Default is `warn` on rust, off for workers
-(no chatter unless asked). See `docs/guides/configuration.md` for the
-full precedence chain.
+A single knob (`-v` / `-q` flags or `TRYKE_LOG` env) drives both Rust
+and Python verbosity. `RUST_LOG` is honored as a power-user override
+for the Rust side only. The default is `warn` everywhere. See
+`docs/guides/configuration.md` for the full precedence chain.
 
 ## running rust tests
 

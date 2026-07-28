@@ -3,12 +3,13 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use log::{LevelFilter, debug, trace};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 use tryke_types::{TestOutcome, TestResult};
 
 use crate::protocol::RegisterHooksParams;
 use crate::schedule::WorkUnit;
-pub use crate::worker_process::WorkerProcess;
+use crate::worker_process::WorkerProcess;
 
 const WORKER_SPAWN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -32,7 +33,7 @@ pub(crate) enum WorkerMsg {
     Unit {
         unit: WorkUnit,
         result_tx: mpsc::UnboundedSender<TestResult>,
-        cancel_rx: watch::Receiver<bool>,
+        cancel: CancellationToken,
     },
 }
 
@@ -290,16 +291,24 @@ impl Worker {
         self.reset_process().await;
     }
 
+    /// Claim work units until the pool shuts down or its channels close.
+    ///
+    /// `async_channel::Receiver::recv` is polled inside `select!` and is
+    /// therefore dropped whenever the shutdown or control branch wins. That is
+    /// safe with async-channel 2.x — a dropped `Recv` re-notifies another
+    /// listener rather than swallowing the unit — but unlike
+    /// `tokio::sync::mpsc` the crate does not document the guarantee, so a
+    /// channel swap here needs to re-check it.
     pub(crate) async fn run(
         mut self,
         work_rx: async_channel::Receiver<WorkerMsg>,
         mut ctrl_rx: mpsc::UnboundedReceiver<WorkerCtrl>,
-        mut shutdown_rx: watch::Receiver<bool>,
+        shutdown: CancellationToken,
     ) {
         'worker: loop {
             tokio::select! {
                 biased;
-                () = wait_for_signal(&mut shutdown_rx) => break,
+                () = shutdown.cancelled() => break,
                 ctrl = ctrl_rx.recv() => {
                     let Some(ctrl) = ctrl else { break };
                     self.handle_control(ctrl).await;
@@ -309,9 +318,9 @@ impl Worker {
                         Ok(WorkerMsg::Unit {
                             unit,
                             result_tx,
-                            mut cancel_rx,
+                            cancel,
                         }) => {
-                            if *cancel_rx.borrow() {
+                            if cancel.is_cancelled() {
                                 continue;
                             }
 
@@ -322,15 +331,18 @@ impl Worker {
 
                                 tokio::select! {
                                     biased;
-                                    () = wait_for_signal(&mut shutdown_rx) => Some(true),
-                                    () = wait_for_signal(&mut cancel_rx) => Some(false),
+                                    () = shutdown.cancelled() => Some(true),
+                                    () = cancel.cancelled() => Some(false),
                                     () = &mut unit_future => None,
                                 }
                             };
 
-                            if let Some(shutdown) = interrupted_by_shutdown {
+                            if let Some(shutting_down) = interrupted_by_shutdown {
+                                // The interrupted unit left an RPC half-written
+                                // on the interpreter's stdin, so the process is
+                                // no longer usable — drop it either way.
                                 self.reset_process().await;
-                                if shutdown {
+                                if shutting_down {
                                     break 'worker;
                                 }
                             }
@@ -342,16 +354,5 @@ impl Worker {
         }
 
         self.shutdown().await;
-    }
-}
-
-async fn wait_for_signal(signal_rx: &mut watch::Receiver<bool>) {
-    if *signal_rx.borrow() {
-        return;
-    }
-    while signal_rx.changed().await.is_ok() {
-        if *signal_rx.borrow_and_update() {
-            return;
-        }
     }
 }

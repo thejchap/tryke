@@ -34,10 +34,13 @@ impl LogConfig {
     }
 
     pub(crate) fn init_rust_logging(self) {
-        env_logger::Builder::from_env(
+        // `try_init` rather than `init`: installing a global logger twice is a
+        // benign no-op for us (only `try_run` calls this), and a panic here
+        // would take down the process before any command has run.
+        let _ = env_logger::Builder::from_env(
             env_logger::Env::default().default_filter_or(self.level.as_str().to_ascii_lowercase()),
         )
-        .init();
+        .try_init();
     }
 
     pub(crate) fn level(self) -> LevelFilter {

@@ -402,7 +402,12 @@ async fn execute_run(
     pool: &WorkerPool,
 ) -> anyhow::Result<(String, RunSummary)> {
     let run_id = run_params.run_id.clone();
-    pool.restart_workers().await;
+    // Every server run must execute against current source. A worker that
+    // cannot be restarted is still holding the previous interpreter, so fail
+    // the run rather than reporting stale results as fresh ones.
+    pool.restart_workers()
+        .await
+        .context("Failed to restart workers before run")?;
     let discovery_start = Instant::now();
     let (all_tests, hooks) = {
         let guard = discoverer.lock().await;

@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::Result;
 use console::{Key, Term};
-use log::{LevelFilter, debug};
+use log::{LevelFilter, debug, warn};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tryke_config::{Project, ProjectMetadata};
@@ -500,7 +500,18 @@ async fn run_watch_cycle(
     dist: DistMode,
     discovery_duration: Option<Duration>,
 ) {
-    pool.restart_workers().await;
+    // A worker that misses the restart deadline is still running the previous
+    // interpreter. Skipping the cycle costs the user a re-save; running it
+    // would report results from stale code as if they were current.
+    if let Err(error) = pool.restart_workers().await {
+        warn!("Watch: {error:#}");
+        reporter.on_watch_idle(&WatchIdleInfo {
+            hint: "Worker restart failed — skipped this run. Waiting for file changes...",
+            start_time: None,
+            discovery_duration: None,
+        });
+        return;
+    }
 
     if let Err(e) = report_cycle(
         reporter,

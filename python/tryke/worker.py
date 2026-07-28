@@ -332,7 +332,7 @@ class Worker:
         self._hook_metadata[module_name] = typed
         # Invalidate any cached executor for this module.
         self._executors.pop(module_name, None)
-        _log.debug("Register hooks: module=%s hook_count=%d", module_name, len(hooks))
+        _log.debug("register_hooks: module=%s hook_count=%d", module_name, len(hooks))
 
     def _finalize_hooks(self, module_name: str) -> None:
         """Run scope-level teardown for a module's `per="scope"` fixtures."""

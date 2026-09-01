@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: rustup show
-      - uses: Swatinem/rust-cache@v2.8.2
+      - uses: Swatinem/rust-cache@v2.9.2
       - run: cargo fmt --all -- --check
 
   clippy:
@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: rustup show
-      - uses: Swatinem/rust-cache@v2.8.2
+      - uses: Swatinem/rust-cache@v2.9.2
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   cli-docs:
@@ -39,7 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: rustup show
-      - uses: Swatinem/rust-cache@v2.8.2
+      - uses: Swatinem/rust-cache@v2.9.2
       - run: cargo run -p tryke_dev --bin generate-cli-docs -- --check
 
   ruff:
@@ -89,7 +89,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: uv sync
       - run: rustup show
-      - uses: Swatinem/rust-cache@v2.8.2
+      - uses: Swatinem/rust-cache@v2.9.2
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest

@@ -8,7 +8,7 @@ use tryke_discovery::Discoverer;
 use tryke_runner::WorkerPool;
 use tryke_watcher::FileWatcher;
 
-use crate::handler::{ConnectionHandler, RunDispatcher, apply_change};
+use crate::handler::{ConnectionHandler, RunDispatcher, apply_change, with_discoverer};
 
 enum SessionExit {
     Cancelled,
@@ -54,18 +54,13 @@ impl Server {
 
         // Initialize the discoverer and populate its import graph and test cache.
         let discoverer = Arc::new(Mutex::new(discoverer));
-        discoverer.lock().await.rediscover();
+        if let Err(error) = with_discoverer(&discoverer, Discoverer::rediscover).await {
+            return shutdown_after_startup_error(worker_pool, error).await;
+        }
 
         let watcher = match FileWatcher::spawn(&root, &excludes) {
             Ok(watcher) => watcher,
-            Err(error) => {
-                return match worker_pool.shutdown().await {
-                    Ok(()) => Err(error),
-                    Err(shutdown_error) => Err(error.context(format!(
-                        "Worker pool shutdown also failed: {shutdown_error:#}"
-                    ))),
-                };
-            }
+            Err(error) => return shutdown_after_startup_error(worker_pool, error).await,
         };
         let watcher_task = tokio::spawn(watch_files(
             watcher,
@@ -153,6 +148,20 @@ impl Server {
                 Err(error.context(format!("File watcher also failed: {watcher_error:#}")))
             }
         }
+    }
+}
+
+/// Shuts down the worker pool after a startup failure, keeping `error` as the
+/// primary failure.
+async fn shutdown_after_startup_error(
+    worker_pool: WorkerPool,
+    error: anyhow::Error,
+) -> anyhow::Result<()> {
+    match worker_pool.shutdown().await {
+        Ok(()) => Err(error),
+        Err(shutdown_error) => Err(error.context(format!(
+            "Worker pool shutdown also failed: {shutdown_error:#}"
+        ))),
     }
 }
 

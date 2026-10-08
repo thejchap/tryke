@@ -8,6 +8,7 @@ use anyhow::{Result, anyhow};
 use log::{debug, trace};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio_util::task::AbortOnDropHandle;
 use tryke_types::{TestItem, TestResult, convert_wire_result};
 
 use crate::protocol::{
@@ -33,7 +34,9 @@ pub struct WorkerProcess {
     /// the moment of a worker failure end up in `stderr_buf` before we
     /// snapshot it — without this, a worker that dies during startup
     /// can lose its python traceback to a race with the RPC error path.
-    stderr_drainer: Option<tokio::task::JoinHandle<()>>,
+    /// Dropping the handle aborts the task, so the drainer never outlives
+    /// the worker.
+    stderr_drainer: Option<AbortOnDropHandle<()>>,
     next_id: u64,
 }
 
@@ -46,9 +49,9 @@ impl WorkerProcess {
     /// logging.
     ///
     /// # Errors
-    /// Returns an error if the Python process cannot be spawned, if its stdio
-    /// pipes cannot be captured, or if the stderr drainer cannot be started.
-    pub fn spawn(
+    /// Returns an error if the Python process cannot be spawned or if its
+    /// stdio pipes cannot be captured.
+    pub async fn spawn(
         python_bin: &str,
         python_path: &[&Path],
         root: &Path,
@@ -56,7 +59,7 @@ impl WorkerProcess {
     ) -> Result<Self> {
         debug!("Spawning worker: {python_bin} -m tryke.worker (log={log_level})");
 
-        let pythonpath = build_pythonpath(python_path);
+        let pythonpath = build_pythonpath(python_path).await;
         let mut command = Command::new(python_bin);
 
         command
@@ -66,7 +69,10 @@ impl WorkerProcess {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .env("TRYKE_LOG", worker_log_env_value(log_level));
+            .env("TRYKE_LOG", worker_log_env_value(log_level))
+            // The child is killed whenever this process handle is dropped,
+            // including on respawn paths that discard a failed worker.
+            .kill_on_drop(true);
 
         let mut child = command.spawn()?;
 
@@ -84,19 +90,7 @@ impl WorkerProcess {
         // as "tryke hangs at finalize_hooks". Spawn a drainer that
         // keeps the pipe empty for the worker's lifetime.
         let stderr_buf = Arc::new(Mutex::new(VecDeque::<u8>::new()));
-        let stderr_drainer = match spawn_stderr_drainer(stderr, Arc::clone(&stderr_buf)) {
-            Ok(handle) => handle,
-            Err(err) => {
-                if let Err(kill_err) = child.start_kill() {
-                    debug!(
-                        "Failed to kill worker after stderr drainer setup error (pid {:?}): \
-                         {kill_err}",
-                        child.id()
-                    );
-                }
-                return Err(err);
-            }
-        };
+        let stderr_drainer = spawn_stderr_drainer(stderr, Arc::clone(&stderr_buf));
 
         Ok(Self {
             child,
@@ -284,6 +278,7 @@ impl WorkerProcess {
         // process that has already exited.
         let _ = self.child.start_kill();
         if let Some(handle) = self.stderr_drainer.take() {
+            // A timeout drops the handle, which aborts the drainer.
             let _ = tokio::time::timeout(Duration::from_millis(500), handle).await;
         }
         let bytes: Vec<u8> = {
@@ -299,45 +294,22 @@ impl WorkerProcess {
     pub async fn shutdown(&mut self) {
         let _ = self.child.kill().await;
         // Killing the child closes stderr; the drainer will see EOF and
-        // exit on its own — but `abort()` is the explicit, immediate
-        // signal that we're done with it, and prevents a leftover task
-        // from briefly holding the stderr FD + `stderr_buf` Arc past
-        // the worker's lifetime.
-        if let Some(handle) = self.stderr_drainer.take() {
-            handle.abort();
-        }
-    }
-}
-
-impl Drop for WorkerProcess {
-    fn drop(&mut self) {
-        // Safety net: ensure the child process is killed when the worker is
-        // dropped (e.g. on the error-respawn path in worker.rs). start_kill() is
-        // the synchronous variant — safe to call on already-dead processes.
-        let _ = self.child.start_kill();
-        // Dropping a Tokio JoinHandle detaches the task, so abort it
-        // explicitly to avoid an orphan drainer outliving the worker on
-        // respawn paths (the drainer holds stderr_buf + the stderr FD).
-        if let Some(handle) = self.stderr_drainer.take() {
-            handle.abort();
-        }
+        // exit on its own — but dropping its abort-on-drop handle is the
+        // explicit, immediate signal that we're done with it, and prevents
+        // a leftover task from briefly holding the stderr FD + `stderr_buf`
+        // Arc past the worker's lifetime.
+        drop(self.stderr_drainer.take());
     }
 }
 
 /// Spawn a tokio task that continuously reads `stderr` into `buf` until
 /// EOF or a read error, capping the buffer at `STDERR_RETAIN_BYTES`.
-///
-/// Returns an error if no Tokio runtime is currently entered, rather than
-/// panicking the way `tokio::spawn` would. This keeps the synchronous
-/// `WorkerProcess::spawn` API safe to call from any context — callers in
-/// non-async code receive a structured error instead of a panic.
+/// The task is aborted when the returned handle is dropped.
 fn spawn_stderr_drainer(
     stderr: tokio::process::ChildStderr,
     buf: Arc<Mutex<VecDeque<u8>>>,
-) -> Result<tokio::task::JoinHandle<()>> {
-    let handle = tokio::runtime::Handle::try_current()
-        .map_err(|e| anyhow!("WorkerProcess::spawn requires an active tokio runtime: {e}"))?;
-    Ok(handle.spawn(async move {
+) -> AbortOnDropHandle<()> {
+    AbortOnDropHandle::new(tokio::spawn(async move {
         let mut reader = stderr;
         let mut chunk = [0u8; 8192];
         loop {
@@ -382,23 +354,21 @@ fn worker_log_env_value(log_level: log::LevelFilter) -> String {
     log_level.as_str().to_ascii_lowercase()
 }
 
-fn build_pythonpath(extra: &[&Path]) -> String {
+async fn build_pythonpath(extra: &[&Path]) -> String {
     let existing = std::env::var("PYTHONPATH").unwrap_or_default();
-    let mut parts: Vec<String> = extra
-        .iter()
-        .map(|p| {
-            let s = p
-                .canonicalize()
-                .unwrap_or_else(|_| p.to_path_buf())
-                .to_string_lossy()
-                .into_owned();
-            // std::fs::canonicalize on windows produces \\?\ extended-length
-            // paths that python doesn't understand
-            #[cfg(windows)]
-            let s = s.strip_prefix(r"\\?\").unwrap_or(&s).to_string();
-            s
-        })
-        .collect();
+    let mut parts: Vec<String> = Vec::with_capacity(extra.len() + 1);
+    for p in extra {
+        let s = tokio::fs::canonicalize(p)
+            .await
+            .unwrap_or_else(|_| p.to_path_buf())
+            .to_string_lossy()
+            .into_owned();
+        // std::fs::canonicalize on windows produces \\?\ extended-length
+        // paths that python doesn't understand
+        #[cfg(windows)]
+        let s = s.strip_prefix(r"\\?\").unwrap_or(&s).to_string();
+        parts.push(s);
+    }
     if !existing.is_empty() {
         parts.push(existing);
     }
@@ -490,15 +460,33 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn build_pythonpath_joins_paths() {
-        let dir_a = tempfile::tempdir().unwrap();
-        let dir_b = tempfile::tempdir().unwrap();
-        let a = build_pythonpath(&[dir_a.path()]);
-        let b = build_pythonpath(&[dir_b.path()]);
-        let result = build_pythonpath(&[dir_a.path(), dir_b.path()]);
+    #[tokio::test]
+    async fn build_pythonpath_canonicalizes_inputs_and_appends_inherited_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let package = dir.path().join("pkg");
+        std::fs::create_dir(&package).unwrap();
+        let indirect = package.join("..").join("pkg");
+        let missing = dir.path().join("missing");
+
+        let result = build_pythonpath(&[&indirect, &missing]).await;
+
+        let canonical = std::fs::canonicalize(&package)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        #[cfg(windows)]
+        let canonical = canonical
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&canonical)
+            .to_string();
+        let mut expected = vec![canonical, missing.to_string_lossy().into_owned()];
+        if let Ok(inherited) = std::env::var("PYTHONPATH")
+            && !inherited.is_empty()
+        {
+            expected.push(inherited);
+        }
         let sep = if cfg!(windows) { ";" } else { ":" };
-        assert_eq!(result, format!("{a}{sep}{b}"));
+        assert_eq!(result, expected.join(sep));
     }
 
     #[test]
@@ -755,27 +743,44 @@ mod tests {
 
     #[tokio::test]
     async fn drop_kills_child_process() {
-        let mut child = tokio::process::Command::new("sleep")
-            .arg("60")
-            .spawn()
-            .expect("failed to spawn sleep");
-        let pid = child.id().expect("missing pid");
+        let fixture = tryke_testing::TestProject::new().expect("create test project");
+        let python_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python");
+        let mut process = WorkerProcess::spawn(
+            &tryke_testing::python_bin(),
+            &[fixture.root(), &python_dir],
+            fixture.root(),
+            log::LevelFilter::Off,
+        )
+        .await
+        .expect("spawn worker");
+        process.ping().await.expect("worker answers ping");
+        #[cfg(unix)]
+        let pid = process.child.id().expect("missing pid").to_string();
+        let stderr_buf = Arc::downgrade(&process.stderr_buf);
 
-        // Wrap in a WorkerProcess-like drop: start_kill then drop
-        let _ = child.start_kill();
-        drop(child);
+        drop(process);
 
-        // Give the OS a moment to reap the process
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // On Unix, sending signal 0 checks if the process exists
-        let status = std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .status();
-        assert!(
-            status.is_ok_and(|s| !s.success()),
-            "child process {pid} should be dead after start_kill + drop"
-        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                // The aborted drainer task is the only other owner of the
+                // stderr buffer.
+                let drainer_released = stderr_buf.strong_count() == 0;
+                // On Unix, sending signal 0 checks if the process exists.
+                #[cfg(unix)]
+                let child_gone = std::process::Command::new("kill")
+                    .args(["-0", &pid])
+                    .status()
+                    .is_ok_and(|status| !status.success());
+                #[cfg(not(unix))]
+                let child_gone = true;
+                if drainer_released && child_gone {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dropped worker should kill its child and abort its drainer");
     }
 
     #[test]
@@ -847,8 +852,7 @@ mod tests {
 
         let stderr = child.stderr.take().expect("no stderr");
         let stderr_buf: Arc<Mutex<VecDeque<u8>>> = Arc::new(Mutex::new(VecDeque::new()));
-        spawn_stderr_drainer(stderr, Arc::clone(&stderr_buf))
-            .expect("drainer requires tokio runtime");
+        let _drainer = spawn_stderr_drainer(stderr, Arc::clone(&stderr_buf));
 
         let mut stdout = BufReader::new(child.stdout.take().expect("no stdout"));
         let mut line = String::new();

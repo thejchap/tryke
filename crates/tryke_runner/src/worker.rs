@@ -11,7 +11,7 @@ use crate::protocol::RegisterHooksParams;
 use crate::schedule::WorkUnit;
 use crate::worker_process::WorkerProcess;
 
-const WORKER_SPAWN_TIMEOUT: Duration = Duration::from_secs(5);
+const WORKER_UNAVAILABLE: &str = "Worker unavailable (spawn or hook replay failed)";
 
 /// One logical worker slot, which may replace its Python subprocess after a
 /// crash, cancellation, or restart.
@@ -38,8 +38,8 @@ pub(crate) enum WorkerMsg {
 }
 
 pub(crate) enum WorkerCtrl {
-    Ping(oneshot::Sender<()>),
-    Restart(oneshot::Sender<()>),
+    Ping(oneshot::Sender<Result<()>>),
+    Restart(oneshot::Sender<Result<()>>),
 }
 
 fn format_worker_failure(prefix: &str, error: &dyn std::fmt::Display, stderr: &str) -> String {
@@ -70,25 +70,12 @@ impl Worker {
     }
 
     async fn spawn_process(&self) -> Result<WorkerProcess> {
-        let python_bin = self.python_bin.clone();
-        let python_paths = self.python_path.clone();
-        let root = self.root.clone();
-        let log_level = self.log_level;
-        let spawn = tokio::task::spawn_blocking(move || {
-            let path_refs = python_paths
-                .iter()
-                .map(PathBuf::as_path)
-                .collect::<Vec<_>>();
-            WorkerProcess::spawn(&python_bin, &path_refs, &root, log_level)
-        });
-
-        match tokio::time::timeout(WORKER_SPAWN_TIMEOUT, spawn).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(error)) => Err(anyhow!("Worker spawn task failed: {error}")),
-            Err(_) => Err(anyhow!(
-                "Worker process spawn timed out after {WORKER_SPAWN_TIMEOUT:?}"
-            )),
-        }
+        let path_refs = self
+            .python_path
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        WorkerProcess::spawn(&self.python_bin, &path_refs, &self.root, self.log_level).await
     }
 
     /// Ensure a Python process is live, replaying only the active unit's hook
@@ -198,7 +185,7 @@ impl Worker {
             let message = self
                 .last_failure
                 .clone()
-                .unwrap_or_else(|| "Worker unavailable (spawn or hook replay failed)".into());
+                .unwrap_or_else(|| WORKER_UNAVAILABLE.into());
 
             let _ = result_tx.send(TestResult {
                 test,
@@ -266,17 +253,57 @@ impl Worker {
         }
     }
 
+    /// Ensure a Python process is live and has answered a `ping` with
+    /// `pong`. A process that fails the ping is discarded.
+    async fn warm_process(&mut self) -> Result<()> {
+        let Some(process) = self.ensure_process(&[]).await else {
+            let message = self
+                .last_failure
+                .clone()
+                .unwrap_or_else(|| WORKER_UNAVAILABLE.into());
+            return Err(anyhow!(message));
+        };
+
+        let Err(error) = process.ping().await else {
+            return Ok(());
+        };
+        let stderr_output = process.drain_stderr().await;
+        let message = format_worker_failure("Worker ping failed", &error, &stderr_output);
+
+        debug!("Worker: {message}");
+
+        self.last_failure = Some(message.clone());
+        self.process = None;
+
+        Err(anyhow!(message))
+    }
+
     async fn handle_control(&mut self, ctrl: WorkerCtrl) {
         match ctrl {
-            WorkerCtrl::Ping(ack_tx) => {
+            WorkerCtrl::Ping(mut ack_tx) => {
                 trace!("Worker: ping (pre-warm)");
-                let _ = self.ensure_process(&[]).await;
-                let _ = ack_tx.send(());
+                let warmed = {
+                    let warm = self.warm_process();
+                    tokio::select! {
+                        biased;
+                        () = ack_tx.closed() => None,
+                        result = warm => Some(result),
+                    }
+                };
+                if let Some(result) = warmed {
+                    let _ = ack_tx.send(result);
+                } else {
+                    // The pool stopped waiting mid-warm. An interrupted RPC
+                    // may leave a half-exchanged request on the interpreter's
+                    // pipes, so the process is not reusable.
+                    trace!("Worker: warm abandoned; discarding process");
+                    self.reset_process().await;
+                }
             }
             WorkerCtrl::Restart(ack_tx) => {
                 trace!("Worker: restart");
                 self.reset_process().await;
-                let _ = ack_tx.send(());
+                let _ = ack_tx.send(Ok(()));
             }
         }
     }
@@ -311,7 +338,13 @@ impl Worker {
                 () = shutdown.cancelled() => break,
                 ctrl = ctrl_rx.recv() => {
                     let Some(ctrl) = ctrl else { break };
-                    self.handle_control(ctrl).await;
+                    // A stalled warm must not hold the worker past shutdown;
+                    // the final `shutdown` below discards its process.
+                    tokio::select! {
+                        biased;
+                        () = shutdown.cancelled() => break 'worker,
+                        () = self.handle_control(ctrl) => {}
+                    }
                 }
                 msg = work_rx.recv() => {
                     match msg {
@@ -354,5 +387,189 @@ impl Worker {
         }
 
         self.shutdown().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::pin::Pin;
+
+    use tokio::sync::oneshot::error::TryRecvError;
+    use tryke_testing::{TestProject, python_bin, workspace_root};
+
+    use super::*;
+
+    const WATCHDOG: Duration = Duration::from_secs(30);
+
+    /// Interpreter startup hook that records the worker PID in
+    /// `worker-started`, then holds startup until `worker-release` exists.
+    /// The deadline keeps a broken test from wedging the interpreter forever.
+    const GATED_SITECUSTOMIZE: &str = "\
+import os, pathlib, time
+root = pathlib.Path(__file__).parent
+tmp = root / f'worker-started.{os.getpid()}'
+tmp.write_text(str(os.getpid()))
+os.replace(tmp, root / 'worker-started')
+deadline = time.monotonic() + 30
+while not (root / 'worker-release').exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+";
+
+    fn gated_project() -> TestProject {
+        TestProject::with_files([("sitecustomize.py", GATED_SITECUSTOMIZE)])
+            .expect("create gated test project")
+    }
+
+    fn test_worker(project: &TestProject) -> Worker {
+        Worker::new(
+            python_bin(),
+            vec![
+                project.root().to_path_buf(),
+                workspace_root().join("python"),
+            ],
+            project.root().to_path_buf(),
+            LevelFilter::Off,
+        )
+    }
+
+    fn started_pid(project: &TestProject) -> Option<u32> {
+        std::fs::read_to_string(project.root().join("worker-started"))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    }
+
+    fn release(project: &TestProject) {
+        std::fs::write(project.root().join("worker-release"), "").expect("release worker startup");
+    }
+
+    /// Drive `control` until the gated interpreter has started. Returns
+    /// `None` if `control` finished first or the watchdog expired.
+    async fn poll_until_started<F: Future<Output = ()>>(
+        control: &mut Pin<&mut F>,
+        project: &TestProject,
+    ) -> Option<u32> {
+        tokio::time::timeout(WATCHDOG, async {
+            loop {
+                tokio::select! {
+                    biased;
+                    () = control.as_mut() => return None,
+                    () = tokio::time::sleep(Duration::from_millis(10)) => {}
+                }
+                if let Some(pid) = started_pid(project) {
+                    return Some(pid);
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    async fn wait_for_marker(marker: &Path) -> bool {
+        tokio::time::timeout(WATCHDOG, async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    #[tokio::test]
+    async fn warm_acknowledgement_waits_for_ready_worker() {
+        let project = gated_project();
+        let mut worker = test_worker(&project);
+        let (ack_tx, mut ack_rx) = oneshot::channel();
+
+        let (started, pending_while_gated, finished) = {
+            let control = worker.handle_control(WorkerCtrl::Ping(ack_tx));
+            tokio::pin!(control);
+            let started = poll_until_started(&mut control, &project).await;
+            let pending_while_gated = matches!(ack_rx.try_recv(), Err(TryRecvError::Empty));
+            release(&project);
+            let finished = tokio::time::timeout(WATCHDOG, control).await.is_ok();
+            (started, pending_while_gated, finished)
+        };
+        let acknowledgement = ack_rx.await;
+        worker.shutdown().await;
+
+        assert!(started.is_some(), "gated worker should start");
+        assert!(pending_while_gated, "warm must not ack before pong");
+        assert!(finished, "warm should finish after release");
+        assert!(
+            matches!(acknowledgement, Ok(Ok(()))),
+            "got {acknowledgement:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_warm_discards_process() {
+        let project = gated_project();
+        let mut worker = test_worker(&project);
+        let (ack_tx, ack_rx) = oneshot::channel();
+
+        let (first_pid, cleaned_up) = {
+            let control = worker.handle_control(WorkerCtrl::Ping(ack_tx));
+            tokio::pin!(control);
+            let first_pid = poll_until_started(&mut control, &project).await;
+            drop(ack_rx);
+            // Startup is still gated, so completion here means cleanup ran.
+            let cleaned_up = tokio::time::timeout(WATCHDOG, control).await.is_ok();
+            (first_pid, cleaned_up)
+        };
+        let discarded = worker.process.is_none();
+
+        std::fs::remove_file(project.root().join("worker-started")).expect("clear start marker");
+        release(&project);
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let rewarmed =
+            tokio::time::timeout(WATCHDOG, worker.handle_control(WorkerCtrl::Ping(ack_tx)))
+                .await
+                .is_ok();
+        let acknowledgement = ack_rx.await;
+        let second_pid = started_pid(&project);
+        worker.shutdown().await;
+
+        assert!(first_pid.is_some(), "gated worker should start");
+        assert!(cleaned_up, "cancelled warm should finish its cleanup");
+        assert!(discarded, "interrupted interpreter must be discarded");
+        assert!(rewarmed, "second warm should finish");
+        assert!(
+            matches!(acknowledgement, Ok(Ok(()))),
+            "got {acknowledgement:?}"
+        );
+        assert!(second_pid.is_some(), "second warm should start a worker");
+        assert_ne!(first_pid, second_pid, "a new interpreter must be started");
+    }
+
+    #[tokio::test]
+    async fn shutdown_interrupts_worker_warming() {
+        let project = gated_project();
+        let worker = test_worker(&project);
+        let (_work_tx, work_rx) = async_channel::unbounded();
+        let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn(worker.run(work_rx, ctrl_rx, shutdown.clone()));
+        let (ack_tx, ack_rx) = oneshot::channel();
+
+        let sent = ctrl_tx.send(WorkerCtrl::Ping(ack_tx)).is_ok();
+        let started = wait_for_marker(&project.root().join("worker-started")).await;
+        shutdown.cancel();
+        let joined = tokio::time::timeout(WATCHDOG, task).await;
+        let acknowledgement = ack_rx.await;
+
+        assert!(sent, "worker should accept the ping");
+        assert!(started, "gated worker should start");
+        assert!(
+            matches!(joined, Ok(Ok(()))),
+            "worker should stop on its own: {joined:?}"
+        );
+        assert!(
+            acknowledgement.is_err(),
+            "an interrupted warm must not acknowledge readiness"
+        );
     }
 }

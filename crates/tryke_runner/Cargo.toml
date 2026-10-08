@@ -16,7 +16,7 @@ indexmap = "2"
 log = "0.4"
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["fs"] }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tryke_config = { workspace = true }

@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -20,6 +21,28 @@ use crate::worker::{Worker, WorkerCtrl, WorkerMsg};
 const WORKER_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
+#[derive(Clone, Copy)]
+enum WorkerControlOperation {
+    Restart,
+    Warm,
+}
+
+impl WorkerControlOperation {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Restart => "restart",
+            Self::Warm => "warm",
+        }
+    }
+
+    fn message(self, ack: oneshot::Sender<Result<()>>) -> WorkerCtrl {
+        match self {
+            Self::Restart => WorkerCtrl::Restart(ack),
+            Self::Warm => WorkerCtrl::Ping(ack),
+        }
+    }
+}
+
 pub struct WorkerPool {
     /// Sender channel for work units
     ///
@@ -38,9 +61,9 @@ pub struct WorkerPool {
     ///
     /// A `JoinSet` rather than `tokio_util`'s `TaskTracker`: the pool is a
     /// fixed-size set of tasks whose `JoinError`s we want to report, and
-    /// `JoinSet` also gives us `abort_all` for the `Drop` path. `TaskTracker`
-    /// discards task outcomes, which would turn a panicking worker into a
-    /// silently short run instead of a shutdown error.
+    /// dropping a `JoinSet` aborts its tasks. `TaskTracker` discards task
+    /// outcomes, which would turn a panicking worker into a silently short
+    /// run instead of a shutdown error.
     workers: JoinSet<()>,
 }
 
@@ -171,55 +194,74 @@ impl WorkerPool {
         }
     }
 
-    /// Send `build`'s control message to every worker, returning the indices
-    /// of workers that did not acknowledge before the shared deadline.
-    async fn fanout_ctrl_with_timeout(
-        &self,
-        build: fn(oneshot::Sender<()>) -> WorkerCtrl,
-        timeout: Duration,
-    ) -> Vec<usize> {
-        let mut pending = Vec::with_capacity(self.ctrl_txs.len());
-        for (index, ctrl_tx) in self.ctrl_txs.iter().enumerate() {
-            let (ack_tx, ack_rx) = oneshot::channel();
-            if ctrl_tx.send(build(ack_tx)).is_ok() {
-                pending.push((index, ack_rx));
-            }
-        }
-
-        // One deadline for the whole fan-out: the messages are already in
-        // flight, so awaiting the acks in sequence costs no extra wall time.
-        let deadline = tokio::time::Instant::now() + timeout;
-        let mut unacked = Vec::new();
-        for (index, ack_rx) in pending {
-            // A dropped ack sender means the worker task exited and killed its
-            // interpreter on the way out — nothing stale is left behind, so
-            // that is not a control failure. Only the deadline counts.
-            if tokio::time::timeout_at(deadline, ack_rx).await.is_err() {
-                unacked.push(index);
-            }
-        }
-        unacked
-    }
-
+    /// Send `operation`'s control message to every worker and collect every
+    /// acknowledgement against one shared deadline.
+    ///
     /// `timeout` is a parameter rather than a direct read of
     /// [`WORKER_CONTROL_TIMEOUT`] so the failure path stays testable without a
     /// five-second wall-clock wait.
     async fn fanout_ctrl(
         &self,
-        operation: &str,
-        build: fn(oneshot::Sender<()>) -> WorkerCtrl,
+        operation: WorkerControlOperation,
         timeout: Duration,
     ) -> Result<()> {
-        let unacked = self.fanout_ctrl_with_timeout(build, timeout).await;
-        if unacked.is_empty() {
-            return Ok(());
+        const DEPARTED_BEFORE_READY: &str = "worker task exited before readiness acknowledgement";
+
+        let mut pending = Vec::with_capacity(self.ctrl_txs.len());
+        let mut failures = Vec::new();
+        for (index, ctrl_tx) in self.ctrl_txs.iter().enumerate() {
+            let (ack_tx, ack_rx) = oneshot::channel();
+            if ctrl_tx.send(operation.message(ack_tx)).is_ok() {
+                pending.push((index, ack_rx));
+            } else if let WorkerControlOperation::Warm = operation {
+                failures.push(format!("worker {index}: {DEPARTED_BEFORE_READY}"));
+            }
         }
-        Err(anyhow!(
-            "worker control operation '{operation}' timed out after {timeout:?}; \
+
+        // One deadline for the whole fan-out: the messages are already in
+        // flight, so awaiting the acks in sequence costs no extra wall time.
+        // A timed-out receiver is dropped, which tells a still-running warm to
+        // abandon and discard its interpreter.
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut unacked = Vec::new();
+        for (index, ack_rx) in pending {
+            match tokio::time::timeout_at(deadline, ack_rx).await {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(error))) => failures.push(format!("worker {index}: {error:#}")),
+                // A dropped ack sender means the worker task exited and killed
+                // its interpreter on the way out. Nothing stale is left behind
+                // for a restart, but no ready interpreter exists for a warm.
+                Ok(Err(_)) => match operation {
+                    WorkerControlOperation::Restart => {}
+                    WorkerControlOperation::Warm => {
+                        failures.push(format!("worker {index}: {DEPARTED_BEFORE_READY}"));
+                    }
+                },
+                Err(_) => unacked.push(index),
+            }
+        }
+
+        let name = operation.name();
+        if unacked.is_empty() {
+            if failures.is_empty() {
+                return Ok(());
+            }
+            return Err(anyhow!(
+                "worker control operation '{name}' failed: {}",
+                failures.join("; ")
+            ));
+        }
+
+        let mut message = format!(
+            "worker control operation '{name}' timed out after {timeout:?}; \
              {}/{} workers did not acknowledge (workers {unacked:?})",
             unacked.len(),
             self.ctrl_txs.len(),
-        ))
+        );
+        if !failures.is_empty() {
+            let _ = write!(message, "; worker failures: {}", failures.join("; "));
+        }
+        Err(anyhow!(message))
     }
 
     /// Replace every Python subprocess with a clean, pre-warmed process.
@@ -235,7 +277,7 @@ impl WorkerPool {
     /// interpreter — so the caller must not present the next run's results as
     /// reflecting current source.
     pub async fn restart_workers(&self) -> Result<()> {
-        self.fanout_ctrl("restart", WorkerCtrl::Restart, WORKER_CONTROL_TIMEOUT)
+        self.fanout_ctrl(WorkerControlOperation::Restart, WORKER_CONTROL_TIMEOUT)
             .await?;
 
         // Warming is an optimization, not a correctness guarantee — see the
@@ -247,8 +289,9 @@ impl WorkerPool {
         Ok(())
     }
 
+    /// Start every worker's interpreter and wait for each to answer `ping`.
     async fn warm(&self) -> Result<()> {
-        self.fanout_ctrl("warm", WorkerCtrl::Ping, WORKER_CONTROL_TIMEOUT)
+        self.fanout_ctrl(WorkerControlOperation::Warm, WORKER_CONTROL_TIMEOUT)
             .await
     }
 
@@ -278,8 +321,8 @@ impl WorkerPool {
         if drained.is_err() {
             // Anything still alive is wedged (most likely in Python teardown).
             // `shutdown` aborts the remainder and awaits the aborts, so the
-            // child processes are killed by `WorkerProcess::drop` before we
-            // return rather than outliving the pool.
+            // kill-on-drop child processes are killed before we return rather
+            // than outliving the pool.
             let remaining = workers.len();
             workers.shutdown().await;
             failures.push(format!(
@@ -301,8 +344,8 @@ impl WorkerPool {
 
 impl Drop for WorkerPool {
     fn drop(&mut self) {
+        // Dropping `workers` aborts any task still running.
         self.shutdown.cancel();
-        self.workers.abort_all();
     }
 }
 
@@ -335,8 +378,8 @@ mod tests {
     /// control plane can be exercised without paying for interpreter startup.
     ///
     /// The returned receivers must be kept alive by the caller: dropping a
-    /// `ctrl_rx` closes its channel, which `fanout_ctrl_with_timeout` treats as
-    /// "worker already gone" rather than as a missed acknowledgement.
+    /// `ctrl_rx` closes its channel, which `fanout_ctrl` treats as "worker
+    /// already gone" rather than as a missed acknowledgement.
     fn control_only_pool(
         size: usize,
     ) -> (
@@ -367,14 +410,15 @@ mod tests {
     async fn fanout_ctrl_reports_every_worker_that_never_acks() {
         let (pool, _work_rx, _ctrl_rxs) = control_only_pool(3);
 
-        let unacked = pool
-            .fanout_ctrl_with_timeout(WorkerCtrl::Restart, Duration::from_millis(10))
-            .await;
+        let error = pool
+            .fanout_ctrl(WorkerControlOperation::Restart, Duration::from_millis(10))
+            .await
+            .expect_err("silent workers must fail the operation");
 
-        assert_eq!(
-            unacked,
-            vec![0, 1, 2],
-            "a silent worker must be identified, not just counted"
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("3/3 workers did not acknowledge (workers [0, 1, 2])"),
+            "a silent worker must be identified, not just counted: {message}"
         );
     }
 
@@ -386,26 +430,35 @@ mod tests {
         let (pool, _work_rx, ctrl_rxs) = control_only_pool(2);
         drop(ctrl_rxs);
 
-        let unacked = pool
-            .fanout_ctrl_with_timeout(WorkerCtrl::Restart, Duration::from_millis(10))
-            .await;
-
-        assert!(unacked.is_empty(), "got {unacked:?}");
+        pool.fanout_ctrl(WorkerControlOperation::Restart, Duration::from_millis(10))
+            .await
+            .expect("a departed worker holds no stale interpreter");
     }
 
     #[tokio::test]
-    async fn fanout_ctrl_error_names_the_operation_and_the_silent_workers() {
-        let (pool, _work_rx, _ctrl_rxs) = control_only_pool(2);
+    async fn warm_reports_python_spawn_failure() {
+        let project = TestProject::new().expect("create test project");
+        let missing_python = project.root().join("missing-python");
+        let python_path = [project.root().to_path_buf(), python_package_dir()];
+        let pool = WorkerPool::spawn_from_parts(
+            1,
+            &missing_python.to_string_lossy(),
+            project.root(),
+            Some(&python_path),
+            LevelFilter::Off,
+            false,
+        )
+        .await;
 
-        let error = pool
-            .fanout_ctrl("restart", WorkerCtrl::Restart, Duration::from_millis(10))
-            .await
-            .expect_err("silent workers must fail the operation");
+        let warmed = pool.warm().await;
+        pool.shutdown().await.expect("clean shutdown");
 
-        let message = format!("{error:#}");
-        assert!(message.contains("'restart'"), "{message}");
+        let message = format!(
+            "{:#}",
+            warmed.expect_err("a missing interpreter is not ready")
+        );
         assert!(
-            message.contains("2/2 workers did not acknowledge"),
+            message.contains("Failed to spawn Python worker"),
             "{message}"
         );
     }

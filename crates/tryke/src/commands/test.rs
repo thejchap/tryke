@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use console::{Key, Term};
 use log::{LevelFilter, debug, warn};
 use tokio_stream::StreamExt;
@@ -56,6 +56,20 @@ fn resolve_interruptible<T>(
             Err(error)
         }
     }
+}
+
+/// Runs a synchronous discovery operation on Tokio's blocking pool, then
+/// returns ownership of the discoverer with the operation's output.
+async fn with_discoverer<T: Send + 'static>(
+    mut discoverer: Discoverer,
+    operation: impl FnOnce(&mut Discoverer) -> T + Send + 'static,
+) -> Result<(Discoverer, T)> {
+    tokio::task::spawn_blocking(move || {
+        let output = operation(&mut discoverer);
+        (discoverer, output)
+    })
+    .await
+    .context("Discovery task failed")
 }
 
 pub(crate) async fn run_test_command(
@@ -531,20 +545,20 @@ async fn run_watch_cycle(
 
 async fn run_initial_cycle(
     reporter: &mut dyn Reporter,
-    discoverer: &mut Discoverer,
+    discoverer: Discoverer,
     test_filter: &TestFilter,
     pool: &WorkerPool,
     maxfail: Option<usize>,
     dist: DistMode,
     run_now: bool,
-) {
+) -> Result<Discoverer> {
     reporter.arm_clear();
 
     let disc_start = Instant::now();
-    let initial_tests = discoverer.rediscover();
+    let (discoverer, initial_tests) = with_discoverer(discoverer, Discoverer::rediscover).await?;
     let disc_dur = disc_start.elapsed();
 
-    emit_discovery_warnings(reporter, discoverer);
+    emit_discovery_warnings(reporter, &discoverer);
 
     if run_now {
         let tests = test_filter.apply(initial_tests);
@@ -560,6 +574,8 @@ async fn run_initial_cycle(
             discovery_duration: Some(disc_dur),
         });
     }
+
+    Ok(discoverer)
 }
 
 #[expect(
@@ -624,18 +640,16 @@ async fn run_watch_loop(
 ) -> Result<()> {
     let root = project.root();
     let excludes = &project.discovery().exclude;
-    let mut discoverer = Discoverer::new(project);
-
-    run_initial_cycle(
+    let mut discoverer = run_initial_cycle(
         reporter,
-        &mut discoverer,
+        Discoverer::new(project),
         test_filter,
         pool,
         maxfail,
         dist,
         run_now,
     )
-    .await;
+    .await?;
 
     let mut watcher = FileWatcher::spawn(root, excludes)?;
     let mut commands = spawn_key_listener();
@@ -655,8 +669,9 @@ async fn run_watch_loop(
                 watcher.discard_pending();
                 reporter.arm_clear();
                 let disc_start = Instant::now();
-                discoverer.rediscover();
-                let raw_tests = discoverer.tests();
+                let raw_tests;
+                (discoverer, raw_tests) =
+                    with_discoverer(discoverer, Discoverer::rediscover).await?;
                 let tests = test_filter.apply(raw_tests);
                 let hooks = discoverer.hooks();
                 let disc_dur = Some(disc_start.elapsed());
@@ -685,7 +700,11 @@ async fn run_watch_loop(
         reporter.arm_clear();
 
         let discovery_start = Instant::now();
-        let change_impact = discoverer.apply_changes(&paths);
+        let change_impact;
+        (discoverer, change_impact) = with_discoverer(discoverer, move |discoverer| {
+            discoverer.apply_changes(&paths)
+        })
+        .await?;
         let discovery_duration = Some(discovery_start.elapsed());
 
         if change_impact.paths.is_empty() {
@@ -762,6 +781,49 @@ mod interrupt_tests {
 
         assert_eq!(resolve_interruptible(result, &mut reporter)?, Some(42));
         assert_eq!(reporter.cleanup_calls, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_blocking_discovery() -> Result<()> {
+        let fixture = tryke_testing::TestProject::with_files([(
+            "test_a.py",
+            "from tryke import test\n\n@test\ndef test_a():\n    pass\n",
+        )])?;
+        let src_roots = fixture.project().src_roots();
+        let discoverer = Discoverer::from_parts(fixture.root(), src_roots, &[], None);
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (done_tx, mut done_rx) = tokio::sync::oneshot::channel();
+        let cancellation = CancellationToken::new();
+
+        let discovery = with_discoverer(discoverer, move |discoverer| {
+            let _ = entered_tx.send(());
+            let _ = release_rx.recv_timeout(Duration::from_secs(10));
+            let tests = discoverer.rediscover();
+            let _ = done_tx.send(());
+            tests
+        });
+        let (result, entered) = tokio::join!(run_interruptibly(discovery, &cancellation), async {
+            let entered = tokio::time::timeout(Duration::from_secs(10), entered_rx).await;
+            cancellation.cancel();
+            entered
+        });
+
+        let mut reporter = CleanupReporter::default();
+        let resolved = resolve_interruptible(result, &mut reporter);
+        let still_blocked = done_rx.try_recv().is_err();
+        let _ = release_tx.send(());
+        let completed = tokio::time::timeout(Duration::from_secs(10), done_rx).await;
+
+        assert!(matches!(entered, Ok(Ok(()))), "closure entry observed");
+        assert!(resolved?.is_none(), "discovery was interrupted");
+        assert_eq!(reporter.cleanup_calls, 1);
+        assert!(still_blocked, "interruption did not wait for discovery");
+        assert!(
+            matches!(completed, Ok(Ok(()))),
+            "blocking discovery finished"
+        );
         Ok(())
     }
 }
@@ -870,7 +932,7 @@ mod watch_tests {
             "from tryke import test, expect\n\n@test\ndef test_ok():\n    expect(1).to_equal(1)\n",
         )])?;
         let src_roots = fixture.project().src_roots();
-        let mut discoverer = Discoverer::from_parts(fixture.root(), src_roots, &[], None);
+        let discoverer = Discoverer::from_parts(fixture.root(), src_roots, &[], None);
         let test_filter = TestFilter::from_args(&[], None, None).expect("filter");
         let python_path = [fixture.root().to_path_buf(), python_dir];
         let pool = WorkerPool::spawn_from_parts(
@@ -883,9 +945,9 @@ mod watch_tests {
         )
         .await;
         let mut reporter = CountingReporter::default();
-        run_initial_cycle(
+        let result = run_initial_cycle(
             &mut reporter,
-            &mut discoverer,
+            discoverer,
             &test_filter,
             &pool,
             None,
@@ -894,7 +956,63 @@ mod watch_tests {
         )
         .await;
         pool.shutdown().await.expect("shut down worker pool");
+        result.map_err(io::Error::other)?;
         Ok(reporter)
+    }
+
+    fn test_names<'a>(tests: impl IntoIterator<Item = &'a tryke_types::TestItem>) -> Vec<&'a str> {
+        let mut names: Vec<_> = tests.into_iter().map(|test| test.name.as_str()).collect();
+        names.sort_unstable();
+        names
+    }
+
+    #[tokio::test]
+    async fn watch_discovery_preserves_state_across_changes() -> Result<()> {
+        let fixture = TestProject::with_files([
+            (
+                "test_a.py",
+                "from tryke import test\n\n@test\ndef test_a():\n    pass\n",
+            ),
+            (
+                "test_b.py",
+                "from tryke import fixture, test\n\n@fixture\ndef setup():\n    pass\n\n@test\ndef test_b():\n    pass\n",
+            ),
+        ])?;
+        let src_roots = fixture.project().src_roots();
+        let discoverer = Discoverer::from_parts(fixture.root(), src_roots, &[], None);
+
+        let (discoverer, initial) = with_discoverer(discoverer, Discoverer::rediscover).await?;
+        assert_eq!(test_names(&initial), ["test_a", "test_b"]);
+        let hooks_before = discoverer.hooks();
+        assert_eq!(
+            hooks_before
+                .iter()
+                .map(|hook| hook.name.as_str())
+                .collect::<Vec<_>>(),
+            ["setup"]
+        );
+        let cached_b = initial
+            .iter()
+            .find(|test| test.name == "test_b")
+            .cloned()
+            .expect("test_b discovered");
+
+        let changed = fixture.root().join("test_a.py");
+        std::fs::write(
+            &changed,
+            "from tryke import test\n\n@test\ndef test_a_renamed():\n    pass\n",
+        )?;
+        let (discoverer, impact) = with_discoverer(discoverer, move |discoverer| {
+            discoverer.apply_changes(&[changed])
+        })
+        .await?;
+
+        assert_eq!(test_names(&impact.affected_tests), ["test_a_renamed"]);
+        let all = discoverer.tests();
+        assert_eq!(test_names(&all), ["test_a_renamed", "test_b"]);
+        assert!(all.contains(&cached_b), "unchanged test stays cached");
+        assert_eq!(discoverer.hooks(), hooks_before);
+        Ok(())
     }
 
     #[tokio::test]

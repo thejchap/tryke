@@ -346,16 +346,35 @@ pub(crate) async fn send_notification<T: Serialize>(
         .map_err(|_| NotificationError::Closed { method })
 }
 
+/// Runs a synchronous discovery operation on Tokio's blocking pool.
+///
+/// The lock is acquired on the async side so waiting for it never occupies a
+/// blocking thread. The owned guard moves into the blocking task and is
+/// released when the operation finishes, before the caller sends anything.
+pub(crate) async fn with_discoverer<T: Send + 'static>(
+    discoverer: &Arc<Mutex<tryke_discovery::Discoverer>>,
+    operation: impl FnOnce(&mut tryke_discovery::Discoverer) -> T + Send + 'static,
+) -> anyhow::Result<T> {
+    let mut guard = Arc::clone(discoverer).lock_owned().await;
+    tokio::task::spawn_blocking(move || operation(&mut guard))
+        .await
+        .context("Discovery task failed")
+}
+
 pub(crate) async fn apply_change(
-    discoverer: &Mutex<tryke_discovery::Discoverer>,
+    discoverer: &Arc<Mutex<tryke_discovery::Discoverer>>,
     outbound_tx: &mpsc::Sender<Bytes>,
     paths: &[PathBuf],
-) -> Result<(), NotificationError> {
+) -> anyhow::Result<()> {
     if paths.is_empty() {
         return Ok(());
     }
 
-    let impact = discoverer.lock().await.apply_changes(paths);
+    let paths = paths.to_vec();
+    let impact = with_discoverer(discoverer, move |discoverer| {
+        discoverer.apply_changes(&paths)
+    })
+    .await?;
     if impact.paths.is_empty() {
         debug!("Apply_change: no eligible paths");
         return Ok(());
@@ -373,7 +392,8 @@ pub(crate) async fn apply_change(
             tests: impact.affected_tests,
         },
     )
-    .await
+    .await?;
+    Ok(())
 }
 
 fn select_tests(run_params: &RunParams, all_tests: Vec<TestItem>) -> Vec<TestItem> {
@@ -502,7 +522,7 @@ async fn execute_run(
 /// Returns an error if an outbound message cannot be serialized or queued.
 pub(crate) async fn handle_request(
     line: &str,
-    discoverer: &tokio::sync::Mutex<tryke_discovery::Discoverer>,
+    discoverer: &Arc<Mutex<tryke_discovery::Discoverer>>,
     outbound_tx: &mpsc::Sender<Bytes>,
     run_tx: &mpsc::Sender<RunRequest>,
 ) -> anyhow::Result<Option<Bytes>> {
@@ -519,7 +539,8 @@ pub(crate) async fn handle_request(
             // ignored rather than validated, so a malformed or absent
             // `params` can never drop the response and hang a client
             // that supplied an `id`.
-            let tests = discoverer.lock().await.rediscover();
+            let tests =
+                with_discoverer(discoverer, tryke_discovery::Discoverer::rediscover).await?;
             send_notification(
                 outbound_tx,
                 NotificationMethod::DiscoverComplete,
@@ -580,7 +601,7 @@ pub(crate) async fn handle_request(
 async fn handle_did_change(
     id: Option<Value>,
     params: Option<Value>,
-    discoverer: &tokio::sync::Mutex<tryke_discovery::Discoverer>,
+    discoverer: &Arc<Mutex<tryke_discovery::Discoverer>>,
     outbound_tx: &mpsc::Sender<Bytes>,
 ) -> anyhow::Result<Option<Bytes>> {
     let Some(params) = params else {
@@ -607,7 +628,7 @@ async fn handle_did_change(
         }
     };
     if dc.paths.is_empty() {
-        let tests = discoverer.lock().await.rediscover();
+        let tests = with_discoverer(discoverer, tryke_discovery::Discoverer::rediscover).await?;
         debug!(
             "Did_change: empty paths — full rediscover, {} tests",
             tests.len()
@@ -713,7 +734,7 @@ mod tests {
     /// response without constructing a full connection.
     async fn handle_request(
         line: &str,
-        discoverer: &Mutex<Discoverer>,
+        discoverer: &Arc<Mutex<Discoverer>>,
         outbound_tx: &mpsc::Sender<Bytes>,
         worker_pool: &WorkerPool,
         run_lock: &Mutex<()>,
@@ -734,6 +755,75 @@ mod tests {
         Ok(Some(
             Response::new(request.id, RunResponse { run_id, summary }).into_json_line()?,
         ))
+    }
+
+    fn make_discoverer(dir: &TestProject) -> Arc<Mutex<Discoverer>> {
+        let root = dir.root();
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        Arc::new(Mutex::new(Discoverer::from_parts(
+            root,
+            src_roots,
+            &[],
+            None,
+        )))
+    }
+
+    #[tokio::test]
+    async fn discovery_blocking_work_keeps_runtime_responsive() {
+        let dir = make_root();
+        fs::write(
+            dir.root().join("test_named.py"),
+            "@test\ndef test_named(): pass\n",
+        )
+        .expect("write test file");
+        let disc = make_discoverer(&dir);
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
+        // On this current-thread runtime, the release below can only be sent
+        // if the closure's wait does not occupy the runtime thread.
+        let discovery = tokio::spawn({
+            let disc = Arc::clone(&disc);
+            async move {
+                with_discoverer(&disc, move |discoverer| {
+                    let _ = entered_tx.send(());
+                    let released = release_rx.recv_timeout(Duration::from_secs(10)).is_ok();
+                    (released, discoverer.rediscover())
+                })
+                .await
+            }
+        });
+
+        let entered = time::timeout(Duration::from_secs(10), entered_rx).await;
+        let _ = release_tx.send(());
+        let (released, tests) = discovery
+            .await
+            .expect("discovery task joins")
+            .expect("discovery succeeds");
+        assert!(matches!(entered, Ok(Ok(()))), "closure entry observed");
+        assert!(released, "runtime released the blocking discovery gate");
+        assert_eq!(
+            tests.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            ["test_named"]
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_blocking_panic_is_reported() {
+        let dir = make_root();
+        let disc = make_discoverer(&dir);
+
+        let error = with_discoverer::<()>(&disc, |_| panic!("intentional discovery panic"))
+            .await
+            .expect_err("panicking discovery should fail");
+
+        assert!(
+            error.chain().any(|cause| cause
+                .downcast_ref::<tokio::task::JoinError>()
+                .is_some_and(tokio::task::JoinError::is_panic)),
+            "error should carry the panicking JoinError: {error:#}"
+        );
+        assert!(disc.try_lock().is_ok(), "discoverer lock was released");
     }
 
     #[tokio::test]

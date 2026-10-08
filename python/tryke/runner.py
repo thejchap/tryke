@@ -125,7 +125,7 @@ def passed(
     }
 
 
-def failed(  # noqa: PLR0913
+def failed(  # noqa: PLR0913, PLR0917
     duration_ms: int,
     message: str,
     tb: str | None,

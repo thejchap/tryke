@@ -30,8 +30,8 @@ impl Server {
         }
     }
 
-    /// Runs the server until the client closes its input or cancellation is
-    /// requested.
+    /// Runs the server until the client closes its input and its queued runs
+    /// finish, or until cancellation is requested.
     ///
     /// # Errors
     /// Returns an error if file watching cannot be initialized, the client
@@ -54,18 +54,25 @@ impl Server {
 
         // Initialize the discoverer and populate its import graph and test cache.
         let discoverer = Arc::new(Mutex::new(discoverer));
-        if let Err(error) = with_discoverer(&discoverer, Discoverer::rediscover).await {
-            return shutdown_after_startup_error(worker_pool, error).await;
+        let initial_discovery = lifecycle
+            .run_until_cancelled(with_discoverer(&discoverer, Discoverer::rediscover))
+            .await;
+        match initial_discovery {
+            None => return worker_pool.shutdown().await,
+            Some(Err(error)) => return shutdown_after_startup_error(worker_pool, error).await,
+            Some(Ok(_)) => {}
         }
 
         let watcher = match FileWatcher::spawn(&root, &excludes) {
             Ok(watcher) => watcher,
             Err(error) => return shutdown_after_startup_error(worker_pool, error).await,
         };
+        // The watcher holds a weak sender so it never keeps the writer alive
+        // once the client has closed its input and queued runs are done.
         let watcher_task = tokio::spawn(watch_files(
             watcher,
             Arc::clone(&discoverer),
-            outbound_tx.clone(),
+            outbound_tx.downgrade(),
             lifecycle.clone(),
         ));
 
@@ -103,7 +110,16 @@ impl Server {
             result = &mut dispatcher_task => SessionExit::Dispatcher(result),
         };
 
-        lifecycle.cancel();
+        // A clean exit means the client closed its input, so the other task
+        // finishes accepted runs. A failure stops both immediately.
+        let failed = match &exit {
+            SessionExit::Cancelled => false,
+            SessionExit::Handler(result) => result.is_err(),
+            SessionExit::Dispatcher(result) => !matches!(result, Ok(Ok(()))),
+        };
+        if failed {
+            lifecycle.cancel();
+        }
         debug!("Server: session stopping");
 
         let (result, secondary_result, secondary_name) = match exit {
@@ -131,22 +147,27 @@ impl Server {
                 "Connection handler",
             ),
         };
-        let result = match (result, secondary_result) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Ok(()), Err(error)) | (Err(error), Ok(())) => Err(error),
-            (Err(error), Err(secondary_error)) => {
-                Err(error.context(format!("{secondary_name} also failed: {secondary_error:#}")))
-            }
-        };
+        let result = combine_results(result, secondary_result, secondary_name);
 
+        // The session is over, so stop file-change notifications.
+        lifecycle.cancel();
         let watcher_result = watcher_task.await.context("File watcher task failed");
 
-        match (result, watcher_result) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Ok(()), Err(error)) | (Err(error), Ok(())) => Err(error),
-            (Err(error), Err(watcher_error)) => {
-                Err(error.context(format!("File watcher also failed: {watcher_error:#}")))
-            }
+        combine_results(result, watcher_result, "File watcher")
+    }
+}
+
+/// Keeps `result`'s error as the primary failure and attaches `secondary`'s.
+fn combine_results(
+    result: anyhow::Result<()>,
+    secondary: anyhow::Result<()>,
+    secondary_name: &str,
+) -> anyhow::Result<()> {
+    match (result, secondary) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Err(error)) | (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(secondary_error)) => {
+            Err(error.context(format!("{secondary_name} also failed: {secondary_error:#}")))
         }
     }
 }
@@ -168,7 +189,7 @@ async fn shutdown_after_startup_error(
 async fn watch_files(
     mut watcher: FileWatcher,
     discoverer: Arc<Mutex<Discoverer>>,
-    outbound_tx: mpsc::Sender<bytes::Bytes>,
+    outbound_tx: mpsc::WeakSender<bytes::Bytes>,
     cancellation: CancellationToken,
 ) {
     loop {
@@ -185,9 +206,78 @@ async fn watch_files(
                 break;
             }
         };
-        if let Err(error) = apply_change(&discoverer, &outbound_tx, &batch.paths).await {
-            debug!("Server: stopping file-change notifications: {error}");
+        let Some(outbound_tx) = outbound_tx.upgrade() else {
             break;
+        };
+        // Discovery for a large batch can take a while; shutdown must not
+        // wait for it.
+        let applied = cancellation
+            .run_until_cancelled(apply_change(&discoverer, &outbound_tx, &batch.paths))
+            .await;
+        match applied {
+            None => break,
+            Some(Ok(())) => {}
+            Some(Err(error)) => {
+                debug!("Server: stopping file-change notifications: {error}");
+                break;
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tryke_testing::TestProject;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn watcher_stops_while_change_discovery_waits() {
+        let project = TestProject::new().expect("create test project");
+        let root = project.root();
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        let discoverer = Arc::new(Mutex::new(Discoverer::from_parts(
+            root,
+            src_roots,
+            &[],
+            None,
+        )));
+        let watcher = FileWatcher::spawn(root, &[]).expect("watch project");
+        let (outbound_tx, _outbound_rx) = mpsc::channel(8);
+        let cancellation = CancellationToken::new();
+
+        // Holding the lock keeps change discovery waiting until shutdown.
+        let guard = discoverer.lock().await;
+        let task = tokio::spawn(watch_files(
+            watcher,
+            Arc::clone(&discoverer),
+            outbound_tx.downgrade(),
+            cancellation.clone(),
+        ));
+        std::fs::write(
+            root.join("test_new.py"),
+            "from tryke import test\n\n@test\ndef test_new(): pass\n",
+        )
+        .expect("write changed file");
+
+        // `with_discoverer` takes its own `Arc` before waiting for the lock.
+        let waiting = tokio::time::timeout(Duration::from_secs(10), async {
+            while Arc::strong_count(&discoverer) < 3 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        cancellation.cancel();
+        let stopped = tokio::time::timeout(Duration::from_secs(5), task).await;
+        drop(guard);
+
+        assert!(waiting, "the change should reach discovery");
+        assert!(
+            matches!(stopped, Ok(Ok(()))),
+            "shutdown must not wait for change discovery: {stopped:?}"
+        );
     }
 }

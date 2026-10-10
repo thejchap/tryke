@@ -355,7 +355,7 @@ async fn report_cycle(
         reporter.on_discovery_warning(warning);
     }
 
-    let mut stream = pool.submit(partition.units);
+    let mut stream = pool.submit(partition.units)?;
 
     while let Some(result) = stream.next().await {
         match &result.outcome {
@@ -387,6 +387,9 @@ async fn report_cycle(
             && failed >= max
         {
             hit_maxfail = true;
+            // Wait for started units to finish fixture teardown before the
+            // pool is restarted or shut down, either of which kills workers.
+            stream.stop().await;
             break;
         }
     }
@@ -1375,6 +1378,65 @@ mod execution_tests {
     }
 
     #[tokio::test]
+    async fn maxfail_still_runs_scope_fixture_teardown() -> anyhow::Result<()> {
+        // The slow second test keeps the unit busy when maxfail is reached,
+        // so stopping the run must not kill the worker before teardown.
+        let fixture = TestProject::with_files([(
+            "test_scope.py",
+            "\
+import time
+from pathlib import Path
+from typing import Annotated
+
+from tryke import Depends, expect, fixture, test
+
+@fixture(per=\"scope\")
+def resource():
+    yield \"ready\"
+    Path(__file__).with_name(\"torn-down\").write_text(\"\")
+
+@test
+def test_fails(value: Annotated[str, Depends(resource)]):
+    expect(value).to_equal(\"missing\")
+
+@test
+def test_slow(value: Annotated[str, Depends(resource)]):
+    time.sleep(1)
+",
+        )])?;
+        let project = configured_project(fixture.root());
+        let mut discoverer = Discoverer::new(&project);
+        let tests = discoverer.rediscover();
+        let hooks = discoverer.hooks();
+        let mut reporter = TextReporter::with_writer(Vec::new());
+
+        let result = run_tests(
+            &mut reporter,
+            &project,
+            LevelFilter::Off,
+            tests,
+            &hooks,
+            Some(1),
+            1,
+            DistMode::Test,
+            None,
+            None,
+            &CancellationToken::new(),
+        )
+        .await?;
+        let Interruptible::Completed(summary) = result else {
+            anyhow::bail!("run was not cancelled, so it must complete");
+        };
+
+        assert_eq!(summary.failed, 1);
+        assert!(
+            fixture.root().join("torn-down").exists(),
+            "maxfail must let the started unit finish its fixture teardown",
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn integration_python_worker_runs_tests() -> io::Result<()> {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
@@ -1412,7 +1474,7 @@ def test_failing():
         )
         .await;
         let units = partition_with_hooks(tests, &[], DistMode::Test).units;
-        let mut results: Vec<_> = pool.submit(units).collect().await;
+        let mut results: Vec<_> = pool.submit(units).expect("submit work").collect().await;
         results.sort_by(|a, b| a.test.name.cmp(&b.test.name));
 
         assert_eq!(results.len(), 2);

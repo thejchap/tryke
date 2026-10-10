@@ -233,12 +233,24 @@ impl Worker {
             .collect()
     }
 
-    async fn handle_unit(&mut self, unit: WorkUnit, result_tx: mpsc::UnboundedSender<TestResult>) {
+    async fn handle_unit(
+        &mut self,
+        unit: WorkUnit,
+        result_tx: mpsc::UnboundedSender<TestResult>,
+        cancel: &CancellationToken,
+    ) {
         let registrations = Self::registrations_for_unit(&unit);
 
         self.prepare_unit(&registrations).await;
 
         for test in unit.tests {
+            // A cancelled run stops between tests rather than interrupting
+            // one: cutting an RPC short would leave the interpreter unusable
+            // and skip the `per="scope"` teardown below.
+            if cancel.is_cancelled() {
+                break;
+            }
+
             trace!("Worker: running test {}", test.name);
 
             self.run_single_test(test, &registrations, &result_tx).await;
@@ -358,26 +370,23 @@ impl Worker {
                             }
 
                             let interrupted_by_shutdown = {
-                                let unit_future = self.handle_unit(unit, result_tx);
+                                let unit_future = self.handle_unit(unit, result_tx, &cancel);
 
                                 tokio::pin!(unit_future);
 
                                 tokio::select! {
                                     biased;
-                                    () = shutdown.cancelled() => Some(true),
-                                    () = cancel.cancelled() => Some(false),
-                                    () = &mut unit_future => None,
+                                    () = shutdown.cancelled() => true,
+                                    () = &mut unit_future => false,
                                 }
                             };
 
-                            if let Some(shutting_down) = interrupted_by_shutdown {
+                            if interrupted_by_shutdown {
                                 // The interrupted unit left an RPC half-written
                                 // on the interpreter's stdin, so the process is
-                                // no longer usable — drop it either way.
+                                // no longer usable.
                                 self.reset_process().await;
-                                if shutting_down {
-                                    break 'worker;
-                                }
+                                break 'worker;
                             }
                         }
                         Err(_) => break,

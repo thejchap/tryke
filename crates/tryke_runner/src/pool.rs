@@ -9,8 +9,8 @@ use log::{LevelFilter, warn};
 
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinSet};
-use tokio_stream::Stream;
 use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::{Stream, StreamExt as _};
 use tokio_util::sync::CancellationToken;
 use tryke_config::Project;
 use tryke_types::TestResult;
@@ -85,6 +85,18 @@ impl Stream for WorkerRun {
 impl Drop for WorkerRun {
     fn drop(&mut self) {
         self.cancel.cancel();
+    }
+}
+
+impl WorkerRun {
+    /// Stops the run without starting further tests.
+    ///
+    /// Units already on a worker finish their current test and their
+    /// `per="scope"` fixture teardown; this waits for that and discards the
+    /// remaining results, so the pool is idle when it returns.
+    pub async fn stop(&mut self) {
+        self.cancel.cancel();
+        while self.results.next().await.is_some() {}
     }
 }
 
@@ -170,7 +182,13 @@ impl WorkerPool {
         pool
     }
 
-    pub fn submit(&self, units: Vec<WorkUnit>) -> WorkerRun {
+    /// Queues `units` for the workers and streams their results.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if every worker task has exited, because no queued
+    /// unit would ever produce a result.
+    pub fn submit(&self, units: Vec<WorkUnit>) -> Result<WorkerRun> {
         let (stream_tx, stream_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
 
@@ -178,20 +196,22 @@ impl WorkerPool {
             // `try_send`, not `send_blocking`: every caller is async, and
             // async-channel documents `send_blocking` as deadlock-prone in an
             // async context. On an unbounded channel the only failure is a
-            // closed channel (the pool is shutting down); the unit's
-            // `result_tx` clone drops with the message, so the run's stream
-            // ends early instead of hanging.
-            let _ = self.work_tx.try_send(WorkerMsg::Unit {
+            // closed channel, which means no worker task is left to run it.
+            let sent = self.work_tx.try_send(WorkerMsg::Unit {
                 unit,
                 result_tx: stream_tx.clone(),
                 cancel: cancel.clone(),
             });
+            if sent.is_err() {
+                cancel.cancel();
+                return Err(anyhow!("worker pool has no running workers"));
+            }
         }
 
-        WorkerRun {
+        Ok(WorkerRun {
             results: UnboundedReceiverStream::new(stream_rx),
             cancel,
-        }
+        })
     }
 
     /// Send `operation`'s control message to every worker and collect every
@@ -363,7 +383,6 @@ fn record_join_result(result: std::result::Result<(), JoinError>, failures: &mut
 #[cfg(test)]
 mod tests {
     use log::LevelFilter;
-    use tokio_stream::StreamExt;
     use tryke_testing::{TestProject, python_bin as test_python_bin, workspace_root};
     use tryke_types::TestItem;
 
@@ -506,11 +525,8 @@ mod tests {
             .expect("warmed workers must join cleanly");
     }
 
-    /// Regression guard for the `send_blocking` → `try_send` change: submitting
-    /// to a pool whose work channel has closed must yield an empty stream
-    /// rather than parking the calling runtime thread.
     #[tokio::test]
-    async fn submit_to_a_closed_pool_ends_the_stream_instead_of_blocking() {
+    async fn submit_to_a_closed_pool_fails() {
         let (pool, work_rx, _ctrl_rxs) = control_only_pool(1);
         drop(work_rx);
         pool.work_tx.close();
@@ -518,11 +534,13 @@ mod tests {
         let units = partition_with_hooks(vec![TestItem::default()], &[], DistMode::Test).units;
         assert!(!units.is_empty(), "test setup should produce a work unit");
 
-        let results: Vec<TestResult> =
-            tokio::time::timeout(Duration::from_secs(5), pool.submit(units).collect())
-                .await
-                .expect("submit must not block on a closed channel");
-
-        assert!(results.is_empty(), "got {} results", results.len());
+        let error = pool
+            .submit(units)
+            .err()
+            .expect("a pool without workers must not report an empty run");
+        assert!(
+            error.to_string().contains("no running workers"),
+            "{error:#}"
+        );
     }
 }

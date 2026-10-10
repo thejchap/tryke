@@ -45,7 +45,8 @@ Released on 2026-07-04.
 - Prevent watch and server runs from hanging while restarting worker processes
 - Prevent concurrent worker spawn timeouts with relative Python paths on macOS
 - Preserve virtual-environment interpreter symlinks during path resolution
-- Exit promptly on Ctrl+C while server stdin remains open
+- Exit promptly on Ctrl+C while the server is discovering tests or its stdin
+  remains open
 - Interrupt initial test discovery and collect-only commands on Ctrl+C
 
 ### Refactoring

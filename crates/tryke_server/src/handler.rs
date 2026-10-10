@@ -184,7 +184,8 @@ where
         }
     }
 
-    /// Runs the server protocol until the client closes its input.
+    /// Runs the server protocol until the client closes its input, then
+    /// finishes the runs it already queued.
     ///
     /// Requests arrive as newline-delimited JSON-RPC messages. Responses and
     /// asynchronous notifications share one outbound queue and one writer task.
@@ -221,12 +222,12 @@ where
         let mut reader = BufReader::new(reader);
         let mut line = String::new();
 
-        loop {
+        let input_closed = loop {
             line.clear();
 
             let read_result = tokio::select! {
                 biased;
-                () = cancellation.cancelled() => break,
+                () = cancellation.cancelled() => break false,
                 result = reader.read_line(&mut line) => result,
                 result = &mut writer_task => {
                     return result.context("outbound writer task failed")?;
@@ -235,7 +236,7 @@ where
 
             match read_result {
                 // EOF is the client's normal shutdown signal.
-                Ok(0) => break,
+                Ok(0) => break true,
                 Ok(_) => {}
                 Err(error) => {
                     // A read failure makes further output irrelevant.
@@ -250,7 +251,7 @@ where
 
             let request_result = tokio::select! {
                 biased;
-                () = cancellation.cancelled() => break,
+                () = cancellation.cancelled() => break false,
                 result = &mut request => result,
             };
 
@@ -273,13 +274,30 @@ where
             if let Some(bytes) = response {
                 let send_result = tokio::select! {
                     biased;
-                    () = cancellation.cancelled() => break,
+                    () = cancellation.cancelled() => break false,
                     result = outbound_tx.send(bytes) => result,
                 };
                 if send_result.is_err() {
                     // A closed receiver means the writer has already stopped.
                     return writer_task.await.context("outbound writer task failed")?;
                 }
+            }
+        };
+
+        if input_closed {
+            // Closing input ends the session but does not withdraw accepted
+            // runs. Dropping these senders lets the dispatcher drain its
+            // queue; the writer then stops once every sender is gone, after
+            // flushing what the remaining runs produced.
+            drop(run_tx);
+            drop(outbound_tx);
+            let drained = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => None,
+                result = &mut writer_task => Some(result),
+            };
+            if let Some(result) = drained {
+                return result.context("outbound writer task failed")?;
             }
         }
 
@@ -460,7 +478,7 @@ async fn execute_run(
     for warning in &partition.warnings {
         log::warn!("{}", warning.message);
     }
-    let mut stream = pool.submit(partition.units);
+    let mut stream = pool.submit(partition.units)?;
     let mut passed = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;
@@ -1628,6 +1646,80 @@ mod tests {
         handler_task.await.expect("Join connection handler");
         dispatcher_task
             .await
+            .expect("Join run dispatcher")
+            .expect("Shut down run dispatcher");
+    }
+
+    #[tokio::test]
+    async fn closing_input_finishes_accepted_runs() {
+        // A client may send `run` and close stdin straight away; the run it
+        // was promised must still execute and answer.
+        let dir = make_root();
+        let disc = make_discoverer(&dir);
+        let pool = make_owned_pool().await;
+        let (outbound_tx, outbound_rx) = mpsc::channel::<Bytes>(64);
+        let (run_tx, run_rx) = mpsc::channel(8);
+        let cancellation = CancellationToken::new();
+        let dispatcher_task = tokio::spawn(
+            RunDispatcher::new(
+                Arc::clone(&disc),
+                pool,
+                outbound_tx.clone(),
+                run_rx,
+                cancellation.clone(),
+            )
+            .run(),
+        );
+
+        let (client, server_side) = tokio::io::duplex(1 << 16);
+        let (server_r, server_w) = tokio::io::split(server_side);
+        let handler_task = tokio::spawn(
+            ConnectionHandler::new(
+                server_r,
+                server_w,
+                disc,
+                outbound_rx,
+                outbound_tx,
+                run_tx,
+                cancellation,
+            )
+            .run(),
+        );
+
+        let (client_r, mut client_w) = tokio::io::split(client);
+        client_w
+            .write_all(
+                b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"run\",\"params\":{\"run_id\":\"r1\"}}\n",
+            )
+            .await
+            .expect("send run request");
+        client_w.shutdown().await.expect("close client input");
+
+        let mut reader = BufReader::new(client_r);
+        let mut response = None;
+        while response.is_none() {
+            let mut line = String::new();
+            let read = time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
+                .await
+                .expect("session went quiet before the run response")
+                .expect("read from server");
+            assert_ne!(read, 0, "server closed before answering the run");
+            let value: serde_json::Value = serde_json::from_str(line.trim()).expect("JSON line");
+            if value.get("id").is_some() {
+                response = Some(value);
+            }
+        }
+        let response = response.expect("loop exits only once the response is seen");
+        assert_eq!(response["result"]["run_id"], "r1");
+
+        time::timeout(Duration::from_secs(10), handler_task)
+            .await
+            .expect("handler should stop once queued runs finish")
+            .expect("Join connection handler")
+            .expect("connection handler should finish cleanly");
+        time::timeout(Duration::from_secs(10), dispatcher_task)
+            .await
+            .expect("dispatcher should stop once its queue drains")
             .expect("Join run dispatcher")
             .expect("Shut down run dispatcher");
     }

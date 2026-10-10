@@ -143,3 +143,31 @@ fn server_speaks_json_rpc_over_stdio() -> io::Result<()> {
     );
     Ok(())
 }
+
+#[cfg(unix)]
+#[test]
+fn server_exits_on_sigint_with_stdin_open() -> io::Result<()> {
+    let mut session = ServerSession::spawn()?;
+    session.send(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#)?;
+    let pong = session.read_response();
+    assert_eq!(pong["result"], "pong", "unexpected ping response: {pong}");
+
+    let signal = Command::new("kill")
+        .args(["-INT", &session.child.id().to_string()])
+        .status()?;
+    assert!(signal.success(), "send SIGINT to server: {signal}");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let status = loop {
+        if let Some(status) = session.child.try_wait()? {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "server did not exit after SIGINT while client stdin stayed open"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(status.code(), Some(130), "interrupted server: {status}");
+    Ok(())
+}

@@ -135,13 +135,20 @@ pub(crate) async fn run_test_command(
 
     let discovery_start = Instant::now();
 
-    let mut discoverer = Discoverer::new(&project);
-    let discovered = discoverer.discover(DiscoveryOptions {
-        paths: &test_filter.path_specs,
-        changed: args.changed,
-        changed_first: args.changed_first,
-        base_branch: args.base_branch.as_deref(),
+    let discovery = with_discoverer(Discoverer::new(&project), move |discoverer| {
+        let discovered = discoverer.discover(DiscoveryOptions {
+            paths: &test_filter.path_specs,
+            changed: args.changed,
+            changed_first: args.changed_first,
+            base_branch: args.base_branch.as_deref(),
+        });
+        (args, test_filter, discovered)
     });
+    let result = run_interruptibly(discovery, &cancellation).await;
+    let Some((_, (args, test_filter, discovered))) = resolve_interruptible(result, &mut *reporter)?
+    else {
+        return Ok(ExitStatus::Interrupted);
+    };
 
     for warning in &discovered.warnings {
         reporter.on_discovery_warning(warning);
@@ -742,6 +749,8 @@ async fn run_watch_loop(
 mod interrupt_tests {
     use std::future::ready;
 
+    use clap::Parser;
+
     use super::*;
 
     #[derive(Default)]
@@ -781,6 +790,39 @@ mod interrupt_tests {
 
         assert_eq!(resolve_interruptible(result, &mut reporter)?, Some(42));
         assert_eq!(reporter.cleanup_calls, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_collect_only_returns_interrupted() -> Result<()> {
+        use std::ffi::OsStr;
+
+        let fixture = tryke_testing::TestProject::with_files([(
+            "test_a.py",
+            "from tryke import test\n\n@test\ndef test_a():\n    pass\n",
+        )])?;
+        let cli = crate::cli::Cli::try_parse_from([
+            OsStr::new("tryke"),
+            OsStr::new("test"),
+            OsStr::new("--root"),
+            fixture.root().as_os_str(),
+            OsStr::new("--collect-only"),
+        ])?;
+        let Some(crate::cli::Commands::Test(args)) = cli.command else {
+            return Err(anyhow::anyhow!("Expected test command"));
+        };
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let status = run_test_command(
+            args,
+            &cli.global,
+            CommandOrigin::Explicit,
+            LogConfig::from_env(LevelFilter::Off)?,
+            cancellation,
+        )
+        .await?;
+        assert_eq!(status, ExitStatus::Interrupted);
         Ok(())
     }
 

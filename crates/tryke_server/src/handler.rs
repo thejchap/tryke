@@ -384,8 +384,20 @@ pub(crate) async fn apply_change(
     outbound_tx: &mpsc::Sender<Bytes>,
     paths: &[PathBuf],
 ) -> anyhow::Result<()> {
+    if let Some(tests) = discover_change(discoverer, paths).await? {
+        notify_change(outbound_tx, tests).await?;
+    }
+    Ok(())
+}
+
+/// Applies changed `paths` to discovery and returns the affected tests, or
+/// `None` when no path was eligible for discovery.
+pub(crate) async fn discover_change(
+    discoverer: &Arc<Mutex<tryke_discovery::Discoverer>>,
+    paths: &[PathBuf],
+) -> anyhow::Result<Option<Vec<TestItem>>> {
     if paths.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
 
     let paths = paths.to_vec();
@@ -395,7 +407,7 @@ pub(crate) async fn apply_change(
     .await?;
     if impact.paths.is_empty() {
         debug!("Apply_change: no eligible paths");
-        return Ok(());
+        return Ok(None);
     }
 
     debug!(
@@ -403,15 +415,20 @@ pub(crate) async fn apply_change(
         impact.affected_modules.len(),
         impact.affected_tests.len(),
     );
+    Ok(Some(impact.affected_tests))
+}
+
+/// Tells the client which tests a file change affected.
+pub(crate) async fn notify_change(
+    outbound_tx: &mpsc::Sender<Bytes>,
+    tests: Vec<TestItem>,
+) -> Result<(), NotificationError> {
     send_notification(
         outbound_tx,
         NotificationMethod::DiscoverComplete,
-        DiscoverCompleteParams {
-            tests: impact.affected_tests,
-        },
+        DiscoverCompleteParams { tests },
     )
-    .await?;
-    Ok(())
+    .await
 }
 
 fn select_tests(run_params: &RunParams, all_tests: Vec<TestItem>) -> Vec<TestItem> {

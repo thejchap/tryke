@@ -8,7 +8,9 @@ use tryke_discovery::Discoverer;
 use tryke_runner::WorkerPool;
 use tryke_watcher::FileWatcher;
 
-use crate::handler::{ConnectionHandler, RunDispatcher, apply_change, with_discoverer};
+use crate::handler::{
+    ConnectionHandler, RunDispatcher, discover_change, notify_change, with_discoverer,
+};
 
 enum SessionExit {
     Cancelled,
@@ -206,15 +208,29 @@ async fn watch_files(
                 break;
             }
         };
+        // Discovery for a large batch can take a while; shutdown must not
+        // wait for it.
+        let affected = cancellation
+            .run_until_cancelled(discover_change(&discoverer, &batch.paths))
+            .await;
+        let tests = match affected {
+            None => break,
+            Some(Ok(Some(tests))) => tests,
+            Some(Ok(None)) => continue,
+            Some(Err(error)) => {
+                debug!("Server: stopping file-change notifications: {error}");
+                break;
+            }
+        };
+        // Upgrade only to send: a strong sender held during discovery would
+        // keep the writer open after the client closes its input.
         let Some(outbound_tx) = outbound_tx.upgrade() else {
             break;
         };
-        // Discovery for a large batch can take a while; shutdown must not
-        // wait for it.
-        let applied = cancellation
-            .run_until_cancelled(apply_change(&discoverer, &outbound_tx, &batch.paths))
+        let notified = cancellation
+            .run_until_cancelled(notify_change(&outbound_tx, tests))
             .await;
-        match applied {
+        match notified {
             None => break,
             Some(Ok(())) => {}
             Some(Err(error)) => {
@@ -270,11 +286,18 @@ mod tests {
         })
         .await
         .is_ok();
+        // Only the test's sender may be strong, or closing input could not
+        // end the session while discovery runs.
+        let senders_during_discovery = outbound_tx.strong_count();
         cancellation.cancel();
         let stopped = tokio::time::timeout(Duration::from_secs(5), task).await;
         drop(guard);
 
         assert!(waiting, "the change should reach discovery");
+        assert_eq!(
+            senders_during_discovery, 1,
+            "the watcher must not hold a strong sender during discovery"
+        );
         assert!(
             matches!(stopped, Ok(Ok(()))),
             "shutdown must not wait for change discovery: {stopped:?}"

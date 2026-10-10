@@ -639,7 +639,7 @@ checksum = "2d6d3cde68c518367be28956066ddfef33813991b77a55005a69dae04bf3b10b"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2137,6 +2137,7 @@ dependencies = [
 name = "tryke_config"
 version = "0.0.30"
 dependencies = [
+ "log",
  "serde",
  "tempfile",
  "thiserror",

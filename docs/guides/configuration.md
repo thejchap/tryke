@@ -120,7 +120,7 @@ tryke server --cache-dir .cache/tryke
 
 ## Logging
 
-Tryke has a single user-facing verbosity knob with a precedence chain spanning CLI flags, environment variables, and cross-language propagation to the python workers it spawns.
+Tryke resolves one user-facing log level and applies it to Rust logging, reporter diagnostics, and every Python worker it spawns.
 
 ### CLI flags
 
@@ -128,40 +128,37 @@ Tryke has a single user-facing verbosity knob with a precedence chain spanning C
 
 ### Environment variables
 
-- **`TRYKE_LOG`** — the umbrella knob. Accepts a bare level name (`off`, `error`, `warn`, `info`, `debug`, `trace`) and propagates to **both** the rust process and every python worker it spawns. This is what you should set when you want one knob.
-- **`RUST_LOG`** — power-user override for the rust side only. Honored natively by `env_logger`, so the standard per-module filter syntax (`tryke=debug,hyper=warn`) works. Does **not** propagate to python workers — its module-filter grammar doesn't map onto a python log level.
+- **`TRYKE_LOG`** — the umbrella knob. Accepts a bare level name (`off`, `error`, `warn`, `info`, `debug`, `trace`) and overrides the CLI level everywhere. Values are case-insensitive and may have surrounding whitespace. An invalid value stops the command with an error instead of being silently ignored.
+- **`RUST_LOG`** — power-user override for the Rust side only. Honored natively by `env_logger`, so the standard per-module filter syntax (`tryke=debug,hyper=warn`) works. Does **not** propagate to Python workers — its module-filter grammar doesn't map onto a Python log level.
 
 ### Precedence
 
-**Rust log filter** (consumed by `env_logger`):
-
-1. `RUST_LOG` if set (wins natively).
-2. `TRYKE_LOG` if set.
-3. The CLI flag (`-v` / `-q`).
-4. Default `warn`.
-
-**Python worker log** (spawned by tryke, configured by `TRYKE_LOG` on the worker env):
+**Resolved Tryke level**:
 
 1. `TRYKE_LOG` if set.
-2. The CLI flag, **only** when explicitly more verbose than `warn` (i.e., the user passed at least one `-v`). Default `warn` does not light up workers — preserves the long-standing "no chatter unless asked" behavior.
-3. Otherwise off.
+2. The CLI flag (`-v` / `-q`).
+3. Default `warn`.
+
+This level drives reporter diagnostics and is passed to Python workers as `TRYKE_LOG`. Python's standard library has no trace level, so workers map `trace` to `debug`.
+
+The resolved level is also the default Rust filter. If `RUST_LOG` is set, it overrides that filter for Rust logging only; reporter and worker verbosity continue to use the resolved Tryke level.
 
 ### Examples
 
 ```bash
-# Default: rust at warn, workers silent.
+# Default: Rust and workers at warn.
 tryke test
 
-# `-v` lights up both layers at info.
+# `-v` raises Rust, reporter, and worker verbosity to info.
 tryke -v test
 
-# Per-module rust filtering, workers stay silent.
+# Per-module Rust filtering; reporter and workers remain at warn.
 RUST_LOG=tryke=debug,tryke_runner=trace tryke test
 
 # Single knob: both layers at debug, regardless of CLI flag.
 TRYKE_LOG=debug tryke test
 
-# RUST_LOG wins for rust filtering; TRYKE_LOG still drives python.
+# RUST_LOG wins for Rust filtering; TRYKE_LOG still drives Python.
 TRYKE_LOG=info RUST_LOG=tryke=warn tryke test
 ```
 

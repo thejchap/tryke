@@ -40,6 +40,7 @@ tokio = { version = "1", features = [
   "process",
 ] }
 tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["rt"] }
 notify = "6"
 notify-debouncer-mini = "0.4"
 toml = "1.0"

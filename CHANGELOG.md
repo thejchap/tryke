@@ -45,6 +45,11 @@ Released on 2026-07-04.
 - Prevent concurrent worker spawn timeouts with relative Python paths on macOS
 - Preserve virtual-environment interpreter symlinks during path resolution
 
+### Refactoring
+
+- Share project metadata loading across CLI commands without changing
+  configuration precedence
+
 ### Contributors
 
 - @sarvesh1327

@@ -31,6 +31,12 @@ tryke [OPTIONS] [COMMAND]
 
   Overrides `[tool.tryke] cache_dir` in `pyproject.toml`. Defaults to `<project-root>/.tryke/cache`.
 
+- `--config-file` `<CONFIG_FILE>`
+
+  Config file to use instead of discovering one.
+
+  A `pyproject.toml` is read from its `[tool.tryke]` table; any other file is read as a standalone tryke config. Tryke exits with an error if the file can't be read or parsed.
+
 - `--no-progress`
 
   Disable the terminal's native graphical progress bar.
@@ -64,6 +70,12 @@ tryke clean [OPTIONS]
   Directory for tryke's persistent discovery cache.
 
   Overrides `[tool.tryke] cache_dir` in `pyproject.toml`. Defaults to `<project-root>/.tryke/cache`.
+
+- `--config-file` `<CONFIG_FILE>`
+
+  Config file to use instead of discovering one.
+
+  A `pyproject.toml` is read from its `[tool.tryke]` table; any other file is read as a standalone tryke config. Tryke exits with an error if the file can't be read or parsed.
 
 - `--no-progress`
 
@@ -112,6 +124,12 @@ tryke graph [OPTIONS]
   Show only the slice affected by changes since `HEAD`.
 
   Requires git. Combine with `--base-branch` to diff against a branch instead of the working tree.
+
+- `--config-file` `<CONFIG_FILE>`
+
+  Config file to use instead of discovering one.
+
+  A `pyproject.toml` is read from its `[tool.tryke]` table; any other file is read as a standalone tryke config. Tryke exits with an error if the file can't be read or parsed.
 
 - `--connected-only`
 
@@ -168,6 +186,12 @@ tryke server [OPTIONS]
   Directory for tryke's persistent discovery cache.
 
   Overrides `[tool.tryke] cache_dir` in `pyproject.toml`. Defaults to `<project-root>/.tryke/cache`.
+
+- `--config-file` `<CONFIG_FILE>`
+
+  Config file to use instead of discovering one.
+
+  A `pyproject.toml` is read from its `[tool.tryke]` table; any other file is read as a standalone tryke config. Tryke exits with an error if the file can't be read or parsed.
 
 - `-e`, `--exclude` `<EXCLUDE>`
 
@@ -279,6 +303,12 @@ tryke test [OPTIONS] [PATHS]...
   Collect tests without running them.
 
   Prints the discovered test list and exits. Useful for verifying that filters select the tests you expect.
+
+- `--config-file` `<CONFIG_FILE>`
+
+  Config file to use instead of discovering one.
+
+  A `pyproject.toml` is read from its `[tool.tryke]` table; any other file is read as a standalone tryke config. Tryke exits with an error if the file can't be read or parsed.
 
 - `--dist` `<DIST>`
 

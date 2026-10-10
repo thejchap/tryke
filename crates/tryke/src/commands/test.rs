@@ -8,7 +8,7 @@ use anyhow::Result;
 use console::{Key, Term};
 use log::{LevelFilter, debug};
 use tokio_stream::StreamExt;
-use tryke_config::{Project, ProjectMetadata};
+use tryke_config::Project;
 use tryke_discovery::{Discoverer, DiscoveryOptions};
 use tryke_reporter::{Reporter, Verbosity, build_reporter, reporter::WatchIdleInfo};
 use tryke_runner::{DistMode, WorkerPool, WorkerPoolOptions, partition_with_hooks};
@@ -79,11 +79,11 @@ pub(crate) fn run_test_command(
     let mut reporter = build_reporter(args.reporter.kind(), verbosity, global.no_progress);
     let runtime = tokio::runtime::Runtime::new()?;
     let cwd = env::current_dir()?;
-
-    let mut metadata = ProjectMetadata::new(args.root.as_deref().unwrap_or(&cwd));
-    metadata.apply_configuration_file();
-    metadata.apply_cli_args(args.project_options(global));
-    let project = Project::from_metadata(metadata);
+    let project = Project::load(
+        args.root.as_deref().unwrap_or(&cwd),
+        global.config_file.as_deref(),
+        args.project_options(global),
+    )?;
 
     if args.watch {
         reporter.set_subcommand_label(match origin {

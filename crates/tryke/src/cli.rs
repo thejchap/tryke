@@ -67,6 +67,14 @@ pub(crate) struct GlobalArgs {
     /// `<project-root>/.tryke/cache`.
     #[arg(long = "cache-dir", global = true)]
     pub(crate) cache_dir: Option<PathBuf>,
+
+    /// Config file to use instead of discovering one.
+    ///
+    /// A `pyproject.toml` is read from its `[tool.tryke]` table; any other
+    /// file is read as a standalone tryke config. Tryke exits with an error
+    /// if the file can't be read or parsed.
+    #[arg(long = "config-file", global = true)]
+    pub(crate) config_file: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, ValueEnum)]

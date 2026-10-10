@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::Result;
-use tryke_config::{Project, ProjectMetadata};
+use tryke_config::Project;
 use tryke_discovery::{Discoverer, resolve_changed_files};
 use tryke_types::HookItem;
 
@@ -13,10 +13,11 @@ use crate::cli::{GlobalArgs, GraphArgs};
 
 pub(crate) fn run_graph_command(args: GraphArgs, global: &GlobalArgs) -> Result<ExitStatus> {
     let cwd = env::current_dir()?;
-    let mut metadata = ProjectMetadata::new(args.root.as_deref().unwrap_or(&cwd));
-    metadata.apply_configuration_file();
-    metadata.apply_cli_args(args.project_options(global));
-    let project = Project::from_metadata(metadata);
+    let project = Project::load(
+        args.root.as_deref().unwrap_or(&cwd),
+        global.config_file.as_deref(),
+        args.project_options(global),
+    )?;
 
     if args.fixtures {
         run_fixture_graph(&project)?;

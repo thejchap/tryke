@@ -180,11 +180,9 @@ impl<W: Write> SugarReporter<W> {
 
         let term_width = self.live.width().max(40);
 
-        let pct = if self.total_tests == 0 {
-            0
-        } else {
-            (self.completed_tests * 100) / self.total_tests
-        };
+        let pct = (self.completed_tests * 100)
+            .checked_div(self.total_tests)
+            .unwrap_or(0);
         let bar = render_bar(
             usize::try_from(self.completed_tests).unwrap_or(usize::MAX),
             usize::try_from(self.total_tests).unwrap_or(usize::MAX),

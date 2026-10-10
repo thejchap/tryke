@@ -63,11 +63,7 @@ pub fn render_bar(filled: usize, total: usize, width: usize) -> String {
     if width == 0 {
         return String::new();
     }
-    let cells = if total == 0 {
-        0
-    } else {
-        (filled.saturating_mul(width)) / total
-    };
+    let cells = filled.saturating_mul(width).checked_div(total).unwrap_or(0);
     let cells = cells.min(width);
     let mut out = String::with_capacity(width * 3);
     for _ in 0..cells {
@@ -267,9 +263,9 @@ mod tests {
         // Whole duration clamps, so 200h reads as 99:59:59 — minutes
         // and seconds saturate too instead of leaking from the
         // un-clamped value.
-        assert_eq!(format_elapsed(Duration::from_secs(200 * 3600)), "99:59:59");
+        assert_eq!(format_elapsed(Duration::from_hours(200)), "99:59:59");
         assert_eq!(
-            format_elapsed(Duration::from_secs(120 * 3600 + 30 * 60)),
+            format_elapsed(Duration::from_hours(120) + Duration::from_mins(30)),
             "99:59:59"
         );
     }

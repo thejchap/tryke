@@ -48,6 +48,11 @@ Released on 2026-07-04.
 - Exit promptly on Ctrl+C while server stdin remains open
 - Interrupt initial test discovery and collect-only commands on Ctrl+C
 
+### Refactoring
+
+- Share project metadata loading across CLI commands without changing
+  configuration precedence
+
 ### Contributors
 
 - @sarvesh1327

@@ -231,3 +231,6 @@ demo/*.mp4
 
 .claude/worktrees
 .wrangler
+
+# Amp orb portals
+.amp/portals/*

@@ -53,7 +53,7 @@ mod tests {
 
     #[test]
     fn exactly_one_minute() {
-        assert_eq!(format_duration(Duration::from_secs(60)), "1:00.00");
+        assert_eq!(format_duration(Duration::from_mins(1)), "1:00.00");
     }
 
     #[test]

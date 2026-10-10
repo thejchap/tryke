@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Prepares a fresh (or stale-snapshot) Amp orb with the Rust toolchain, uv
+# environment, playground dependencies, and a warm cargo build cache.
+# Must stay idempotent and non-interactive: it reruns on stale snapshots.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+export CARGO_HOME="$HOME/.cargo"
+export RUSTUP_HOME="$HOME/.rustup"
+export PATH="$CARGO_HOME/bin:$HOME/.local/bin:$PATH"
+export CARGO_TERM_COLOR=never
+
+step() {
+  local name="$1"
+  shift
+  echo "==> $name"
+  local start=$SECONDS
+  "$@"
+  echo "<== $name ($((SECONDS - start))s)"
+}
+
+install_rustup() {
+  if [[ ! -x "$CARGO_HOME/bin/rustup" ]]; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+      sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+  fi
+  # Installs the channel and components pinned in rust-toolchain.toml.
+  rustup toolchain install
+  rustup target add wasm32-unknown-unknown
+}
+
+install_cargo_tools() {
+  if [[ ! -x "$CARGO_HOME/bin/cargo-nextest" ]]; then
+    curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C "$CARGO_HOME/bin"
+  fi
+  if [[ ! -x "$CARGO_HOME/bin/cargo-insta" ]]; then
+    curl -LsSf https://insta.rs/install.sh | sh
+  fi
+}
+
+persist_path() {
+  # Amp and supervised services start from login shells, and ~/.bash_profile
+  # shadows ~/.profile, so add cargo to both bash startup files.
+  local marker="# tryke: rust toolchain"
+  local rc
+  for rc in "$HOME/.bash_profile" "$HOME/.bashrc"; do
+    if ! grep -Fqx "$marker" "$rc" 2>/dev/null; then
+      printf '\n%s\n. "$HOME/.cargo/env"\n' "$marker" >>"$rc"
+    fi
+  done
+  # Also expose the binaries on a directory that is already on PATH so the
+  # currently running Amp process sees them without a restart.
+  mkdir -p "$HOME/.local/bin"
+  local bin
+  for bin in "$CARGO_HOME"/bin/*; do
+    ln -sf "$bin" "$HOME/.local/bin/$(basename "$bin")"
+  done
+}
+
+uv_sync() {
+  uv sync --locked
+}
+
+bun_install() {
+  (cd playground && bun install --frozen-lockfile)
+}
+
+prek_hooks() {
+  # Pre-warm the uvx cache and the hook environments used by
+  # `uvx prek run -a` (node-based markdownlint/eslint/prettier hooks).
+  # This only prepares environments; it does not install a git hook.
+  uvx prek prepare-hooks
+}
+
+warm_cargo() {
+  cargo build
+  cargo nextest run --workspace --all-features --no-run
+  cargo clippy --workspace --all-targets --all-features
+}
+
+step "rust toolchain" install_rustup
+step "cargo tools" install_cargo_tools
+step "persist PATH" persist_path
+step "uv sync" uv_sync
+step "playground bun install" bun_install
+step "prek hook environments" prek_hooks
+step "warm cargo build" warm_cargo
+echo "setup complete"

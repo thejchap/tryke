@@ -490,7 +490,7 @@ mod tests {
             errors: 0,
             xfailed: 0,
             todo: 0,
-            duration: Duration::from_secs(60),
+            duration: Duration::from_mins(1),
             discovery_duration: None,
             test_duration: None,
             file_count: 0,

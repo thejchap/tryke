@@ -212,7 +212,7 @@ pub fn partition_with_hooks(
     }
 
     // Largest units first: longest-pole-first scheduling minimises tail latency.
-    units.sort_by(|a, b| b.tests.len().cmp(&a.tests.len()));
+    units.sort_by_key(|unit| std::cmp::Reverse(unit.tests.len()));
     PartitionResult { units, warnings }
 }
 

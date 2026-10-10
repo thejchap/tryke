@@ -2,7 +2,7 @@ use std::env;
 
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
-use tryke_config::{Project, ProjectMetadata};
+use tryke_config::Project;
 use tryke_discovery::Discoverer;
 use tryke_runner::{WorkerPool, WorkerPoolOptions};
 use tryke_server::Server;
@@ -18,11 +18,11 @@ pub(crate) async fn run_server_command(
     cancellation: CancellationToken,
 ) -> Result<ExitStatus> {
     let cwd = env::current_dir()?;
-
-    let mut metadata = ProjectMetadata::new(args.root.as_deref().unwrap_or(&cwd));
-    metadata.apply_configuration_file();
-    metadata.apply_cli_args(args.project_options(global));
-    let project = Project::from_metadata(metadata);
+    let project = Project::load(
+        args.root.as_deref().unwrap_or(&cwd),
+        global.config_file.as_deref(),
+        args.project_options(global),
+    )?;
 
     let worker_pool = WorkerPool::spawn(
         &project,

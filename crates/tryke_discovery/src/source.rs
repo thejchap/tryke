@@ -3100,7 +3100,12 @@ with describe(\"Group\"):
     // --- has_dynamic_imports tests ---
 
     fn parse_body(source: &str) -> Vec<Stmt> {
-        parse_module(source).expect("parse").into_syntax().body
+        parse_module(source)
+            .expect("parse")
+            .into_syntax()
+            .body
+            .into_iter()
+            .collect()
     }
 
     #[test]

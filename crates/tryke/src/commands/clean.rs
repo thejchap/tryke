@@ -26,5 +26,6 @@ pub(crate) fn run_clean_command(args: CleanArgs, global: &GlobalArgs) -> Result<
             report.cache_dir.display()
         );
     }
+
     Ok(ExitStatus::Success)
 }

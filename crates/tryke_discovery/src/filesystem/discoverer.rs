@@ -137,7 +137,7 @@ impl Discoverer {
         let mut paths = super::collect_python_files(&self.root, &self.excludes);
         paths.sort();
         debug!(
-            "rediscover: found {} python files in {}",
+            "Rediscover: found {} Python files in {}",
             paths.len(),
             self.root.display()
         );
@@ -198,7 +198,7 @@ impl Discoverer {
             }
         }
         debug!(
-            "rediscover: cache hits {}/{} ({} parses pending)",
+            "Rediscover: cache hits {}/{} ({} parses pending)",
             hit_count,
             paths.len(),
             misses.len()
@@ -256,7 +256,7 @@ impl Discoverer {
         }
 
         super::sort_tests(&mut tests);
-        debug!("rediscover: discovered {} tests total", tests.len());
+        debug!("Rediscover: discovered {} tests total", tests.len());
         tests
     }
 
@@ -281,7 +281,7 @@ impl Discoverer {
 
         let paths = super::collect_python_files_restricted(&self.root, walk_roots, &self.excludes);
         debug!(
-            "rediscover_restricted: found {} python files across {} walk roots",
+            "Rediscover_restricted: found {} Python files across {} walk roots",
             paths.len(),
             walk_roots.len()
         );
@@ -326,7 +326,7 @@ impl Discoverer {
             }
         }
         debug!(
-            "rediscover_restricted: cache hits {}/{} ({} parses pending)",
+            "Rediscover_restricted: cache hits {}/{} ({} parses pending)",
             hit_count,
             paths.len(),
             misses.len()
@@ -377,7 +377,7 @@ impl Discoverer {
             .collect();
         super::sort_tests(&mut tests);
         debug!(
-            "rediscover_restricted: discovered {} tests total",
+            "Rediscover_restricted: discovered {} tests total",
             tests.len()
         );
         tests
@@ -441,11 +441,11 @@ impl Discoverer {
     fn upsert_source(&mut self, path: &Path, text: String) {
         if let Some(file) = self.inputs.get(path) {
             if file.text(&self.db) != &text {
-                trace!("rediscover: re-parsing changed file {}", path.display());
+                trace!("Rediscover: re-parsing changed file {}", path.display());
                 file.set_text(&mut self.db).to(text);
             }
         } else {
-            trace!("rediscover: parsing new file {}", path.display());
+            trace!("Rediscover: parsing new file {}", path.display());
             let file = SourceFile::new(
                 &self.db,
                 text,
@@ -536,7 +536,7 @@ impl Discoverer {
     pub fn rediscover_changed(&mut self, changed: &[PathBuf]) -> Vec<TestItem> {
         let changed = Self::canonicalize_paths(changed);
         debug!(
-            "rediscover_changed: processing {} changed paths",
+            "Rediscover_changed: processing {} changed paths",
             changed.len()
         );
         let mut touched: Vec<PathBuf> = Vec::new();
@@ -549,7 +549,7 @@ impl Discoverer {
                     touched.push(path.clone());
                 } else {
                     trace!(
-                        "rediscover_changed: removing deleted file {}",
+                        "Rediscover_changed: removing deleted file {}",
                         path.display()
                     );
                     self.import_graph.remove(path);
@@ -590,7 +590,7 @@ impl Discoverer {
             .flat_map(|r| r.parsed.tests.clone())
             .collect();
         super::sort_tests(&mut tests);
-        debug!("rediscover_changed: {} tests after update", tests.len());
+        debug!("Rediscover_changed: {} tests after update", tests.len());
         tests
     }
 
@@ -628,7 +628,7 @@ impl Discoverer {
             .collect();
         modules.sort();
         debug!(
-            "affected_modules: {:?} → {:?}",
+            "Affected_modules: {:?} → {:?}",
             changed
                 .iter()
                 .map(|p| p.display().to_string())
@@ -651,7 +651,7 @@ impl Discoverer {
             })
             .collect();
         debug!(
-            "tests_for_changed: {:?} → {} tests",
+            "Tests_for_changed: {:?} → {} tests",
             Self::canonicalize_paths(changed)
                 .iter()
                 .map(|p| p.display().to_string())

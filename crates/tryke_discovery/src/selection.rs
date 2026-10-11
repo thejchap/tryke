@@ -80,7 +80,7 @@ impl Discoverer {
         }
 
         if !options.paths.is_empty() && !options.changed && !options.changed_first {
-            debug!("path-restricted discovery: falling back to full discovery");
+            debug!("Path-restricted discovery: falling back to full discovery");
         }
 
         let all_tests = self.rediscover();
@@ -180,7 +180,7 @@ fn resolve_walk_roots(root: &Path, path_specs: &[PathSpec]) -> Option<Vec<PathBu
         };
         let Ok(resolved) = abs.canonicalize() else {
             debug!(
-                "path-restricted discovery: {} does not exist on disk",
+                "Path-restricted discovery: {} does not exist on disk",
                 abs.display()
             );
             return None;
@@ -257,6 +257,53 @@ mod tests {
             "should find the branch's test: {:?}",
             discovered.tests.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
+    }
+
+    fn assert_local_helper_change_selects_affected(stage: bool) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        seed_git_repo_with_main(
+            dir.path(),
+            &[
+                ("helpers.py", "def helper(): return 1\n"),
+                (
+                    "test_affected.py",
+                    "from tryke import test\nfrom helpers import helper\n\n@test\ndef test_affected(): helper()\n",
+                ),
+                (
+                    "test_unaffected.py",
+                    "from tryke import test\n\n@test\ndef test_unaffected(): pass\n",
+                ),
+            ],
+        );
+        git_run(dir.path(), &["checkout", "-b", "feature"]);
+
+        std::fs::write(dir.path().join("helpers.py"), "def helper(): return 2\n").expect("write");
+        if stage {
+            git_run(dir.path(), &["add", "helpers.py"]);
+        }
+
+        let project = Project::discover(dir.path());
+        let discovered = discover_project(
+            &project,
+            DiscoveryOptions {
+                changed: true,
+                base_branch: Some("main"),
+                ..DiscoveryOptions::default()
+            },
+        );
+        let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["test_affected"]);
+        assert_eq!(discovered.changed_files, Some(1));
+    }
+
+    #[test]
+    fn discover_tests_with_base_branch_includes_unstaged_change() {
+        assert_local_helper_change_selects_affected(false);
+    }
+
+    #[test]
+    fn discover_tests_with_base_branch_includes_staged_change() {
+        assert_local_helper_change_selects_affected(true);
     }
 
     // --- Changed-first tests ---

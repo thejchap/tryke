@@ -40,16 +40,17 @@ pub fn git_changed_files(root: &Path) -> Option<Vec<PathBuf>> {
 
 /// Collect files changed on the current branch relative to `base`.
 /// Uses three-dot merge-base diff so only the branch's own changes appear.
-/// Also includes untracked files (not captured by the diff).
+/// Also includes local working-tree changes (staged, unstaged, and untracked),
+/// which the commit-to-commit diff does not capture.
 /// Returns `None` if git is unavailable or a command fails.
 #[must_use]
 pub fn git_branch_changed_files(root: &Path, base: &str) -> Option<Vec<PathBuf>> {
     let diff_spec = format!("{base}...HEAD");
     let branch_diff = git_paths(root, &["diff", "--name-only", &diff_spec])?;
-    let untracked = git_paths(root, &["ls-files", "--others", "--exclude-standard"])?;
+    let working_tree = git_changed_files(root)?;
     let mut paths: Vec<PathBuf> = branch_diff
         .into_iter()
-        .chain(untracked)
+        .chain(working_tree)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
@@ -301,6 +302,70 @@ mod tests {
 
         let result = git_branch_changed_files(dir.path(), "nonexistent-branch-xyz");
         assert!(result.is_none(), "nonexistent branch should return None");
+    }
+
+    #[test]
+    fn git_branch_changed_files_includes_unstaged_modification() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        seed_git_repo_with_main(dir.path(), &[("base.py", "x = 1\n")]);
+        git_run(dir.path(), &["checkout", "-b", "feature"]);
+
+        std::fs::write(dir.path().join("base.py"), "x = 2\n").expect("write");
+
+        let changed =
+            git_branch_changed_files(dir.path(), "main").expect("git branch changed files");
+        assert_eq!(changed, vec![dir.path().join("base.py")]);
+    }
+
+    #[test]
+    fn git_branch_changed_files_includes_staged_modification() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        seed_git_repo_with_main(dir.path(), &[("base.py", "x = 1\n")]);
+        git_run(dir.path(), &["checkout", "-b", "feature"]);
+
+        std::fs::write(dir.path().join("base.py"), "x = 2\n").expect("write");
+        git_run(dir.path(), &["add", "base.py"]);
+
+        let changed =
+            git_branch_changed_files(dir.path(), "main").expect("git branch changed files");
+        assert_eq!(changed, vec![dir.path().join("base.py")]);
+    }
+
+    #[test]
+    fn git_branch_changed_files_unions_commits_and_local_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        seed_git_repo_with_main(
+            dir.path(),
+            &[
+                ("committed.py", "a = 1\n"),
+                ("staged.py", "b = 1\n"),
+                ("unstaged.py", "c = 1\n"),
+                ("unchanged.py", "d = 1\n"),
+            ],
+        );
+        git_run(dir.path(), &["checkout", "-b", "feature"]);
+
+        std::fs::write(dir.path().join("committed.py"), "a = 2\n").expect("write");
+        git_run(dir.path(), &["add", "committed.py"]);
+        git_run(dir.path(), &["commit", "-m", "feature commit"]);
+
+        std::fs::write(dir.path().join("staged.py"), "b = 2\n").expect("write");
+        git_run(dir.path(), &["add", "staged.py"]);
+        std::fs::write(dir.path().join("unstaged.py"), "c = 2\n").expect("write");
+        std::fs::write(dir.path().join("untracked.py"), "e = 1\n").expect("write");
+        std::fs::write(dir.path().join("committed.py"), "a = 3\n").expect("write");
+
+        let changed =
+            git_branch_changed_files(dir.path(), "main").expect("git branch changed files");
+        assert_eq!(
+            changed,
+            vec![
+                dir.path().join("committed.py"),
+                dir.path().join("staged.py"),
+                dir.path().join("unstaged.py"),
+                dir.path().join("untracked.py"),
+            ]
+        );
     }
 
     #[test]

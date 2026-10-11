@@ -1,11 +1,14 @@
 pub mod pool;
 pub mod protocol;
 pub mod schedule;
-pub mod worker;
+/// Per-slot worker lifecycle. Entirely crate-internal: the pool is the only
+/// way to drive a worker, and `WorkerProcess` lives in [`worker_process`].
+mod worker;
+pub mod worker_process;
 
-pub use pool::{WorkerPool, WorkerPoolOptions, path_to_module};
+pub use pool::{WorkerPool, WorkerPoolOptions, WorkerRun};
 pub use schedule::{DistMode, WorkUnit, partition, partition_with_hooks};
-pub use worker::WorkerProcess;
+pub use worker_process::WorkerProcess;
 
 /// Return the default number of worker processes for the current machine.
 #[must_use]

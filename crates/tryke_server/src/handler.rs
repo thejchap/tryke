@@ -10,6 +10,7 @@ use tokio::{
     sync::{Mutex, mpsc},
 };
 use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 use tryke_runner::{DistMode, WorkerPool, partition_with_hooks};
 use tryke_types::filter::TestFilter;
 use tryke_types::{RunSummary, TestItem, TestOutcome};
@@ -20,8 +21,122 @@ use crate::protocol::{
     RunParams, RunResponse, RunStartParams, TestCompleteParams,
 };
 
-/// Manages communication with a client over the given reader/writer
-pub struct ConnectionHandler<R, W> {
+pub(crate) struct RunRequest {
+    id: Value,
+    params: RunParams,
+}
+
+/// Owns the worker pool and executes queued runs in arrival order.
+pub(crate) struct RunDispatcher {
+    discoverer: Arc<tokio::sync::Mutex<tryke_discovery::Discoverer>>,
+    worker_pool: WorkerPool,
+    outbound_tx: mpsc::Sender<Bytes>,
+    run_rx: mpsc::Receiver<RunRequest>,
+    cancellation: CancellationToken,
+}
+
+impl RunDispatcher {
+    pub(crate) fn new(
+        discoverer: Arc<tokio::sync::Mutex<tryke_discovery::Discoverer>>,
+        worker_pool: WorkerPool,
+        outbound_tx: mpsc::Sender<Bytes>,
+        run_rx: mpsc::Receiver<RunRequest>,
+        cancellation: CancellationToken,
+    ) -> Self {
+        Self {
+            discoverer,
+            worker_pool,
+            outbound_tx,
+            run_rx,
+            cancellation,
+        }
+    }
+
+    pub(crate) async fn run(mut self) -> anyhow::Result<()> {
+        let mut dispatch_result = Ok(());
+
+        loop {
+            let request = tokio::select! {
+                biased;
+                () = self.cancellation.cancelled() => break,
+                request = self.run_rx.recv() => {
+                    let Some(request) = request else {
+                        break;
+                    };
+                    request
+                }
+            };
+
+            let execution = execute_run(
+                request.params,
+                &self.discoverer,
+                &self.outbound_tx,
+                &self.worker_pool,
+            );
+            tokio::pin!(execution);
+
+            let result = tokio::select! {
+                biased;
+                () = self.cancellation.cancelled() => break,
+                result = &mut execution => result,
+            };
+
+            let (run_id, summary) = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    dispatch_result = Err(error);
+                    break;
+                }
+            };
+
+            let response = Response::new(request.id, RunResponse { run_id, summary })
+                .into_json_line()
+                .context("Failed to serialize run response");
+
+            let response = match response {
+                Ok(response) => response,
+                Err(error) => {
+                    dispatch_result = Err(error);
+                    break;
+                }
+            };
+
+            let send_result = tokio::select! {
+                biased;
+                () = self.cancellation.cancelled() => break,
+                result = self.outbound_tx.send(response) => result,
+            };
+
+            if send_result.is_err() {
+                dispatch_result = Err(anyhow::anyhow!(
+                    "Outbound channel closed while sending run response"
+                ));
+                break;
+            }
+        }
+
+        let shutdown_result = self.worker_pool.shutdown().await;
+
+        combine_shutdown(dispatch_result, shutdown_result)
+    }
+}
+
+fn combine_shutdown(
+    result: anyhow::Result<()>,
+    shutdown_result: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    match (result, shutdown_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Err(shutdown_error)) => Err(shutdown_error),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(shutdown_error)) => Err(error.context(format!(
+            "Worker pool shutdown also failed: {shutdown_error:#}"
+        ))),
+    }
+}
+
+/// Manages communication with a client over the given reader/writer.
+pub(crate) struct ConnectionHandler<R, W> {
     /// Reader to read message off of.
     reader: R,
 
@@ -31,8 +146,8 @@ pub struct ConnectionHandler<R, W> {
     /// Test discoverer.
     discoverer: Arc<tokio::sync::Mutex<tryke_discovery::Discoverer>>,
 
-    /// Worker pool.
-    worker_pool: Arc<WorkerPool>,
+    /// FIFO run queue.
+    run_tx: mpsc::Sender<RunRequest>,
 
     /// Outbound message queue.
     ///
@@ -40,8 +155,8 @@ pub struct ConnectionHandler<R, W> {
     outbound_rx: mpsc::Receiver<Bytes>,
     outbound_tx: mpsc::Sender<Bytes>,
 
-    /// Serializes test runs that share the worker pool.
-    run_lock: Arc<Mutex<()>>,
+    /// Session-wide cancellation.
+    cancellation: CancellationToken,
 }
 
 impl<R, W> ConnectionHandler<R, W>
@@ -49,27 +164,28 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    pub fn new(
+    pub(crate) fn new(
         reader: R,
         writer: W,
         discoverer: Arc<tokio::sync::Mutex<tryke_discovery::Discoverer>>,
         outbound_rx: mpsc::Receiver<Bytes>,
         outbound_tx: mpsc::Sender<Bytes>,
-        worker_pool: Arc<WorkerPool>,
-        run_lock: Arc<Mutex<()>>,
+        run_tx: mpsc::Sender<RunRequest>,
+        cancellation: CancellationToken,
     ) -> Self {
         Self {
             reader,
             writer,
             discoverer,
-            worker_pool,
+            run_tx,
             outbound_rx,
             outbound_tx,
-            run_lock,
+            cancellation,
         }
     }
 
-    /// Runs the server protocol until the client closes its input.
+    /// Runs the server protocol until the client closes its input, then
+    /// finishes the runs it already queued.
     ///
     /// Requests arrive as newline-delimited JSON-RPC messages. Responses and
     /// asynchronous notifications share one outbound queue and one writer task.
@@ -82,15 +198,12 @@ where
             reader,
             writer,
             discoverer,
-            worker_pool: pool,
+            run_tx,
             outbound_rx,
             outbound_tx,
-            run_lock,
+            cancellation,
         } = self;
 
-        // The writer task is the sole owner of the client output. Routing both
-        // responses and asynchronous notifications through it prevents
-        // concurrent writes from interleaving JSON-RPC messages.
         let mut writer_task = tokio::spawn(async move {
             let mut writer = BufWriter::new(writer);
             let mut outbound_rx = outbound_rx;
@@ -109,12 +222,12 @@ where
         let mut reader = BufReader::new(reader);
         let mut line = String::new();
 
-        loop {
+        let input_closed = loop {
             line.clear();
 
-            // A connection cannot make progress once its writer stops, so wait
-            // for either the next request or early writer termination.
             let read_result = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => break false,
                 result = reader.read_line(&mut line) => result,
                 result = &mut writer_task => {
                     return result.context("outbound writer task failed")?;
@@ -123,7 +236,7 @@ where
 
             match read_result {
                 // EOF is the client's normal shutdown signal.
-                Ok(0) => break,
+                Ok(0) => break true,
                 Ok(_) => {}
                 Err(error) => {
                     // A read failure makes further output irrelevant.
@@ -133,37 +246,61 @@ where
                 }
             }
 
-            // Request handlers can enqueue notifications and optionally return
-            // a response. The response goes through the same queue so only the
-            // writer task ever touches the transport.
-            let response =
-                match handle_request(&line, &discoverer, &outbound_tx, &pool, &run_lock).await {
-                    Ok(response) => response,
-                    Err(_) if outbound_tx.is_closed() => {
-                        // The writer owns the useful transport error. Await it
-                        // instead of returning the secondary channel error.
-                        return writer_task.await.context("outbound writer task failed")?;
-                    }
-                    Err(error) => {
-                        // Stop the writer before returning a request-processing
-                        // error so it cannot outlive the connection.
-                        writer_task.abort();
-                        let _ = writer_task.await;
-                        return Err(error);
-                    }
-                };
+            let request = handle_request(&line, &discoverer, &outbound_tx, &run_tx);
+            tokio::pin!(request);
 
-            if let Some(bytes) = response
-                && outbound_tx.send(bytes).await.is_err()
-            {
-                // A closed receiver means the writer has already stopped.
-                return writer_task.await.context("outbound writer task failed")?;
+            let request_result = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => break false,
+                result = &mut request => result,
+            };
+
+            let response = match request_result {
+                Ok(response) => response,
+                Err(_) if outbound_tx.is_closed() => {
+                    // The writer owns the useful transport error. Await it
+                    // instead of returning the secondary channel error.
+                    return writer_task.await.context("outbound writer task failed")?;
+                }
+                Err(error) => {
+                    // Stop the writer before returning a request-processing
+                    // error so it cannot outlive the connection.
+                    writer_task.abort();
+                    let _ = writer_task.await;
+                    return Err(error);
+                }
+            };
+
+            if let Some(bytes) = response {
+                let send_result = tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => break false,
+                    result = outbound_tx.send(bytes) => result,
+                };
+                if send_result.is_err() {
+                    // A closed receiver means the writer has already stopped.
+                    return writer_task.await.context("outbound writer task failed")?;
+                }
+            }
+        };
+
+        if input_closed {
+            // Closing input ends the session but does not withdraw accepted
+            // runs. Dropping these senders lets the dispatcher drain its
+            // queue; the writer then stops once every sender is gone, after
+            // flushing what the remaining runs produced.
+            drop(run_tx);
+            drop(outbound_tx);
+            let drained = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => None,
+                result = &mut writer_task => Some(result),
+            };
+            if let Some(result) = drained {
+                return result.context("outbound writer task failed")?;
             }
         }
 
-        // Other server tasks retain outbound sender clones, so EOF alone does
-        // not close the queue. Cancel the writer explicitly; cancellation is
-        // therefore the expected successful shutdown result.
         writer_task.abort();
 
         match writer_task.await {
@@ -227,32 +364,69 @@ pub(crate) async fn send_notification<T: Serialize>(
         .map_err(|_| NotificationError::Closed { method })
 }
 
+/// Runs a synchronous discovery operation on Tokio's blocking pool.
+///
+/// The lock is acquired on the async side so waiting for it never occupies a
+/// blocking thread. The owned guard moves into the blocking task and is
+/// released when the operation finishes, before the caller sends anything.
+pub(crate) async fn with_discoverer<T: Send + 'static>(
+    discoverer: &Arc<Mutex<tryke_discovery::Discoverer>>,
+    operation: impl FnOnce(&mut tryke_discovery::Discoverer) -> T + Send + 'static,
+) -> anyhow::Result<T> {
+    let mut guard = Arc::clone(discoverer).lock_owned().await;
+    tokio::task::spawn_blocking(move || operation(&mut guard))
+        .await
+        .context("Discovery task failed")
+}
+
 pub(crate) async fn apply_change(
-    discoverer: &Mutex<tryke_discovery::Discoverer>,
+    discoverer: &Arc<Mutex<tryke_discovery::Discoverer>>,
     outbound_tx: &mpsc::Sender<Bytes>,
     paths: &[PathBuf],
-) -> Result<(), NotificationError> {
+) -> anyhow::Result<()> {
+    if let Some(tests) = discover_change(discoverer, paths).await? {
+        notify_change(outbound_tx, tests).await?;
+    }
+    Ok(())
+}
+
+/// Applies changed `paths` to discovery and returns the affected tests, or
+/// `None` when no path was eligible for discovery.
+pub(crate) async fn discover_change(
+    discoverer: &Arc<Mutex<tryke_discovery::Discoverer>>,
+    paths: &[PathBuf],
+) -> anyhow::Result<Option<Vec<TestItem>>> {
     if paths.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
 
-    let impact = discoverer.lock().await.apply_changes(paths);
+    let paths = paths.to_vec();
+    let impact = with_discoverer(discoverer, move |discoverer| {
+        discoverer.apply_changes(&paths)
+    })
+    .await?;
     if impact.paths.is_empty() {
-        debug!("apply_change: no eligible paths");
-        return Ok(());
+        debug!("Apply_change: no eligible paths");
+        return Ok(None);
     }
 
     debug!(
-        "apply_change: {} affected modules, {} affected tests",
+        "Apply_change: {} affected modules, {} affected tests",
         impact.affected_modules.len(),
         impact.affected_tests.len(),
     );
+    Ok(Some(impact.affected_tests))
+}
+
+/// Tells the client which tests a file change affected.
+pub(crate) async fn notify_change(
+    outbound_tx: &mpsc::Sender<Bytes>,
+    tests: Vec<TestItem>,
+) -> Result<(), NotificationError> {
     send_notification(
         outbound_tx,
         NotificationMethod::DiscoverComplete,
-        DiscoverCompleteParams {
-            tests: impact.affected_tests,
-        },
+        DiscoverCompleteParams { tests },
     )
     .await
 }
@@ -281,11 +455,14 @@ async fn execute_run(
     discoverer: &tokio::sync::Mutex<tryke_discovery::Discoverer>,
     outbound_tx: &mpsc::Sender<Bytes>,
     pool: &WorkerPool,
-    run_lock: &Mutex<()>,
 ) -> anyhow::Result<(String, RunSummary)> {
     let run_id = run_params.run_id.clone();
-    let _run_guard = run_lock.lock().await;
-    pool.restart_workers().await;
+    // Every server run must execute against current source. A worker that
+    // cannot be restarted is still holding the previous interpreter, so fail
+    // the run rather than reporting stale results as fresh ones.
+    pool.restart_workers()
+        .await
+        .context("Failed to restart workers before run")?;
     let discovery_start = Instant::now();
     let (all_tests, hooks) = {
         let guard = discoverer.lock().await;
@@ -318,7 +495,7 @@ async fn execute_run(
     for warning in &partition.warnings {
         log::warn!("{}", warning.message);
     }
-    let mut stream = pool.submit(partition.units);
+    let mut stream = pool.submit(partition.units)?;
     let mut passed = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;
@@ -378,12 +555,11 @@ async fn execute_run(
 ///
 /// # Errors
 /// Returns an error if an outbound message cannot be serialized or queued.
-pub async fn handle_request(
+pub(crate) async fn handle_request(
     line: &str,
-    discoverer: &tokio::sync::Mutex<tryke_discovery::Discoverer>,
+    discoverer: &Arc<Mutex<tryke_discovery::Discoverer>>,
     outbound_tx: &mpsc::Sender<Bytes>,
-    worker_pool: &WorkerPool,
-    run_lock: &Mutex<()>,
+    run_tx: &mpsc::Sender<RunRequest>,
 ) -> anyhow::Result<Option<Bytes>> {
     let Ok(req) = serde_json::from_str::<Request>(line.trim()) else {
         return Ok(None);
@@ -398,7 +574,8 @@ pub async fn handle_request(
             // ignored rather than validated, so a malformed or absent
             // `params` can never drop the response and hang a client
             // that supplied an `id`.
-            let tests = discoverer.lock().await.rediscover();
+            let tests =
+                with_discoverer(discoverer, tryke_discovery::Discoverer::rediscover).await?;
             send_notification(
                 outbound_tx,
                 NotificationMethod::DiscoverComplete,
@@ -410,45 +587,8 @@ pub async fn handle_request(
             Response::new(id, serde_json::json!({ "tests": tests })).into_json_line()?
         }
         RequestMethod::DidChange => {
-            let Some(params) = req.params else {
-                return Ok(Some(
-                    ErrorResponse::new(
-                        req.id,
-                        INVALID_PARAMS,
-                        "method 'did_change' requires params with paths".to_string(),
-                    )
-                    .into_json_line()?,
-                ));
-            };
-            let dc = match serde_json::from_value::<DidChangeParams>(params) {
-                Ok(dc) => dc,
-                Err(e) => {
-                    return Ok(Some(
-                        ErrorResponse::new(
-                            req.id,
-                            INVALID_PARAMS,
-                            format!("invalid params for 'did_change': {e}"),
-                        )
-                        .into_json_line()?,
-                    ));
-                }
-            };
-            if dc.paths.is_empty() {
-                let tests = discoverer.lock().await.rediscover();
-                debug!(
-                    "did_change: empty paths — full rediscover, {} tests",
-                    tests.len()
-                );
-                send_notification(
-                    outbound_tx,
-                    NotificationMethod::DiscoverComplete,
-                    DiscoverCompleteParams { tests },
-                )
-                .await?;
-            } else {
-                apply_change(discoverer, outbound_tx, &dc.paths).await?;
-            }
-            Response::new(id, "ok").into_json_line()?
+            return handle_did_change(req.id.clone(), req.params.clone(), discoverer, outbound_tx)
+                .await;
         }
         RequestMethod::Run => {
             let Some(params) = req.params else {
@@ -474,9 +614,14 @@ pub async fn handle_request(
                     ));
                 }
             };
-            let (run_id, summary) =
-                execute_run(run_params, discoverer, outbound_tx, worker_pool, run_lock).await?;
-            Response::new(id, RunResponse { run_id, summary }).into_json_line()?
+            run_tx
+                .send(RunRequest {
+                    id,
+                    params: run_params,
+                })
+                .await
+                .map_err(|_| anyhow::anyhow!("Run dispatcher is closed"))?;
+            return Ok(None);
         }
         RequestMethod::Unknown(method) => ErrorResponse::new(
             req.id,
@@ -486,6 +631,55 @@ pub async fn handle_request(
         .into_json_line()?,
     };
     Ok(Some(response))
+}
+
+async fn handle_did_change(
+    id: Option<Value>,
+    params: Option<Value>,
+    discoverer: &Arc<Mutex<tryke_discovery::Discoverer>>,
+    outbound_tx: &mpsc::Sender<Bytes>,
+) -> anyhow::Result<Option<Bytes>> {
+    let Some(params) = params else {
+        return Ok(Some(
+            ErrorResponse::new(
+                id,
+                INVALID_PARAMS,
+                "method 'did_change' requires params with paths".to_string(),
+            )
+            .into_json_line()?,
+        ));
+    };
+    let dc = match serde_json::from_value::<DidChangeParams>(params) {
+        Ok(dc) => dc,
+        Err(error) => {
+            return Ok(Some(
+                ErrorResponse::new(
+                    id,
+                    INVALID_PARAMS,
+                    format!("invalid params for 'did_change': {error}"),
+                )
+                .into_json_line()?,
+            ));
+        }
+    };
+    if dc.paths.is_empty() {
+        let tests = with_discoverer(discoverer, tryke_discovery::Discoverer::rediscover).await?;
+        debug!(
+            "Did_change: empty paths — full rediscover, {} tests",
+            tests.len()
+        );
+        send_notification(
+            outbound_tx,
+            NotificationMethod::DiscoverComplete,
+            DiscoverCompleteParams { tests },
+        )
+        .await?;
+    } else {
+        apply_change(discoverer, outbound_tx, &dc.paths).await?;
+    }
+    Ok(Some(
+        Response::new(id.unwrap_or(Value::Null), "ok").into_json_line()?,
+    ))
 }
 
 #[cfg(test)]
@@ -549,22 +743,122 @@ mod tests {
         TestProject::new().expect("create test project")
     }
 
-    async fn make_pool() -> Arc<WorkerPool> {
-        Arc::new(
-            WorkerPool::spawn_from_parts(
-                1,
-                &test_python_bin(),
-                std::path::Path::new("."),
-                None,
-                LevelFilter::Off,
-                false,
-            )
-            .await,
+    async fn make_owned_pool() -> WorkerPool {
+        WorkerPool::spawn_from_parts(
+            1,
+            &test_python_bin(),
+            std::path::Path::new("."),
+            None,
+            LevelFilter::Off,
+            false,
         )
+        .await
+    }
+
+    async fn make_pool() -> Arc<WorkerPool> {
+        Arc::new(make_owned_pool().await)
     }
 
     fn make_run_lock() -> Arc<Mutex<()>> {
         Arc::new(Mutex::new(()))
+    }
+
+    /// Compatibility harness for request-level tests. Production requests are
+    /// queued by `super::handle_request`; the harness drains that queue and
+    /// executes the request so existing assertions can inspect a completed
+    /// response without constructing a full connection.
+    async fn handle_request(
+        line: &str,
+        discoverer: &Arc<Mutex<Discoverer>>,
+        outbound_tx: &mpsc::Sender<Bytes>,
+        worker_pool: &WorkerPool,
+        run_lock: &Mutex<()>,
+    ) -> anyhow::Result<Option<Bytes>> {
+        let (run_tx, mut run_rx) = mpsc::channel(1);
+        let response = super::handle_request(line, discoverer, outbound_tx, &run_tx).await?;
+        if response.is_some() {
+            return Ok(response);
+        }
+
+        let request = run_rx
+            .recv()
+            .await
+            .context("Queued request was not available to the test harness")?;
+        let _run_guard = run_lock.lock().await;
+        let (run_id, summary) =
+            execute_run(request.params, discoverer, outbound_tx, worker_pool).await?;
+        Ok(Some(
+            Response::new(request.id, RunResponse { run_id, summary }).into_json_line()?,
+        ))
+    }
+
+    fn make_discoverer(dir: &TestProject) -> Arc<Mutex<Discoverer>> {
+        let root = dir.root();
+        let src_roots = vec![root.canonicalize().unwrap_or_else(|_| root.to_path_buf())];
+        Arc::new(Mutex::new(Discoverer::from_parts(
+            root,
+            src_roots,
+            &[],
+            None,
+        )))
+    }
+
+    #[tokio::test]
+    async fn discovery_blocking_work_keeps_runtime_responsive() {
+        let dir = make_root();
+        fs::write(
+            dir.root().join("test_named.py"),
+            "@test\ndef test_named(): pass\n",
+        )
+        .expect("write test file");
+        let disc = make_discoverer(&dir);
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
+        // On this current-thread runtime, the release below can only be sent
+        // if the closure's wait does not occupy the runtime thread.
+        let discovery = tokio::spawn({
+            let disc = Arc::clone(&disc);
+            async move {
+                with_discoverer(&disc, move |discoverer| {
+                    let _ = entered_tx.send(());
+                    let released = release_rx.recv_timeout(Duration::from_secs(10)).is_ok();
+                    (released, discoverer.rediscover())
+                })
+                .await
+            }
+        });
+
+        let entered = time::timeout(Duration::from_secs(10), entered_rx).await;
+        let _ = release_tx.send(());
+        let (released, tests) = discovery
+            .await
+            .expect("discovery task joins")
+            .expect("discovery succeeds");
+        assert!(matches!(entered, Ok(Ok(()))), "closure entry observed");
+        assert!(released, "runtime released the blocking discovery gate");
+        assert_eq!(
+            tests.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            ["test_named"]
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_blocking_panic_is_reported() {
+        let dir = make_root();
+        let disc = make_discoverer(&dir);
+
+        let error = with_discoverer::<()>(&disc, |_| panic!("intentional discovery panic"))
+            .await
+            .expect_err("panicking discovery should fail");
+
+        assert!(
+            error.chain().any(|cause| cause
+                .downcast_ref::<tokio::task::JoinError>()
+                .is_some_and(tokio::task::JoinError::is_panic)),
+            "error should carry the panicking JoinError: {error:#}"
+        );
+        assert!(disc.try_lock().is_ok(), "discoverer lock was released");
     }
 
     #[tokio::test]
@@ -1306,21 +1600,31 @@ mod tests {
             &[],
             None,
         )));
-        let pool = make_pool().await;
+        let pool = make_owned_pool().await;
         let (outbound_tx, outbound_rx) = mpsc::channel::<Bytes>(64);
-        let run_lock = make_run_lock();
+        let (run_tx, run_rx) = mpsc::channel(8);
+        let cancellation = CancellationToken::new();
+        let dispatcher = RunDispatcher::new(
+            Arc::clone(&disc),
+            pool,
+            outbound_tx.clone(),
+            run_rx,
+            cancellation.clone(),
+        );
+        let dispatcher_task = tokio::spawn(dispatcher.run());
 
         let (client, server_side) = tokio::io::duplex(1 << 16);
         let (server_r, server_w) = tokio::io::split(server_side);
-        tokio::spawn(async move {
+        let handler_cancellation = cancellation.clone();
+        let handler_task = tokio::spawn(async move {
             ConnectionHandler::new(
                 server_r,
                 server_w,
                 disc,
                 outbound_rx,
                 outbound_tx,
-                pool,
-                run_lock,
+                run_tx,
+                handler_cancellation,
             )
             .run()
             .await
@@ -1353,6 +1657,88 @@ mod tests {
         }
         let response = response.expect("loop exits only once the response is seen");
         assert_eq!(response["result"]["run_id"], "r1");
+
+        cancellation.cancel();
+        drop(client_w);
+        handler_task.await.expect("Join connection handler");
+        dispatcher_task
+            .await
+            .expect("Join run dispatcher")
+            .expect("Shut down run dispatcher");
+    }
+
+    #[tokio::test]
+    async fn closing_input_finishes_accepted_runs() {
+        // A client may send `run` and close stdin straight away; the run it
+        // was promised must still execute and answer.
+        let dir = make_root();
+        let disc = make_discoverer(&dir);
+        let pool = make_owned_pool().await;
+        let (outbound_tx, outbound_rx) = mpsc::channel::<Bytes>(64);
+        let (run_tx, run_rx) = mpsc::channel(8);
+        let cancellation = CancellationToken::new();
+        let dispatcher_task = tokio::spawn(
+            RunDispatcher::new(
+                Arc::clone(&disc),
+                pool,
+                outbound_tx.clone(),
+                run_rx,
+                cancellation.clone(),
+            )
+            .run(),
+        );
+
+        let (client, server_side) = tokio::io::duplex(1 << 16);
+        let (server_r, server_w) = tokio::io::split(server_side);
+        let handler_task = tokio::spawn(
+            ConnectionHandler::new(
+                server_r,
+                server_w,
+                disc,
+                outbound_rx,
+                outbound_tx,
+                run_tx,
+                cancellation,
+            )
+            .run(),
+        );
+
+        let (client_r, mut client_w) = tokio::io::split(client);
+        client_w
+            .write_all(
+                b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"run\",\"params\":{\"run_id\":\"r1\"}}\n",
+            )
+            .await
+            .expect("send run request");
+        client_w.shutdown().await.expect("close client input");
+
+        let mut reader = BufReader::new(client_r);
+        let mut response = None;
+        while response.is_none() {
+            let mut line = String::new();
+            let read = time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
+                .await
+                .expect("session went quiet before the run response")
+                .expect("read from server");
+            assert_ne!(read, 0, "server closed before answering the run");
+            let value: serde_json::Value = serde_json::from_str(line.trim()).expect("JSON line");
+            if value.get("id").is_some() {
+                response = Some(value);
+            }
+        }
+        let response = response.expect("loop exits only once the response is seen");
+        assert_eq!(response["result"]["run_id"], "r1");
+
+        time::timeout(Duration::from_secs(10), handler_task)
+            .await
+            .expect("handler should stop once queued runs finish")
+            .expect("Join connection handler")
+            .expect("connection handler should finish cleanly");
+        time::timeout(Duration::from_secs(10), dispatcher_task)
+            .await
+            .expect("dispatcher should stop once its queue drains")
+            .expect("Join run dispatcher")
+            .expect("Shut down run dispatcher");
     }
 
     #[tokio::test]
@@ -1366,9 +1752,8 @@ mod tests {
             &[],
             None,
         )));
-        let pool = make_pool().await;
         let (outbound_tx, outbound_rx) = mpsc::channel(1);
-        let run_lock = make_run_lock();
+        let (run_tx, _run_rx) = mpsc::channel(1);
         let (mut client, server_reader) = tokio::io::duplex(64);
 
         let handler = ConnectionHandler::new(
@@ -1377,8 +1762,8 @@ mod tests {
             discoverer,
             outbound_rx,
             outbound_tx,
-            pool,
-            run_lock,
+            run_tx,
+            CancellationToken::new(),
         );
         client
             .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n")

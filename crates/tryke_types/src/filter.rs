@@ -132,8 +132,16 @@ fn tokenize(input: &str) -> Vec<Token> {
             }
             _ => {
                 let mut word = String::new();
+                // Case labels are literal through the next `]`, not nested syntax.
+                // An unclosed `[` must not consume the surrounding expression.
                 while let Some(&c) = chars.peek() {
-                    if c == ' ' || c == '\t' || c == '(' || c == ')' {
+                    if c == '['
+                        && let Some(end) = chars.clone().position(|ch| ch == ']')
+                    {
+                        word.extend(chars.by_ref().take(end + 1));
+                        continue;
+                    }
+                    if matches!(c, ' ' | '\t' | '(' | ')') {
                         break;
                     }
                     word.push(c);
@@ -314,8 +322,11 @@ impl TestFilter {
         filter: Option<&str>,
         markers: Option<&str>,
     ) -> Result<Self, FilterError> {
+        // Editors pass `""` to mean "the whole project"; skip exactly-empty
+        // entries so they neither error nor override real restrictions.
         let path_specs = paths
             .iter()
+            .filter(|s| !s.is_empty())
             .map(|s| PathSpec::parse(s))
             .collect::<Result<Vec<_>, _>>()?;
         let expr = filter.map(FilterExpr::parse).transpose()?;
@@ -795,5 +806,154 @@ mod tests {
         let filtered = filter.apply(tests);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "test_add");
+    }
+
+    // --- Editor selection contracts ---
+
+    fn make_case(name: &str, file: &str, label: &str, index: u32) -> TestItem {
+        TestItem {
+            case_label: Some(label.into()),
+            case_index: Some(index),
+            ..make_test(name, file, 1)
+        }
+    }
+
+    fn ids(tests: &[TestItem]) -> Vec<String> {
+        tests.iter().map(TestItem::id).collect()
+    }
+
+    fn select(filter: &str, tests: &[TestItem]) -> Vec<String> {
+        let filter = TestFilter::from_args(&[], Some(filter), None).unwrap();
+        ids(&filter.apply(tests.to_vec()))
+    }
+
+    #[test]
+    fn empty_path_selects_everything() {
+        let tests = vec![
+            make_test("test_a", "tests/a.py", 1),
+            make_test("test_b", "tests/b.py", 1),
+        ];
+        let filter = TestFilter::from_args(&[String::new()], None, None).unwrap();
+        assert_eq!(ids(&filter.apply(tests.clone())), ids(&tests));
+    }
+
+    #[test]
+    fn empty_path_does_not_override_real_paths() {
+        let tests = vec![
+            make_test("test_a", "tests/a.py", 1),
+            make_test("test_b", "tests/b.py", 1),
+        ];
+        let filter =
+            TestFilter::from_args(&[String::new(), "tests/a.py".into()], None, None).unwrap();
+        assert_eq!(ids(&filter.apply(tests)), vec!["tests/a.py::test_a"]);
+    }
+
+    #[test]
+    fn empty_path_keeps_keyword_and_marker_restrictions() {
+        let mut fast = make_test("test_add", "tests/a.py", 1);
+        fast.tags = vec!["fast".into()];
+        let mut slow = make_test("test_add_slow", "tests/a.py", 5);
+        slow.tags = vec!["slow".into()];
+        let other = make_test("test_sub", "tests/a.py", 9);
+        let filter = TestFilter::from_args(&[String::new()], Some("add"), Some("fast")).unwrap();
+        assert!(!filter.is_empty());
+        assert_eq!(
+            ids(&filter.apply(vec![fast, slow, other])),
+            vec!["tests/a.py::test_add"]
+        );
+    }
+
+    #[test]
+    fn bracketed_label_with_space_selects_exact_case() {
+        let tests = vec![
+            make_case("param", "tests/a.py", "sp ace", 0),
+            make_case("param", "tests/a.py", "other", 1),
+            make_test("sp", "tests/a.py", 9),
+        ];
+        assert_eq!(
+            select("param[sp ace]", &tests),
+            vec!["tests/a.py::param[sp ace]"]
+        );
+    }
+
+    #[test]
+    fn bracketed_label_with_tab_parens_and_operator_words() {
+        let tests = vec![
+            make_case("param", "tests/a.py", "a and (b)", 0),
+            make_case("param", "tests/a.py", "x\ty", 1),
+            make_case("param", "tests/a.py", "a", 2),
+        ];
+        assert_eq!(
+            select("param[a and (b)]", &tests),
+            vec!["tests/a.py::param[a and (b)]"]
+        );
+        assert_eq!(
+            select("param[x\ty]", &tests),
+            vec!["tests/a.py::param[x\ty]"]
+        );
+    }
+
+    #[test]
+    fn nested_brackets_stay_in_identifier() {
+        let tests = vec![
+            make_case("param", "tests/a.py", "[a b]", 0),
+            make_case("param", "tests/a.py", "a b", 1),
+        ];
+        assert_eq!(
+            select("param[[a b]]", &tests),
+            vec!["tests/a.py::param[[a b]]"]
+        );
+    }
+
+    #[test]
+    fn opening_bracket_in_label_keeps_boolean_boundaries() {
+        let tests = vec![
+            make_case("param", "tests/a.py", "a[b", 0),
+            make_case("param", "tests/a.py", "a[b extra", 1),
+            make_test("other", "tests/a.py", 10),
+            make_test("unrelated", "tests/a.py", 20),
+        ];
+        assert_eq!(
+            select("(param[a[b]) or other", &tests),
+            vec!["tests/a.py::param[a[b]", "tests/a.py::other"]
+        );
+    }
+
+    #[test]
+    fn unmatched_brackets_keep_boolean_boundaries() {
+        let tests = vec![
+            make_test("a]", "tests/a.py", 1),
+            make_test("b", "tests/a.py", 2),
+            make_test("c", "tests/a.py", 3),
+        ];
+        assert_eq!(
+            select("a] or b", &tests),
+            vec!["tests/a.py::a]", "tests/a.py::b"]
+        );
+
+        let tests = vec![
+            make_case("param", "tests/a.py", "sp ace", 0),
+            make_case("param", "tests/a.py", "other", 1),
+            make_test("x", "tests/a.py", 10),
+        ];
+        assert_eq!(
+            select("param[sp or x", &tests),
+            vec!["tests/a.py::param[sp ace]", "tests/a.py::x"]
+        );
+    }
+
+    #[test]
+    fn operators_outside_brackets_still_apply() {
+        let slow_other = make_test("other_slow", "tests/a.py", 20);
+        let tests = vec![
+            make_case("param", "tests/a.py", "sp ace", 0),
+            make_case("param", "tests/a.py", "nope", 1),
+            make_test("other", "tests/a.py", 10),
+            slow_other,
+        ];
+        assert_eq!(
+            select("(param[sp ace] or other) and not slow", &tests),
+            vec!["tests/a.py::param[sp ace]", "tests/a.py::other"]
+        );
     }
 }

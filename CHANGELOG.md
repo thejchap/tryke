@@ -38,12 +38,16 @@ Released on 2026-07-04.
 - Add `--workers` to `tryke server`
 - Discover Python environments from `VIRTUAL_ENV`, Conda, and the project
   `.venv`
+- Resolve one log level for Rust, reporter diagnostics, and Python workers
 
 ### Bug Fixes
 
 - Prevent watch and server runs from hanging while restarting worker processes
 - Prevent concurrent worker spawn timeouts with relative Python paths on macOS
 - Preserve virtual-environment interpreter symlinks during path resolution
+- Exit promptly on Ctrl+C while the server is discovering tests or its stdin
+  remains open
+- Interrupt initial test discovery and collect-only commands on Ctrl+C
 
 ### Refactoring
 

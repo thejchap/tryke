@@ -113,7 +113,7 @@ pub(crate) fn discover_file_from_ast(
     parsed: &db::ParsedAst,
 ) -> tryke_types::DiscoveredFile {
     let Some(module) = parsed.syntax() else {
-        trace!("parse error in {}", file.display());
+        trace!("Parse error in {}", file.display());
         return tryke_types::DiscoveredFile::default();
     };
     let result = crate::source::discover_file_from_body(

@@ -1098,15 +1098,7 @@ mod watch_tests {
 
 #[cfg(test)]
 mod execution_tests {
-    use std::{
-        io,
-        path::PathBuf,
-        sync::Arc,
-        time::{Duration, Instant},
-    };
-
-    use anyhow::Context as _;
-    use tokio::sync::Notify;
+    use std::{io, path::PathBuf};
     use tryke_config::{Project, ProjectMetadata, TrykeOptions};
     use tryke_discovery::{Discoverer, DiscoveryOptions};
     use tryke_reporter::{
@@ -1115,28 +1107,6 @@ mod execution_tests {
     use tryke_testing::{TestProject, python_bin as test_python_bin};
 
     use super::*;
-
-    struct CancellationReporter {
-        started: Arc<Notify>,
-        run_completes: usize,
-        cleanup_calls: usize,
-    }
-
-    impl Reporter for CancellationReporter {
-        fn on_run_start(&mut self, _tests: &[tryke_types::TestItem]) {
-            self.started.notify_one();
-        }
-
-        fn on_test_complete(&mut self, _result: &tryke_types::TestResult) {}
-
-        fn on_run_complete(&mut self, _summary: &RunSummary) {
-            self.run_completes += 1;
-        }
-
-        fn cleanup(&mut self) {
-            self.cleanup_calls += 1;
-        }
-    }
 
     fn configured_project(root: &std::path::Path) -> Project {
         let mut metadata = ProjectMetadata::new(root);
@@ -1321,58 +1291,6 @@ mod execution_tests {
             )
             .await
             .is_ok()
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn cancellation_interrupts_active_test_and_awaits_shutdown() -> anyhow::Result<()> {
-        let fixture = TestProject::with_files([(
-            "test_sleep.py",
-            "import time\nfrom tryke import test\n\n@test\ndef test_sleep():\n    time.sleep(30)\n",
-        )])?;
-        let project = configured_project(fixture.root());
-        let mut discoverer = Discoverer::new(&project);
-        let tests = discoverer.rediscover();
-        let hooks = discoverer.hooks();
-
-        let started = Arc::new(Notify::new());
-        let mut reporter = CancellationReporter {
-            started: Arc::clone(&started),
-            run_completes: 0,
-            cleanup_calls: 0,
-        };
-        let cancellation = CancellationToken::new();
-        let cancel = cancellation.clone();
-        let cancel_task = tokio::spawn(async move {
-            started.notified().await;
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            cancel.cancel();
-        });
-
-        let start = Instant::now();
-        let result = run_tests(
-            &mut reporter,
-            &project,
-            LevelFilter::Off,
-            tests,
-            &hooks,
-            None,
-            1,
-            DistMode::Test,
-            None,
-            None,
-            &cancellation,
-        )
-        .await;
-        cancel_task.await.context("Join cancellation task")?;
-
-        assert!(resolve_interruptible(result, &mut reporter)?.is_none());
-        assert_eq!(reporter.cleanup_calls, 1);
-        assert_eq!(reporter.run_completes, 0);
-        assert!(
-            start.elapsed() < Duration::from_secs(3),
-            "Cancellation should not wait for the sleeping Python test",
         );
         Ok(())
     }

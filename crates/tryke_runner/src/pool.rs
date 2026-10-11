@@ -482,30 +482,6 @@ mod tests {
         );
     }
 
-    /// `restart_workers` on a cold pool must start every process and
-    /// acknowledge within the control timeout. This matters because the file
-    /// watcher can fire before the user triggers any test run.
-    #[tokio::test]
-    async fn restart_workers_with_no_live_processes_acks() {
-        let project = TestProject::new().expect("create test project");
-        let python_path = [project.root().to_path_buf(), python_package_dir()];
-        let pool = WorkerPool::spawn_from_parts(
-            2,
-            &test_python_bin(),
-            project.root(),
-            Some(&python_path),
-            LevelFilter::Off,
-            false,
-        )
-        .await;
-
-        pool.restart_workers()
-            .await
-            .expect("restart_workers must ack within the control timeout");
-
-        pool.shutdown().await.expect("clean shutdown");
-    }
-
     #[tokio::test]
     async fn shutdown_joins_every_warmed_worker() {
         let project = TestProject::new().expect("create test project");

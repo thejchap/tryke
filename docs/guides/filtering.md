@@ -25,6 +25,11 @@ tryke test -k "(math or string) and not slow"
 
 The expression matches against the full test name including any `describe()` group prefix.
 
+Case-label text from `[` through the next `]` is literal, so
+`-k "param[sp ace]"` keeps the space inside the keyword. Brackets do not nest.
+Without a closing `]`, `[` is an ordinary character and normal Boolean
+boundaries still apply.
+
 ## Tag filtering with `-m`
 
 The `-m` flag filters by [tags](writing-tests.md#tags) set on the `@test` decorator:

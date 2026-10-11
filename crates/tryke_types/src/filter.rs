@@ -132,15 +132,17 @@ fn tokenize(input: &str) -> Vec<Token> {
             }
             _ => {
                 let mut word = String::new();
-                // Case labels like `param[sp ace]` may contain spaces, tabs, and
-                // parentheses; inside brackets those are literal, not boundaries.
-                let mut depth = 0usize;
+                // Case labels are literal through the next `]`, not nested syntax.
+                // An unclosed `[` must not consume the surrounding expression.
                 while let Some(&c) = chars.peek() {
-                    match c {
-                        ' ' | '\t' | '(' | ')' if depth == 0 => break,
-                        '[' => depth += 1,
-                        ']' => depth = depth.saturating_sub(1),
-                        _ => {}
+                    if c == '['
+                        && let Some(end) = chars.clone().position(|ch| ch == ']')
+                    {
+                        word.extend(chars.by_ref().take(end + 1));
+                        continue;
+                    }
+                    if matches!(c, ' ' | '\t' | '(' | ')') {
+                        break;
                     }
                     word.push(c);
                     chars.next();
@@ -904,17 +906,39 @@ mod tests {
     }
 
     #[test]
-    fn unmatched_brackets_stay_literal() {
+    fn opening_bracket_in_label_keeps_boolean_boundaries() {
+        let tests = vec![
+            make_case("param", "tests/a.py", "a[b", 0),
+            make_case("param", "tests/a.py", "a[b extra", 1),
+            make_test("other", "tests/a.py", 10),
+            make_test("unrelated", "tests/a.py", 20),
+        ];
         assert_eq!(
-            FilterExpr::parse("a] or b").unwrap(),
-            FilterExpr::Or(
-                Box::new(FilterExpr::Substring("a]".into())),
-                Box::new(FilterExpr::Substring("b".into())),
-            )
+            select("(param[a[b]) or other", &tests),
+            vec!["tests/a.py::param[a[b]", "tests/a.py::other"]
         );
+    }
+
+    #[test]
+    fn unmatched_brackets_keep_boolean_boundaries() {
+        let tests = vec![
+            make_test("a]", "tests/a.py", 1),
+            make_test("b", "tests/a.py", 2),
+            make_test("c", "tests/a.py", 3),
+        ];
         assert_eq!(
-            FilterExpr::parse("param[sp or x").unwrap(),
-            FilterExpr::Substring("param[sp or x".into())
+            select("a] or b", &tests),
+            vec!["tests/a.py::a]", "tests/a.py::b"]
+        );
+
+        let tests = vec![
+            make_case("param", "tests/a.py", "sp ace", 0),
+            make_case("param", "tests/a.py", "other", 1),
+            make_test("x", "tests/a.py", 10),
+        ];
+        assert_eq!(
+            select("param[sp or x", &tests),
+            vec!["tests/a.py::param[sp ace]", "tests/a.py::x"]
         );
     }
 

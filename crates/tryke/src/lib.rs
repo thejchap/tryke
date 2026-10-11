@@ -29,7 +29,7 @@ pub enum ExitStatus {
     /// Test run failed due to an invocation error.
     Error = 2,
 
-    /// Test run was interrupted by Ctrl+C.
+    /// Test run was interrupted by Ctrl+C or SIGTERM.
     Interrupted = 130,
 }
 
@@ -67,7 +67,7 @@ async fn try_run() -> anyhow::Result<ExitStatus> {
 
             tokio::select! {
                 biased;
-                signal = tokio::signal::ctrl_c() => {
+                signal = shutdown_signal() => {
                     signal?;
                     cancellation.cancel();
                     command.await?;
@@ -84,7 +84,7 @@ async fn try_run() -> anyhow::Result<ExitStatus> {
 
             tokio::select! {
                 biased;
-                signal = tokio::signal::ctrl_c() => {
+                signal = shutdown_signal() => {
                     signal?;
                     cancellation.cancel();
                     command.await?;
@@ -97,6 +97,27 @@ async fn try_run() -> anyhow::Result<ExitStatus> {
         Commands::Clean(args) => run_clean_command(args, &global),
         Commands::Graph(args) => run_graph_command(args, &global),
     }
+}
+
+/// Resolves when the process receives Ctrl+C or, on Unix, SIGTERM.
+#[cfg(unix)]
+async fn shutdown_signal() -> io::Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut terminate = signal(SignalKind::terminate())?;
+    tokio::select! {
+        received = terminate.recv() => match received {
+            Some(()) => Ok(()),
+            None => Err(io::Error::other("SIGTERM signal stream closed")),
+        },
+        result = tokio::signal::ctrl_c() => result,
+    }
+}
+
+/// Resolves when the process receives Ctrl+C.
+#[cfg(not(unix))]
+async fn shutdown_signal() -> io::Result<()> {
+    tokio::signal::ctrl_c().await
 }
 
 fn report_error(error: anyhow::Error) -> ExitStatus {

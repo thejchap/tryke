@@ -19,21 +19,52 @@ fn match_body() -> &'static str {
      \x20       expect(1).to_equal(1)\n"
 }
 
+#[cfg(unix)]
+/// One test that atomically publishes its worker PID and, while a `hold`
+/// file exists at the project root, blocks so signals interrupt it mid-run.
+fn pid_marker_body() -> &'static str {
+    "import os\n\
+     import pathlib\n\
+     import time\n\
+     \n\
+     from tryke import test\n\
+     \n\
+     ROOT = pathlib.Path(__file__).resolve().parent\n\
+     \n\
+     \n\
+     @test(\"publishes pid\")\n\
+     def publishes_pid():\n\
+     \x20   tmp = ROOT / \"worker.pid.tmp\"\n\
+     \x20   tmp.write_text(str(os.getpid()))\n\
+     \x20   os.replace(tmp, ROOT / \"worker.pid\")\n\
+     \x20   hold = ROOT / \"hold\"\n\
+     \x20   deadline = time.monotonic() + 30\n\
+     \x20   while hold.exists() and time.monotonic() < deadline:\n\
+     \x20       time.sleep(0.01)\n"
+}
+
 struct ServerSession {
     child: Child,
     stdin: Option<ChildStdin>,
     lines: Receiver<String>,
     _project: TestProject,
+    worker_pid: Option<u32>,
 }
 
 impl ServerSession {
     fn spawn() -> io::Result<Self> {
-        let project = TestProject::with_files([("test_match.py", match_body())])?;
+        Self::spawn_for(
+            "server",
+            TestProject::with_files([("test_match.py", match_body())])?,
+        )
+    }
 
+    fn spawn_for(command: &str, project: TestProject) -> io::Result<Self> {
         let mut child = Command::new(env!("CARGO_BIN_EXE_tryke"))
-            .args(["server", "--root"])
+            .args([command, "--root"])
             .arg(project.root())
             .args(["--python", &tryke_testing::python_bin()])
+            .args(["--workers", "1"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -61,7 +92,57 @@ impl ServerSession {
             stdin,
             lines: rx,
             _project: project,
+            worker_pid: None,
         })
+    }
+
+    #[cfg(unix)]
+    /// Wait for the fixture's atomically written `worker.pid` and record it
+    /// so failure cleanup can kill a worker the parent leaked.
+    fn wait_for_worker_pid(&mut self) -> io::Result<u32> {
+        let marker = self._project.root().join("worker.pid");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match std::fs::read_to_string(&marker) {
+                Ok(contents) => {
+                    let pid = contents.trim().parse::<u32>().map_err(|error| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("invalid worker PID {contents:?}: {error}"),
+                        )
+                    })?;
+                    self.worker_pid = Some(pid);
+                    return Ok(pid);
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "worker did not publish its PID within 30s",
+                ));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    /// Wait up to 5s for the parent to exit after a signal.
+    fn wait_for_exit(&mut self) -> io::Result<std::process::ExitStatus> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = self.child.try_wait()? {
+                return Ok(status);
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "parent did not exit within 5s of the signal",
+                ));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn send(&mut self, request: &str) -> io::Result<()> {
@@ -111,7 +192,85 @@ impl Drop for ServerSession {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // Never leave a blocked worker behind when an assertion fails.
+        if let Some(pid) = self.worker_pid
+            && process_alive(pid)
+        {
+            let _ = Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
+        }
     }
+}
+
+fn process_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(unix)]
+fn pid_marker_project(hold: bool) -> io::Result<TestProject> {
+    let project = TestProject::with_files([("test_pid.py", pid_marker_body())])?;
+    if hold {
+        project.write("hold", "")?;
+    }
+    Ok(project)
+}
+
+#[cfg(unix)]
+/// SIGTERM the parent, then require exit status 130 within 5s and that the
+/// recorded worker no longer exists.
+fn assert_sigterm_reaps_worker(session: &mut ServerSession, worker_pid: u32) -> io::Result<()> {
+    assert!(
+        process_alive(worker_pid),
+        "worker {worker_pid} must be alive before SIGTERM"
+    );
+    let signal = Command::new("kill")
+        .args(["-TERM", &session.child.id().to_string()])
+        .status()?;
+    assert!(signal.success(), "send SIGTERM to parent: {signal}");
+
+    let status = session.wait_for_exit()?;
+    assert_eq!(status.code(), Some(130), "terminated parent: {status}");
+    assert!(
+        !process_alive(worker_pid),
+        "worker {worker_pid} outlived its parent after SIGTERM"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn server_sigterm_reaps_idle_worker() -> io::Result<()> {
+    let mut session = ServerSession::spawn_for("server", pid_marker_project(false)?)?;
+    session.send(r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"run_id":"idle"}}"#)?;
+    let run = session.read_response();
+    assert_eq!(
+        run["result"]["summary"]["passed"], 1,
+        "expected exactly one passing test: {run}"
+    );
+    let worker_pid = session.wait_for_worker_pid()?;
+    assert_sigterm_reaps_worker(&mut session, worker_pid)
+}
+
+#[cfg(unix)]
+#[test]
+fn server_sigterm_reaps_active_worker() -> io::Result<()> {
+    let mut session = ServerSession::spawn_for("server", pid_marker_project(true)?)?;
+    session.send(r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"run_id":"active"}}"#)?;
+    let worker_pid = session.wait_for_worker_pid()?;
+    assert_sigterm_reaps_worker(&mut session, worker_pid)
+}
+
+#[cfg(unix)]
+#[test]
+fn test_sigterm_reaps_active_worker() -> io::Result<()> {
+    let mut session = ServerSession::spawn_for("test", pid_marker_project(true)?)?;
+    let worker_pid = session.wait_for_worker_pid()?;
+    assert_sigterm_reaps_worker(&mut session, worker_pid)
 }
 
 #[test]

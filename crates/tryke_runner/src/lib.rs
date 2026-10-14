@@ -7,7 +7,7 @@ mod worker;
 pub mod worker_process;
 
 pub use pool::{WorkerPool, WorkerPoolOptions, WorkerRun};
-pub use schedule::{DistMode, WorkUnit, partition, partition_with_hooks};
+pub use schedule::{DistMode, ScheduleOptions, WorkUnit, plan_work_units};
 pub use worker_process::WorkerProcess;
 
 /// Return the default number of worker processes for the current machine.

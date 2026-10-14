@@ -164,6 +164,14 @@ pub struct TestResult {
     pub stderr: String,
 }
 
+/// Last observed scheduling-relevant record for one test, keyed by
+/// `TestItem::id()` in the persistent scheduling history.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TestRunHistory {
+    pub failed: bool,
+    pub duration: Option<Duration>,
+}
+
 /// Flat wire format produced by the Python worker's ``run_test`` function.
 ///
 /// This is the JSON shape that comes over the JSON-RPC boundary from the

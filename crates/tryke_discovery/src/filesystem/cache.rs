@@ -16,7 +16,7 @@ use std::{
 use log::{debug, trace};
 use serde::{Deserialize, Serialize};
 
-use super::db::DiscoveredFile;
+use super::{db::DiscoveredFile, history::SCHEDULING_CACHE_FILE_NAME, history::SchedulingHistory};
 
 /// Bumped whenever the cache schema (the shape of `DiscoveredFile` or
 /// its transitive fields) changes in a way that'd make old entries
@@ -85,10 +85,53 @@ pub struct DiskCache {
     gitignore: Option<GitignoreConfig>,
 }
 
-#[derive(Debug)]
-struct GitignoreConfig {
+#[derive(Debug, Clone)]
+pub(super) struct GitignoreConfig {
     dir: PathBuf,
     contents: &'static str,
+    /// Previously generated contents that may be replaced by `contents`.
+    /// Any other existing `.gitignore` is user-owned and never overwritten.
+    upgrade_from: Option<&'static str>,
+}
+
+/// Narrow `.gitignore` written into custom cache directories.
+const CUSTOM_DIR_GITIGNORE: &str = "# created by tryke\n/.gitignore\n/discovery-v1.bin\n/discovery-v1.tmp\n/scheduling-v1.bin\n/scheduling-v1.tmp\n";
+
+/// Narrow `.gitignore` generated before scheduling history existed.
+const LEGACY_CUSTOM_DIR_GITIGNORE: &str =
+    "# created by tryke\n/.gitignore\n/discovery-v1.bin\n/discovery-v1.tmp\n";
+
+impl GitignoreConfig {
+    /// Best-effort: failures here must not abort a cache write.
+    fn ensure(&self) {
+        let _ = fs::create_dir_all(&self.dir);
+        let gitignore = self.dir.join(".gitignore");
+        let should_write = match fs::read_to_string(&gitignore) {
+            Ok(existing) => self.upgrade_from.is_some_and(|old| existing == old),
+            Err(err) => err.kind() == io::ErrorKind::NotFound,
+        };
+        if should_write {
+            let _ = fs::write(&gitignore, self.contents);
+        }
+    }
+}
+
+/// Atomically write a cache file via a temp sibling + rename, dropping a
+/// best-effort `.gitignore` so users don't have to ignore tryke's caches.
+pub(super) fn write_cache(
+    path: &Path,
+    gitignore: Option<&GitignoreConfig>,
+    bytes: &[u8],
+) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if let Some(config) = gitignore {
+        config.ensure();
+    }
+    let tmp_path = path.with_extension("tmp");
+    fs::write(&tmp_path, bytes)?;
+    fs::rename(&tmp_path, path)
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -129,14 +172,16 @@ fn clean_default_cache_dir(root: &Path) -> io::Result<CleanCacheReport> {
 }
 
 fn clean_custom_cache_dir(cache_dir: &Path) -> io::Result<CleanCacheReport> {
-    let cache_file = cache_dir.join(CACHE_FILE_NAME);
-    let tmp_file = cache_file.with_extension("tmp");
     let mut removed_entries = 0;
-    for path in [&cache_file, &tmp_file] {
-        match fs::remove_file(path) {
-            Ok(()) => removed_entries += 1,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err),
+    for name in [CACHE_FILE_NAME, SCHEDULING_CACHE_FILE_NAME] {
+        let cache_file = cache_dir.join(name);
+        let tmp_file = cache_file.with_extension("tmp");
+        for path in [&cache_file, &tmp_file] {
+            match fs::remove_file(path) {
+                Ok(()) => removed_entries += 1,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
+            }
         }
     }
     Ok(CleanCacheReport {
@@ -169,6 +214,7 @@ impl DiskCache {
             Some(GitignoreConfig {
                 dir: state_dir,
                 contents: "# created by tryke\n*\n",
+                upgrade_from: None,
             }),
         )
     }
@@ -187,7 +233,8 @@ impl DiskCache {
             path,
             Some(GitignoreConfig {
                 dir: cache_dir,
-                contents: "# created by tryke\n/.gitignore\n/discovery-v1.bin\n/discovery-v1.tmp\n",
+                contents: CUSTOM_DIR_GITIGNORE,
+                upgrade_from: Some(LEGACY_CUSTOM_DIR_GITIGNORE),
             }),
         )
     }
@@ -210,6 +257,17 @@ impl DiskCache {
             path: Some(path),
             gitignore,
         }
+    }
+
+    /// Load the scheduling history stored beside this discovery cache,
+    /// sharing its directory and `.gitignore` policy. A pathless discovery
+    /// cache yields memory-only history.
+    pub(super) fn load_scheduling_history(&self, root: &Path) -> SchedulingHistory {
+        let path = self
+            .path
+            .as_ref()
+            .map(|path| path.with_file_name(SCHEDULING_CACHE_FILE_NAME));
+        SchedulingHistory::load(root, path, self.gitignore.clone())
     }
 
     fn try_load(path: &Path) -> io::Result<HashMap<PathBuf, CacheEntry>> {
@@ -256,19 +314,6 @@ impl DiskCache {
         let Some(path) = self.path.as_ref() else {
             return Ok(());
         };
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        // Drop a `.gitignore` at the tryke state/cache directory so users
-        // don't have to remember to ignore tryke's internal cache. Best-effort
-        // — a write failure here shouldn't abort the save.
-        if let Some(config) = self.gitignore.as_ref() {
-            let _ = fs::create_dir_all(&config.dir);
-            let gitignore = config.dir.join(".gitignore");
-            if !gitignore.exists() {
-                let _ = fs::write(&gitignore, config.contents);
-            }
-        }
         let file = CacheFile {
             version: CACHE_VERSION,
             entries: self.entries.clone(),
@@ -279,9 +324,7 @@ impl DiskCache {
         // instead of corrupting positional alignment in the tuple form.
         let bytes = rmp_serde::to_vec_named(&file)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let tmp_path = path.with_extension("tmp");
-        fs::write(&tmp_path, &bytes)?;
-        fs::rename(&tmp_path, path)?;
+        write_cache(path, self.gitignore.as_ref(), &bytes)?;
         debug!(
             "Discovery cache saved {} entries to {}",
             self.entries.len(),
@@ -329,22 +372,107 @@ mod tests {
         assert_eq!(gitignore, "# created by tryke\n*\n");
     }
 
+    fn custom_gitignore(cache_dir: &Path) -> ignore::gitignore::Gitignore {
+        let mut builder = ignore::gitignore::GitignoreBuilder::new(cache_dir);
+        assert!(builder.add(cache_dir.join(".gitignore")).is_none());
+        builder.build().expect("build gitignore")
+    }
+
+    fn assert_ignores_only_cache_files(cache_dir: &Path) {
+        let gitignore = custom_gitignore(cache_dir);
+        for name in [
+            ".gitignore",
+            "discovery-v1.bin",
+            "discovery-v1.tmp",
+            "scheduling-v1.bin",
+            "scheduling-v1.tmp",
+        ] {
+            assert!(
+                gitignore.matched(cache_dir.join(name), false).is_ignore(),
+                "{name} should be ignored"
+            );
+        }
+        assert!(
+            !gitignore
+                .matched(cache_dir.join("keep-me.txt"), false)
+                .is_ignore()
+        );
+        assert!(!gitignore.matched(cache_dir.join("src"), true).is_ignore());
+    }
+
+    fn save_scheduling_history(cache: &DiskCache, root: &Path) {
+        let mut history = cache.load_scheduling_history(root);
+        history.record(&tryke_types::TestResult {
+            test: tryke_types::TestItem {
+                name: "test_a".into(),
+                module_path: "tests.test_a".into(),
+                ..tryke_types::TestItem::default()
+            },
+            outcome: tryke_types::TestOutcome::Passed,
+            duration: std::time::Duration::from_millis(1),
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+        history.save().expect("save history");
+    }
+
     #[test]
-    fn custom_cache_dir_writes_narrow_gitignore() {
+    fn custom_cache_dir_gitignore_ignores_cache_files_from_discovery_save() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache_dir = dir.path().join("custom-cache");
+        DiskCache::load_in_dir(cache_dir.clone())
+            .save()
+            .expect("save");
+        assert_ignores_only_cache_files(&cache_dir);
+    }
+
+    #[test]
+    fn custom_cache_dir_gitignore_ignores_cache_files_from_history_save() {
         let dir = tempfile::tempdir().expect("tempdir");
         let cache_dir = dir.path().join("custom-cache");
         let cache = DiskCache::load_in_dir(cache_dir.clone());
+        save_scheduling_history(&cache, dir.path());
+        assert!(cache_dir.join("scheduling-v1.bin").exists());
+        assert_ignores_only_cache_files(&cache_dir);
+    }
 
-        cache.save().expect("save");
+    #[test]
+    fn custom_cache_dir_upgrades_legacy_generated_gitignore() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (subdir, save_history) in [("discovery", false), ("history", true)] {
+            let cache_dir = dir.path().join(subdir);
+            fs::create_dir_all(&cache_dir).expect("create cache dir");
+            fs::write(cache_dir.join(".gitignore"), LEGACY_CUSTOM_DIR_GITIGNORE)
+                .expect("write legacy gitignore");
+            let cache = DiskCache::load_in_dir(cache_dir.clone());
+            if save_history {
+                save_scheduling_history(&cache, dir.path());
+            } else {
+                cache.save().expect("save");
+            }
+            assert_ignores_only_cache_files(&cache_dir);
+        }
+    }
 
-        let gitignore = fs::read_to_string(cache_dir.join(".gitignore")).expect("read gitignore");
-        assert_eq!(
-            gitignore,
-            "# created by tryke\n/.gitignore\n/discovery-v1.bin\n/discovery-v1.tmp\n"
-        );
-        assert!(!gitignore.lines().any(|line| line.trim() == "*"));
-        // The `.gitignore` ignores itself so it doesn't show up as untracked.
-        assert!(gitignore.lines().any(|line| line.trim() == "/.gitignore"));
+    #[test]
+    fn custom_cache_dir_preserves_user_gitignore() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (subdir, save_history) in [("discovery", false), ("history", true)] {
+            let cache_dir = dir.path().join(subdir);
+            fs::create_dir_all(&cache_dir).expect("create cache dir");
+            let user = "# created by tryke\n/.gitignore\n/discovery-v1.bin\n";
+            fs::write(cache_dir.join(".gitignore"), user).expect("write user gitignore");
+            let cache = DiskCache::load_in_dir(cache_dir.clone());
+            if save_history {
+                save_scheduling_history(&cache, dir.path());
+            } else {
+                cache.save().expect("save");
+            }
+            assert_eq!(
+                fs::read_to_string(cache_dir.join(".gitignore")).expect("read gitignore"),
+                user
+            );
+        }
     }
 
     #[test]
@@ -401,6 +529,8 @@ mod tests {
         fs::create_dir_all(&cache_dir).expect("create custom cache dir");
         fs::write(cache_dir.join("discovery-v1.bin"), b"cache").expect("write cache");
         fs::write(cache_dir.join("discovery-v1.tmp"), b"tmp").expect("write tmp cache");
+        fs::write(cache_dir.join("scheduling-v1.bin"), b"history").expect("write history");
+        fs::write(cache_dir.join("scheduling-v1.tmp"), b"tmp").expect("write tmp history");
         fs::write(cache_dir.join("keep-me.txt"), b"user data").expect("write user data");
         fs::write(cache_dir.join(".gitignore"), b"custom\n").expect("write user gitignore");
 
@@ -414,9 +544,18 @@ mod tests {
         let report = clean_project_cache(&project).expect("clean custom cache");
 
         assert_eq!(report.cache_dir, cache_dir);
-        assert_eq!(report.removed_entries, 2);
-        assert!(!report.cache_dir.join("discovery-v1.bin").exists());
-        assert!(!report.cache_dir.join("discovery-v1.tmp").exists());
+        assert_eq!(report.removed_entries, 4);
+        for name in [
+            "discovery-v1.bin",
+            "discovery-v1.tmp",
+            "scheduling-v1.bin",
+            "scheduling-v1.tmp",
+        ] {
+            assert!(
+                !report.cache_dir.join(name).exists(),
+                "{name} should be removed"
+            );
+        }
         assert_eq!(
             fs::read_to_string(report.cache_dir.join("keep-me.txt")).expect("read user data"),
             "user data"

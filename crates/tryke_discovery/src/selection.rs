@@ -13,6 +13,9 @@ pub struct DiscoverySelection {
     pub changed_files: Option<usize>,
     /// Files where dynamic imports were detected; these will always re-run with --changed.
     pub warnings: Vec<DiscoveryWarning>,
+    /// Test IDs that `--changed-first` found affected by the change set;
+    /// the scheduler runs units containing them first. Empty otherwise.
+    pub priority_ids: std::collections::HashSet<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -134,7 +137,9 @@ impl Discoverer {
                     .partition(|test| changed_ids.contains(&test.id()));
                 let mut tests = first;
                 tests.extend(rest);
-                self.selection(tests, Some(changed_files.len()))
+                let mut selection = self.selection(tests, Some(changed_files.len()));
+                selection.priority_ids = changed_ids;
+                selection
             }
             Some(_) => {
                 warn!(
@@ -159,6 +164,7 @@ impl Discoverer {
             hooks: self.hooks(),
             changed_files,
             warnings: all_discovery_warnings(self),
+            priority_ids: std::collections::HashSet::new(),
         }
     }
 }
@@ -257,6 +263,7 @@ mod tests {
             "should find the branch's test: {:?}",
             discovered.tests.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
+        assert!(discovered.priority_ids.is_empty());
     }
 
     fn assert_local_helper_change_selects_affected(stage: bool) {
@@ -294,6 +301,7 @@ mod tests {
         let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec!["test_affected"]);
         assert_eq!(discovered.changed_files, Some(1));
+        assert!(discovered.priority_ids.is_empty());
     }
 
     #[test]
@@ -342,15 +350,11 @@ mod tests {
         );
         let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
 
+        assert_eq!(names, vec!["test_a", "test_b"]);
+        let test_a = &discovered.tests[0];
         assert_eq!(
-            names.first(),
-            Some(&"test_a"),
-            "test_a should be first: {names:?}"
-        );
-        // All tests should still be present
-        assert!(
-            names.contains(&"test_b"),
-            "test_b should still be present: {names:?}"
+            discovered.priority_ids,
+            std::collections::HashSet::from([test_a.id()])
         );
     }
 
@@ -377,6 +381,39 @@ mod tests {
             !discovered.tests.is_empty(),
             "all tests should still be returned"
         );
+        assert!(discovered.priority_ids.is_empty());
+    }
+
+    #[test]
+    fn discover_tests_changed_first_git_failure_runs_all_without_priority() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        seed_git_repo_with_main(
+            dir.path(),
+            &[
+                (
+                    "test_a.py",
+                    "from tryke import test\n\n@test\ndef test_a(): pass\n",
+                ),
+                (
+                    "test_b.py",
+                    "from tryke import test\n\n@test\ndef test_b(): pass\n",
+                ),
+            ],
+        );
+
+        let project = Project::discover(dir.path());
+        let discovered = discover_project(
+            &project,
+            DiscoveryOptions {
+                changed_first: true,
+                base_branch: Some("missing-base-branch"),
+                ..DiscoveryOptions::default()
+            },
+        );
+        let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["test_a", "test_b"]);
+        assert_eq!(discovered.changed_files, None);
+        assert!(discovered.priority_ids.is_empty());
     }
 
     #[test]
@@ -416,13 +453,12 @@ mod tests {
         );
         let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
 
+        assert_eq!(names, vec!["test_c", "test_a", "test_b"]);
+        let test_c = &discovered.tests[0];
         assert_eq!(
-            names.first(),
-            Some(&"test_c"),
-            "test_c should be first: {names:?}"
+            discovered.priority_ids,
+            std::collections::HashSet::from([test_c.id()])
         );
-        // All 3 tests should be present
-        assert_eq!(names.len(), 3, "all 3 tests should be present: {names:?}");
     }
 
     #[test]
@@ -449,6 +485,7 @@ mod tests {
             file_names.contains(&"test_dyn.py"),
             "warning should reference test_dyn.py, got: {file_names:?}"
         );
+        assert!(discovered.priority_ids.is_empty());
     }
 
     // --- Path-restricted discovery tests ---
@@ -484,6 +521,7 @@ mod tests {
         );
         let names: Vec<&str> = discovered.tests.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec!["test_a"], "got: {names:?}");
+        assert!(discovered.priority_ids.is_empty());
     }
 
     #[test]

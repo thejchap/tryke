@@ -128,6 +128,13 @@ impl Discoverer {
         &self.root
     }
 
+    /// Load the persistent scheduling history stored beside this
+    /// discoverer's cache, keyed to its root.
+    #[must_use]
+    pub fn load_scheduling_history(&self) -> super::SchedulingHistory {
+        self.cache.load_scheduling_history(&self.root)
+    }
+
     #[must_use]
     pub fn excludes(&self) -> &[String] {
         &self.excludes

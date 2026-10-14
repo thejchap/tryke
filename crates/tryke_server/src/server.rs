@@ -49,6 +49,7 @@ impl Server {
 
         let root = discoverer.root().to_path_buf();
         let excludes = discoverer.excludes().to_vec();
+        let history = discoverer.load_scheduling_history();
         let lifecycle = cancellation.child_token();
 
         // Everything sent to the client goes through this queue.
@@ -86,6 +87,7 @@ impl Server {
             outbound_tx.clone(),
             run_rx,
             lifecycle.clone(),
+            history,
         );
 
         let mut dispatcher_task = tokio::spawn(dispatcher.run());

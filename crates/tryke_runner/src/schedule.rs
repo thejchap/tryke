@@ -1,7 +1,12 @@
-use std::path::PathBuf;
+use std::{
+    cmp::Reverse,
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    time::Duration,
+};
 
 use indexmap::IndexMap;
-use tryke_types::{DiscoveryWarning, DiscoveryWarningKind, HookItem, TestItem};
+use tryke_types::{DiscoveryWarning, DiscoveryWarningKind, HookItem, TestItem, TestRunHistory};
 
 /// How tests are partitioned into work units for distribution across workers.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -30,16 +35,6 @@ pub struct WorkUnit {
     pub hooks: Vec<HookItem>,
 }
 
-/// Partition a flat list of tests into work units according to `mode`,
-/// then sort largest-first for optimal load balancing.
-///
-/// When `hooks` are provided, each unit receives the hooks relevant to
-/// its tests (matched by file path).
-#[must_use]
-pub fn partition(tests: Vec<TestItem>, mode: DistMode) -> Vec<WorkUnit> {
-    partition_with_hooks(tests, &[], mode).units
-}
-
 /// The result of the scheduler's allocation of a set of tests to a worker
 #[derive(Debug)]
 pub struct PartitionResult {
@@ -56,11 +51,16 @@ pub struct PartitionResult {
     pub warnings: Vec<DiscoveryWarning>,
 }
 
-/// Like [`partition`], but attaches discovered hooks to each work unit.
-///
-/// When `per="scope"` fixtures are present, `DistMode::Test` is upgraded:
-/// - File-scope `per="scope"` fixtures (empty groups) force file-level grouping
-/// - Group-scope `per="scope"` fixtures force group-level grouping
+/// Ordering hints for [`plan_work_units`]. Both maps are keyed by
+/// `TestItem::id()`; IDs absent from the run are ignored.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScheduleOptions<'a> {
+    /// Last observed outcome/duration per test.
+    pub history: Option<&'a HashMap<String, TestRunHistory>>,
+    /// Tests whose units must run before all others (`--changed-first`).
+    pub first: Option<&'a HashSet<String>>,
+}
+
 #[must_use]
 fn group_by_file(tests: Vec<TestItem>) -> Vec<WorkUnit> {
     let mut by_file: IndexMap<Option<PathBuf>, Vec<TestItem>> = IndexMap::new();
@@ -94,11 +94,24 @@ fn group_by_describe(tests: Vec<TestItem>) -> Vec<WorkUnit> {
         .collect()
 }
 
+/// Build atomic work units from `tests` according to `mode`, attach the
+/// hooks relevant to each unit (matched by module), and order the units.
+///
+/// When `per="scope"` fixtures are present, `DistMode::Test` is upgraded:
+/// - File-scope `per="scope"` fixtures (empty groups) force file-level grouping
+/// - Group-scope `per="scope"` fixtures force group-level grouping
+///
+/// Units are ordered by: explicit priority (`options.first`), then any
+/// previously failing test, then any test without a measured duration,
+/// then descending estimated work (summed durations for fully measured
+/// units, test count for units with unknown timings). Ties keep the
+/// grouping order and tests inside a unit are never reordered.
 #[must_use]
-pub fn partition_with_hooks(
+pub fn plan_work_units(
     tests: Vec<TestItem>,
     hooks: &[HookItem],
     mode: DistMode,
+    options: ScheduleOptions<'_>,
 ) -> PartitionResult {
     // Only consider hooks for modules that actually have tests in this run —
     // otherwise we warn about fixtures in files that were filtered out.
@@ -211,9 +224,59 @@ pub fn partition_with_hooks(
         }
     }
 
-    // Largest units first: longest-pole-first scheduling minimises tail latency.
-    units.sort_by_key(|unit| std::cmp::Reverse(unit.tests.len()));
+    units.sort_by_cached_key(|unit| unit_rank(unit, options));
     PartitionResult { units, warnings }
+}
+
+/// Ascending sort key: `(!priority, !failure, !unknown, Reverse(known
+/// total), Reverse(cold count))`. Only runnable tests contribute: a
+/// skip/todo member can't promote a unit or make its timing unknown.
+fn unit_rank(
+    unit: &WorkUnit,
+    options: ScheduleOptions<'_>,
+) -> (bool, bool, bool, Reverse<Duration>, Reverse<usize>) {
+    let history = options.history.filter(|history| !history.is_empty());
+    let first = options.first.filter(|first| !first.is_empty());
+    let mut runnable = unit
+        .tests
+        .iter()
+        .filter(|test| test.skip.is_none() && test.todo.is_none());
+
+    let mut has_priority = false;
+    let mut has_failure = false;
+    let mut has_unknown = false;
+    let mut known_total = Duration::ZERO;
+    if history.is_none() && first.is_none() {
+        has_unknown = runnable.next().is_some();
+    } else {
+        for test in runnable {
+            let id = test.id();
+            has_priority |= first.is_some_and(|first| first.contains(&id));
+            match history.and_then(|history| history.get(&id)) {
+                Some(record) => {
+                    has_failure |= record.failed;
+                    match record.duration {
+                        Some(duration) => known_total = known_total.saturating_add(duration),
+                        None => has_unknown = true,
+                    }
+                }
+                None => has_unknown = true,
+            }
+        }
+    }
+
+    let (known_total, cold_count) = if has_unknown {
+        (Duration::ZERO, unit.tests.len())
+    } else {
+        (known_total, 0)
+    };
+    (
+        !has_priority,
+        !has_failure,
+        !has_unknown,
+        Reverse(known_total),
+        Reverse(cold_count),
+    )
 }
 
 #[cfg(test)]
@@ -239,7 +302,7 @@ mod tests {
             item("a.py", "t2", &[]),
             item("b.py", "t3", &[]),
         ];
-        let units = partition(tests, DistMode::Test);
+        let units = plan_work_units(tests, &[], DistMode::Test, ScheduleOptions::default()).units;
         assert_eq!(units.len(), 3);
         for u in &units {
             assert_eq!(u.tests.len(), 1);
@@ -253,7 +316,7 @@ mod tests {
             item("a.py", "t2", &[]),
             item("b.py", "t3", &[]),
         ];
-        let units = partition(tests, DistMode::File);
+        let units = plan_work_units(tests, &[], DistMode::File, ScheduleOptions::default()).units;
         assert_eq!(units.len(), 2);
         // Largest first: a.py has 2 tests, b.py has 1
         assert_eq!(units[0].tests.len(), 2);
@@ -271,7 +334,7 @@ mod tests {
             item("a.py", "t3", &["strings"]),
             item("a.py", "t4", &[]), // No group
         ];
-        let units = partition(tests, DistMode::Group);
+        let units = plan_work_units(tests, &[], DistMode::Group, ScheduleOptions::default()).units;
         assert_eq!(units.len(), 3);
         // Largest first: "math" group has 2 tests
         assert_eq!(units[0].tests.len(), 2);
@@ -285,7 +348,7 @@ mod tests {
             item("a.py", "t2", &[]),
             item("a.py", "t3", &[]),
         ];
-        let units = partition(tests, DistMode::File);
+        let units = plan_work_units(tests, &[], DistMode::File, ScheduleOptions::default()).units;
         assert_eq!(units.len(), 1);
         let names: Vec<&str> = units[0].tests.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec!["t1", "t2", "t3"]);
@@ -301,7 +364,7 @@ mod tests {
             item("medium.py", "t1", &[]),
             item("medium.py", "t2", &[]),
         ];
-        let units = partition(tests, DistMode::File);
+        let units = plan_work_units(tests, &[], DistMode::File, ScheduleOptions::default()).units;
         assert_eq!(units.len(), 3);
         assert_eq!(units[0].tests.len(), 3); // big.py
         assert_eq!(units[1].tests.len(), 2); // medium.py
@@ -333,7 +396,7 @@ mod tests {
         ];
         // Fixture is in test_mod (same as a.py items) — only a.py tests are constrained.
         let hooks = vec![hook("setup", FixturePer::Scope, &[])];
-        let result = partition_with_hooks(tests, &hooks, DistMode::Test);
+        let result = plan_work_units(tests, &hooks, DistMode::Test, ScheduleOptions::default());
         let a_units: Vec<_> = result
             .units
             .iter()
@@ -347,7 +410,7 @@ mod tests {
     fn test_mode_with_only_per_test_fixtures_stays_individual() {
         let tests = vec![item("a.py", "t1", &[]), item("a.py", "t2", &[])];
         let hooks = vec![hook("setup", FixturePer::Test, &[])];
-        let result = partition_with_hooks(tests, &hooks, DistMode::Test);
+        let result = plan_work_units(tests, &hooks, DistMode::Test, ScheduleOptions::default());
         assert_eq!(
             result.units.len(),
             2,
@@ -360,7 +423,7 @@ mod tests {
     fn work_unit_carries_hooks() {
         let tests = vec![item("a.py", "t1", &[])];
         let hooks = vec![hook("db", FixturePer::Scope, &[])];
-        let result = partition_with_hooks(tests, &hooks, DistMode::Test);
+        let result = plan_work_units(tests, &hooks, DistMode::Test, ScheduleOptions::default());
         assert_eq!(result.units[0].hooks.len(), 1);
         assert_eq!(result.units[0].hooks[0].name, "db");
     }
@@ -372,7 +435,7 @@ mod tests {
             hook_for_module("setup_a", "a", FixturePer::Test, &[]),
             hook_for_module("setup_b", "b", FixturePer::Test, &[]),
         ];
-        let result = partition_with_hooks(tests, &hooks, DistMode::Test);
+        let result = plan_work_units(tests, &hooks, DistMode::Test, ScheduleOptions::default());
         assert_eq!(result.units.len(), 2);
         for u in &result.units {
             assert_eq!(u.hooks.len(), 1, "each unit should only have its own hook");
@@ -395,7 +458,7 @@ mod tests {
         // Module "a" has a file-scope per="scope" fixture (empty groups) — even in
         // group mode, all of a.py's tests must land on one worker.
         let hooks = vec![hook("setup", FixturePer::Scope, &[])];
-        let result = partition_with_hooks(tests, &hooks, DistMode::Group);
+        let result = plan_work_units(tests, &hooks, DistMode::Group, ScheduleOptions::default());
         let a_units: Vec<_> = result
             .units
             .iter()
@@ -425,7 +488,7 @@ mod tests {
         ];
         // Hook is scoped to "math" group only — no file-scope constraint.
         let hooks = vec![hook("setup", FixturePer::Scope, &["math"])];
-        let result = partition_with_hooks(tests, &hooks, DistMode::Group);
+        let result = plan_work_units(tests, &hooks, DistMode::Group, ScheduleOptions::default());
         // Group mode keeps groups together already — no upgrade needed.
         // "math" (2 tests) and "strings" (1 test) stay separate.
         assert_eq!(result.units.len(), 2);
@@ -442,7 +505,7 @@ mod tests {
         ];
         // Only module "a" has a per="scope" fixture.
         let hooks = vec![hook_for_module("setup", "a", FixturePer::Scope, &[])];
-        let result = partition_with_hooks(tests, &hooks, DistMode::Test);
+        let result = plan_work_units(tests, &hooks, DistMode::Test, ScheduleOptions::default());
         // a.py tests are grouped (1 unit), b.py tests are individual (2 units)
         let a_units: Vec<_> = result
             .units
@@ -471,7 +534,7 @@ mod tests {
             item("b.py", "t3", &[]),
         ];
         let hooks = vec![hook_for_module("setup", "a", FixturePer::Scope, &[])];
-        let result = partition_with_hooks(tests, &hooks, DistMode::Test);
+        let result = plan_work_units(tests, &hooks, DistMode::Test, ScheduleOptions::default());
         assert_eq!(result.warnings.len(), 1, "expected one upgrade warning");
         let w = &result.warnings[0];
         assert_eq!(w.kind, DiscoveryWarningKind::DistModeUpgrade);
@@ -490,7 +553,7 @@ mod tests {
             item("a.py", "t2", &["strings"]),
         ];
         let hooks = vec![hook_for_module("setup", "a", FixturePer::Scope, &[])];
-        let result = partition_with_hooks(tests, &hooks, DistMode::Group);
+        let result = plan_work_units(tests, &hooks, DistMode::Group, ScheduleOptions::default());
         assert_eq!(result.warnings.len(), 1);
         let w = &result.warnings[0];
         assert_eq!(w.kind, DiscoveryWarningKind::DistModeUpgrade);
@@ -501,7 +564,379 @@ mod tests {
     #[test]
     fn no_warnings_when_mode_is_not_upgraded() {
         let tests = vec![item("a.py", "t1", &[])];
-        let result = partition_with_hooks(tests, &[], DistMode::Test);
+        let result = plan_work_units(tests, &[], DistMode::Test, ScheduleOptions::default());
         assert!(result.warnings.is_empty());
+    }
+
+    fn ms(millis: u64) -> Duration {
+        Duration::from_millis(millis)
+    }
+
+    fn history(records: &[(&TestItem, bool, Option<Duration>)]) -> HashMap<String, TestRunHistory> {
+        records
+            .iter()
+            .map(|(test, failed, duration)| {
+                (
+                    test.id(),
+                    TestRunHistory {
+                        failed: *failed,
+                        duration: *duration,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn plan(
+        tests: Vec<TestItem>,
+        mode: DistMode,
+        history: &HashMap<String, TestRunHistory>,
+        first: &HashSet<String>,
+    ) -> Vec<WorkUnit> {
+        plan_work_units(
+            tests,
+            &[],
+            mode,
+            ScheduleOptions {
+                history: Some(history),
+                first: Some(first),
+            },
+        )
+        .units
+    }
+
+    fn unit_ids(units: &[WorkUnit]) -> Vec<Vec<String>> {
+        units
+            .iter()
+            .map(|unit| unit.tests.iter().map(TestItem::id).collect())
+            .collect()
+    }
+
+    fn ids(tests: &[&TestItem]) -> Vec<String> {
+        tests.iter().map(|test| test.id()).collect()
+    }
+
+    #[test]
+    fn ranks_priority_then_failures_then_unknown_then_longest() {
+        let slow = item("slow.py", "t", &[]);
+        let failed = item("failed.py", "t", &[]);
+        let unknown = item("unknown.py", "t", &[]);
+        let fast = item("fast.py", "t", &[]);
+        let history = history(&[
+            (&slow, false, Some(ms(900))),
+            (&failed, true, Some(ms(10))),
+            (&fast, false, Some(ms(100))),
+        ]);
+        let tests = vec![slow.clone(), failed.clone(), unknown.clone(), fast.clone()];
+
+        let units = plan(tests.clone(), DistMode::Test, &history, &HashSet::new());
+        assert_eq!(
+            unit_ids(&units),
+            vec![
+                ids(&[&failed]),
+                ids(&[&unknown]),
+                ids(&[&slow]),
+                ids(&[&fast])
+            ]
+        );
+
+        let first = HashSet::from([fast.id()]);
+        let units = plan(tests, DistMode::Test, &history, &first);
+        assert_eq!(
+            unit_ids(&units),
+            vec![
+                ids(&[&fast]),
+                ids(&[&failed]),
+                ids(&[&unknown]),
+                ids(&[&slow])
+            ]
+        );
+    }
+
+    #[test]
+    fn failing_record_without_duration_precedes_unknown() {
+        let unknown = item("unknown.py", "t", &[]);
+        let failed = item("failed.py", "t", &[]);
+        let history = history(&[(&failed, true, None)]);
+        let units = plan(
+            vec![unknown.clone(), failed.clone()],
+            DistMode::Test,
+            &history,
+            &HashSet::new(),
+        );
+        assert_eq!(unit_ids(&units), vec![ids(&[&failed]), ids(&[&unknown])]);
+    }
+
+    #[test]
+    fn grouped_units_rank_by_summed_duration() {
+        let a1 = item("a.py", "t1", &[]);
+        let a2 = item("a.py", "t2", &[]);
+        let b1 = item("b.py", "t1", &[]);
+        let file_history = history(&[
+            (&a1, false, Some(ms(10))),
+            (&a2, false, Some(ms(10))),
+            (&b1, false, Some(ms(100))),
+        ]);
+        let units = plan(
+            vec![a1.clone(), a2.clone(), b1.clone()],
+            DistMode::File,
+            &file_history,
+            &HashSet::new(),
+        );
+        assert_eq!(unit_ids(&units), vec![ids(&[&b1]), ids(&[&a1, &a2])]);
+
+        let m1 = item("g.py", "t1", &["math"]);
+        let m2 = item("g.py", "t2", &["math"]);
+        let s1 = item("g.py", "t3", &["strings"]);
+        let group_history = history(&[
+            (&m1, false, Some(ms(10))),
+            (&m2, false, Some(ms(10))),
+            (&s1, false, Some(ms(100))),
+        ]);
+        let units = plan(
+            vec![m1.clone(), m2.clone(), s1.clone()],
+            DistMode::Group,
+            &group_history,
+            &HashSet::new(),
+        );
+        assert_eq!(unit_ids(&units), vec![ids(&[&s1]), ids(&[&m1, &m2])]);
+    }
+
+    #[test]
+    fn partially_known_unit_ranks_as_unknown_by_test_count() {
+        let c1 = item("c.py", "t1", &[]);
+        let d1 = item("d.py", "t1", &[]);
+        let d2 = item("d.py", "t2", &[]);
+        let a1 = item("a.py", "t1", &[]);
+        let a2 = item("a.py", "t2", &[]);
+        let b1 = item("b.py", "t1", &[]);
+        let b2 = item("b.py", "t2", &[]);
+        let b3 = item("b.py", "t3", &[]);
+        let history = history(&[
+            (&c1, false, Some(Duration::from_hours(1))),
+            (&a1, false, Some(Duration::from_hours(1))),
+        ]);
+        let units = plan(
+            vec![
+                c1.clone(),
+                d1.clone(),
+                d2.clone(),
+                a1.clone(),
+                a2.clone(),
+                b1.clone(),
+                b2.clone(),
+                b3.clone(),
+            ],
+            DistMode::File,
+            &history,
+            &HashSet::new(),
+        );
+        // `a.py`'s large known subtotal must not lift it past `d.py`.
+        assert_eq!(
+            unit_ids(&units),
+            vec![
+                ids(&[&b1, &b2, &b3]),
+                ids(&[&d1, &d2]),
+                ids(&[&a1, &a2]),
+                ids(&[&c1])
+            ]
+        );
+    }
+
+    #[test]
+    fn equal_known_totals_keep_original_order() {
+        let y1 = item("y.py", "t1", &[]);
+        let x1 = item("x.py", "t1", &[]);
+        let x2 = item("x.py", "t2", &[]);
+        let history = history(&[
+            (&y1, false, Some(ms(100))),
+            (&x1, false, Some(ms(50))),
+            (&x2, false, Some(ms(50))),
+        ]);
+        let units = plan(
+            vec![y1.clone(), x1.clone(), x2.clone()],
+            DistMode::File,
+            &history,
+            &HashSet::new(),
+        );
+        assert_eq!(unit_ids(&units), vec![ids(&[&y1]), ids(&[&x1, &x2])]);
+    }
+
+    #[test]
+    fn empty_input_yields_no_units() {
+        let result = plan_work_units(Vec::new(), &[], DistMode::File, ScheduleOptions::default());
+        assert!(result.units.is_empty());
+        assert!(plan(Vec::new(), DistMode::Test, &HashMap::new(), &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn absent_or_empty_hints_sort_largest_first_stably() {
+        let tests = vec![
+            item("small.py", "t1", &[]),
+            item("big.py", "t1", &[]),
+            item("big.py", "t2", &[]),
+            item("big.py", "t3", &[]),
+            item("medium.py", "t1", &[]),
+            item("medium.py", "t2", &[]),
+            item("small2.py", "t1", &[]),
+        ];
+        let expected = vec![
+            vec!["big.py::t1", "big.py::t2", "big.py::t3"],
+            vec!["medium.py::t1", "medium.py::t2"],
+            vec!["small.py::t1"],
+            vec!["small2.py::t1"],
+        ];
+        let absent = plan_work_units(
+            tests.clone(),
+            &[],
+            DistMode::File,
+            ScheduleOptions::default(),
+        )
+        .units;
+        assert_eq!(unit_ids(&absent), expected);
+        let empty = plan(tests, DistMode::File, &HashMap::new(), &HashSet::new());
+        assert_eq!(unit_ids(&empty), expected);
+    }
+
+    #[test]
+    fn zero_duration_history_is_known() {
+        let zero = item("zero.py", "t", &[]);
+        let fast = item("fast.py", "t", &[]);
+        let unknown = item("unknown.py", "t", &[]);
+        let history = history(&[
+            (&zero, false, Some(Duration::ZERO)),
+            (&fast, false, Some(ms(5))),
+        ]);
+        let units = plan(
+            vec![zero.clone(), fast.clone(), unknown.clone()],
+            DistMode::Test,
+            &history,
+            &HashSet::new(),
+        );
+        assert_eq!(
+            unit_ids(&units),
+            vec![ids(&[&unknown]), ids(&[&fast]), ids(&[&zero])]
+        );
+    }
+
+    #[test]
+    fn duration_sums_saturate() {
+        let a1 = item("a.py", "t1", &[]);
+        let a2 = item("a.py", "t2", &[]);
+        let b1 = item("b.py", "t1", &[]);
+        let history = history(&[
+            (&a1, false, Some(Duration::MAX)),
+            (&a2, false, Some(ms(1))),
+            (&b1, false, Some(Duration::MAX)),
+        ]);
+        let units = plan(
+            vec![a1.clone(), a2.clone(), b1.clone()],
+            DistMode::File,
+            &history,
+            &HashSet::new(),
+        );
+        assert_eq!(unit_ids(&units), vec![ids(&[&a1, &a2]), ids(&[&b1])]);
+        let units = plan(
+            vec![b1.clone(), a1.clone(), a2.clone()],
+            DistMode::File,
+            &history,
+            &HashSet::new(),
+        );
+        assert_eq!(unit_ids(&units), vec![ids(&[&b1]), ids(&[&a1, &a2])]);
+    }
+
+    #[test]
+    fn skip_and_todo_members_do_not_affect_rank() {
+        let mut skipped = item("a.py", "skipped", &[]);
+        skipped.skip = Some("reason".into());
+        let mut todo = item("a.py", "todo", &[]);
+        todo.todo = Some("later".into());
+        let a3 = item("a.py", "t3", &[]);
+        let b1 = item("b.py", "t1", &[]);
+        let mut c_skipped = item("c.py", "skipped", &[]);
+        c_skipped.skip = Some("reason".into());
+        let history = history(&[
+            (&skipped, true, Some(ms(1))),
+            (&a3, false, Some(ms(10))),
+            (&b1, false, Some(ms(50))),
+        ]);
+        let first = HashSet::from([skipped.id()]);
+        let units = plan(
+            vec![
+                c_skipped.clone(),
+                skipped.clone(),
+                todo.clone(),
+                a3.clone(),
+                b1.clone(),
+            ],
+            DistMode::File,
+            &history,
+            &first,
+        );
+        assert_eq!(
+            unit_ids(&units),
+            vec![
+                ids(&[&b1]),
+                ids(&[&skipped, &todo, &a3]),
+                ids(&[&c_skipped])
+            ]
+        );
+    }
+
+    #[test]
+    fn scope_fixture_unit_is_promoted_whole() {
+        let a1 = item("a.py", "t1", &[]);
+        let a2 = item("a.py", "t2", &[]);
+        let a3 = item("a.py", "t3", &[]);
+        let b4 = item("b.py", "t4", &[]);
+        let tests = vec![a1.clone(), a2.clone(), a3.clone(), b4.clone()];
+        let hooks = vec![hook("setup", FixturePer::Scope, &[])];
+        let passing = history(&[
+            (&a1, false, Some(ms(10))),
+            (&a2, false, Some(ms(5))),
+            (&a3, false, Some(ms(10))),
+            (&b4, false, Some(ms(500))),
+        ]);
+        let failing = history(&[
+            (&a1, false, Some(ms(10))),
+            (&a2, true, Some(ms(5))),
+            (&a3, false, Some(ms(10))),
+            (&b4, false, Some(ms(500))),
+        ]);
+        let no_priority = HashSet::new();
+        let priority = HashSet::from([a3.id()]);
+        let a_unit = ids(&[&a1, &a2, &a3]);
+
+        for (history, first, a_first) in [
+            (&passing, &no_priority, false),
+            (&failing, &no_priority, true),
+            (&passing, &priority, true),
+        ] {
+            let result = plan_work_units(
+                tests.clone(),
+                &hooks,
+                DistMode::Test,
+                ScheduleOptions {
+                    history: Some(history),
+                    first: Some(first),
+                },
+            );
+            let kinds: Vec<_> = result.warnings.iter().map(|w| w.kind).collect();
+            assert_eq!(kinds, vec![DiscoveryWarningKind::DistModeUpgrade]);
+            let expected = if a_first {
+                vec![a_unit.clone(), ids(&[&b4])]
+            } else {
+                vec![ids(&[&b4]), a_unit.clone()]
+            };
+            assert_eq!(unit_ids(&result.units), expected);
+            for unit in &result.units {
+                let hook_names: Vec<&str> = unit.hooks.iter().map(|h| h.name.as_str()).collect();
+                if unit.tests[0].module_path == "a" {
+                    assert_eq!(hook_names, vec!["setup"]);
+                } else {
+                    assert!(hook_names.is_empty());
+                }
+            }
+        }
     }
 }

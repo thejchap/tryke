@@ -387,7 +387,7 @@ mod tests {
     use tryke_types::TestItem;
 
     use super::*;
-    use crate::schedule::{DistMode, partition_with_hooks};
+    use crate::schedule::{DistMode, ScheduleOptions, plan_work_units};
 
     fn python_package_dir() -> PathBuf {
         workspace_root().join("python")
@@ -507,7 +507,13 @@ mod tests {
         drop(work_rx);
         pool.work_tx.close();
 
-        let units = partition_with_hooks(vec![TestItem::default()], &[], DistMode::Test).units;
+        let units = plan_work_units(
+            vec![TestItem::default()],
+            &[],
+            DistMode::Test,
+            ScheduleOptions::default(),
+        )
+        .units;
         assert!(!units.is_empty(), "test setup should produce a work unit");
 
         let error = pool

@@ -54,7 +54,7 @@ Work units are ordered before scheduling using a per-test history that tryke sto
 
 Ties keep the discovery order of each unit's first test, and tests inside a unit are never reordered. The history is advisory: a missing or unreadable file only falls back to largest-first ordering, and skipped or todo tests don't update it.
 
-Runs, watch mode, and the server can share one history. Each save takes a lock on `scheduling-v1.lock` beside it and merges only the tests that owner just recorded into the latest file, so concurrent owners don't overwrite each other's results; when two owners record the same test, the last save wins.
+Runs, watch mode, and the server can share one history. Each save re-reads the file and merges in only the tests that owner just recorded, so a long-running owner doesn't overwrite newer results from other runs; when two owners record the same test, the last save wins. Saves aren't locked, so two saves at exactly the same moment can still drop one owner's update, which only affects ordering for the next run.
 
 ## Scheduling
 

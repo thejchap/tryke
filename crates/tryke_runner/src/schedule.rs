@@ -260,14 +260,15 @@ pub fn plan_work_units(
 
 /// Ascending sort key: `(!priority, !failure, !unknown, Reverse(known
 /// total), Reverse(cold count))`. Only runnable tests contribute: a
-/// skip/todo member can't promote a unit or make its timing unknown.
+/// skip/todo member can't promote a unit, make its timing unknown, or
+/// enlarge its cold count.
 fn unit_rank(
     unit: &WorkUnit,
     options: ScheduleOptions<'_>,
 ) -> (bool, bool, bool, Reverse<Duration>, Reverse<usize>) {
     let history = options.history.filter(|history| !history.is_empty());
     let first = options.first.filter(|first| !first.is_empty());
-    let mut runnable = unit
+    let runnable = unit
         .tests
         .iter()
         .filter(|test| test.skip.is_none() && test.todo.is_none());
@@ -276,10 +277,13 @@ fn unit_rank(
     let mut has_failure = false;
     let mut has_unknown = false;
     let mut known_total = Duration::ZERO;
+    let mut runnable_count = 0;
     if history.is_none() && first.is_none() {
-        has_unknown = runnable.next().is_some();
+        runnable_count = runnable.count();
+        has_unknown = runnable_count > 0;
     } else {
         for test in runnable {
+            runnable_count += 1;
             let id = test.id();
             has_priority |= first.is_some_and(|first| first.contains(&id));
             match history.and_then(|history| history.get(&id)) {
@@ -296,7 +300,7 @@ fn unit_rank(
     }
 
     let (known_total, cold_count) = if has_unknown {
-        (Duration::ZERO, unit.tests.len())
+        (Duration::ZERO, runnable_count)
     } else {
         (known_total, 0)
     };
@@ -873,6 +877,54 @@ mod tests {
             &HashSet::new(),
         );
         assert_eq!(unit_ids(&units), vec![ids(&[&b1]), ids(&[&a1, &a2])]);
+    }
+
+    #[test]
+    fn skip_and_todo_members_do_not_enlarge_cold_count() {
+        let a1 = item("a.py", "t1", &[]);
+        let mut a_tests = vec![a1.clone()];
+        for index in 0..10 {
+            let mut inactive = item("a.py", &format!("inactive{index}"), &[]);
+            if index % 2 == 0 {
+                inactive.skip = Some("reason".into());
+            } else {
+                inactive.todo = Some("later".into());
+            }
+            a_tests.push(inactive);
+        }
+        let b1 = item("b.py", "t1", &[]);
+        let b2 = item("b.py", "t2", &[]);
+        let mut tests = a_tests.clone();
+        tests.extend([b1.clone(), b2.clone()]);
+        let hooks = vec![
+            hook("a_fixture", FixturePer::Scope, &[]),
+            hook_for_module("b_fixture", "b", FixturePer::Scope, &[]),
+        ];
+        let a_refs: Vec<&TestItem> = a_tests.iter().collect();
+        let expected = vec![ids(&[&b1, &b2]), ids(&a_refs)];
+
+        let absent = plan_work_units(
+            tests.clone(),
+            &hooks,
+            DistMode::Test,
+            ScheduleOptions::default(),
+        );
+        assert_eq!(unit_ids(&absent.units), expected);
+
+        // A non-empty map with no records for these tests exercises the
+        // history-lookup path while every runnable member stays unknown.
+        let unrelated = history(&[(&item("other.py", "t", &[]), false, Some(ms(1)))]);
+        let first = HashSet::new();
+        let with_history = plan_work_units(
+            tests,
+            &hooks,
+            DistMode::Test,
+            ScheduleOptions {
+                history: Some(&unrelated),
+                first: Some(&first),
+            },
+        );
+        assert_eq!(unit_ids(&with_history.units), expected);
     }
 
     #[test]

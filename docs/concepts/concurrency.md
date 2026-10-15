@@ -50,7 +50,7 @@ Work units are ordered before scheduling using a per-test history that tryke sto
 1. Units containing tests affected by `--changed-first` run first.
 2. Then units containing a test that failed on its last run.
 3. Then units with a test that has no recorded duration yet.
-4. Then the remaining units, longest estimated duration first, so the longest pole starts early. Units with unrecorded tests are ordered by test count instead.
+4. Then the remaining units, longest estimated duration first, so the longest pole starts early. Units with unrecorded tests are ordered by their count of runnable (not skipped or todo) tests instead.
 
 Ties keep the discovery order of each unit's first test, and tests inside a unit are never reordered. The history is advisory: a missing or unreadable file only falls back to largest-first ordering, and skipped or todo tests don't update it.
 

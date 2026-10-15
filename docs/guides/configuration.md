@@ -68,7 +68,7 @@ When `python` is unset, Tryke discovers an environment in this order:
 
 ### `cache_dir`
 
-Directory for tryke's persistent discovery cache. By default, tryke stores discovery results under `<project-root>/.tryke/cache`; set `cache_dir` when that location is not suitable (for example, a read-only project checkout or a shared CI cache directory).
+Directory for tryke's persistent discovery cache and scheduling history. By default, tryke stores both under `<project-root>/.tryke/cache`; set `cache_dir` when that location is not suitable (for example, a read-only project checkout or a shared CI cache directory).
 
 ```toml
 [tool.tryke]

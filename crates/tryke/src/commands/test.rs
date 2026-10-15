@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     env,
     future::Future,
     time::{Duration, Instant},
@@ -10,9 +11,9 @@ use log::{LevelFilter, debug, warn};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tryke_config::Project;
-use tryke_discovery::{Discoverer, DiscoveryOptions};
+use tryke_discovery::{Discoverer, DiscoveryOptions, SchedulingHistory};
 use tryke_reporter::{Reporter, build_reporter, reporter::WatchIdleInfo};
-use tryke_runner::{DistMode, WorkerPool, WorkerPoolOptions, partition_with_hooks};
+use tryke_runner::{DistMode, ScheduleOptions, WorkerPool, WorkerPoolOptions, plan_work_units};
 use tryke_types::{
     ChangedSelectionSummary, DiscoveryWarning, DiscoveryWarningKind, HookItem, RunSummary,
     TestOutcome, filter::TestFilter,
@@ -145,7 +146,8 @@ pub(crate) async fn run_test_command(
         (args, test_filter, discovered)
     });
     let result = run_interruptibly(discovery, &cancellation).await;
-    let Some((_, (args, test_filter, discovered))) = resolve_interruptible(result, &mut *reporter)?
+    let Some((discoverer, (args, test_filter, discovered))) =
+        resolve_interruptible(result, &mut *reporter)?
     else {
         return Ok(ExitStatus::Interrupted);
     };
@@ -170,6 +172,7 @@ pub(crate) async fn run_test_command(
         return Ok(ExitStatus::Success);
     }
 
+    let history = discoverer.load_scheduling_history();
     // let mut _snapshots = SnapshotRun::begin(SnapshotRunOptions {
     //     root: project.root().into(),
     //     mode: args.snapshot_mode.to_wire(),
@@ -187,6 +190,8 @@ pub(crate) async fn run_test_command(
         Some(discovery_duration),
         changed_selection,
         &cancellation,
+        history,
+        &discovered.priority_ids,
     )
     .await;
 
@@ -214,6 +219,8 @@ async fn run_tests(
     discovery_duration: Option<Duration>,
     changed_selection: Option<ChangedSelectionSummary>,
     cancellation: &CancellationToken,
+    mut history: SchedulingHistory,
+    priority_ids: &HashSet<String>,
 ) -> Result<Interruptible<RunSummary>> {
     let pool = WorkerPool::spawn(
         project,
@@ -236,10 +243,13 @@ async fn run_tests(
             dist,
             discovery_duration,
             changed_selection,
+            &mut history,
+            priority_ids,
         ),
         cancellation,
     )
     .await;
+    save_scheduling_history(&mut history);
     let shutdown_result = pool.shutdown().await;
 
     combine_shutdown(run_result, shutdown_result)
@@ -253,6 +263,13 @@ fn combine_shutdown<T>(result: Result<T>, shutdown_result: Result<()>) -> Result
         (Err(error), Err(shutdown_error)) => Err(error.context(format!(
             "Worker pool shutdown also failed: {shutdown_error:#}"
         ))),
+    }
+}
+
+/// History is advisory: a failed write must never change the run outcome.
+fn save_scheduling_history(history: &mut SchedulingHistory) {
+    if let Err(error) = history.save() {
+        warn!("Failed to save scheduling history: {error}");
     }
 }
 
@@ -282,8 +299,10 @@ async fn report_cycle(
     dist: DistMode,
     discovery_duration: Option<Duration>,
     changed_selection: Option<ChangedSelectionSummary>,
+    history: &mut SchedulingHistory,
+    priority_ids: &HashSet<String>,
 ) -> Result<RunSummary> {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     use std::path::PathBuf;
 
     let file_count = tests
@@ -350,7 +369,15 @@ async fn report_cycle(
     }
 
     let mut hit_maxfail = false;
-    let partition = partition_with_hooks(runnable_tests, hooks, dist);
+    let partition = plan_work_units(
+        runnable_tests,
+        hooks,
+        dist,
+        ScheduleOptions {
+            history: Some(history.entries()),
+            first: Some(priority_ids),
+        },
+    );
     for warning in &partition.warnings {
         reporter.on_discovery_warning(warning);
     }
@@ -358,6 +385,7 @@ async fn report_cycle(
     let mut stream = pool.submit(partition.units)?;
 
     while let Some(result) = stream.next().await {
+        history.record(&result);
         match &result.outcome {
             TestOutcome::Passed => passed += 1,
             TestOutcome::Failed { .. } | TestOutcome::XPassed => failed += 1,
@@ -515,6 +543,10 @@ fn clear_watch_results(reporter: &mut dyn Reporter) {
     });
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Watch cycle inputs are passed explicitly to preserve the existing lifecycle."
+)]
 async fn run_watch_cycle(
     reporter: &mut dyn Reporter,
     tests: Vec<tryke_types::TestItem>,
@@ -523,6 +555,7 @@ async fn run_watch_cycle(
     maxfail: Option<usize>,
     dist: DistMode,
     discovery_duration: Option<Duration>,
+    history: &mut SchedulingHistory,
 ) {
     // A worker that misses the restart deadline is still running the previous
     // interpreter. Skipping the cycle costs the user a re-save; running it
@@ -537,6 +570,8 @@ async fn run_watch_cycle(
         return;
     }
 
+    // Watch has no `--changed-first`, so there are no explicit priorities.
+    let no_priority = HashSet::new();
     if let Err(e) = report_cycle(
         reporter,
         tests,
@@ -546,13 +581,20 @@ async fn run_watch_cycle(
         dist,
         discovery_duration,
         None,
+        history,
+        &no_priority,
     )
     .await
     {
         debug!("Watch: report_cycle errored: {e}");
     }
+    save_scheduling_history(history);
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Watch cycle inputs are passed explicitly to preserve the existing lifecycle."
+)]
 async fn run_initial_cycle(
     reporter: &mut dyn Reporter,
     discoverer: Discoverer,
@@ -561,6 +603,7 @@ async fn run_initial_cycle(
     maxfail: Option<usize>,
     dist: DistMode,
     run_now: bool,
+    history: &mut SchedulingHistory,
 ) -> Result<Discoverer> {
     reporter.arm_clear();
 
@@ -574,7 +617,17 @@ async fn run_initial_cycle(
         let tests = test_filter.apply(initial_tests);
         let hooks = discoverer.hooks();
 
-        run_watch_cycle(reporter, tests, &hooks, pool, maxfail, dist, Some(disc_dur)).await;
+        run_watch_cycle(
+            reporter,
+            tests,
+            &hooks,
+            pool,
+            maxfail,
+            dist,
+            Some(disc_dur),
+            history,
+        )
+        .await;
     } else {
         let start_time = chrono::Local::now().format("%H:%M:%S").to_string();
 
@@ -615,6 +668,8 @@ async fn run_watch(
     )
     .await;
 
+    let discoverer = Discoverer::new(project);
+    let mut history = discoverer.load_scheduling_history();
     let run_result = run_interruptibly(
         run_watch_loop(
             reporter,
@@ -625,10 +680,14 @@ async fn run_watch(
             dist,
             all_tests,
             run_now,
+            discoverer,
+            &mut history,
         ),
         cancellation,
     )
     .await;
+    // Keeps results received by an interrupted cycle.
+    save_scheduling_history(&mut history);
     let shutdown_result = pool.shutdown().await;
 
     combine_shutdown(run_result, shutdown_result)
@@ -647,17 +706,20 @@ async fn run_watch_loop(
     dist: DistMode,
     all_tests: bool,
     run_now: bool,
+    discoverer: Discoverer,
+    history: &mut SchedulingHistory,
 ) -> Result<()> {
     let root = project.root();
     let excludes = &project.discovery().exclude;
     let mut discoverer = run_initial_cycle(
         reporter,
-        Discoverer::new(project),
+        discoverer,
         test_filter,
         pool,
         maxfail,
         dist,
         run_now,
+        history,
     )
     .await?;
 
@@ -686,7 +748,10 @@ async fn run_watch_loop(
                 let hooks = discoverer.hooks();
                 let disc_dur = Some(disc_start.elapsed());
                 emit_discovery_warnings(reporter, &discoverer);
-                run_watch_cycle(reporter, tests, &hooks, pool, maxfail, dist, disc_dur).await;
+                run_watch_cycle(
+                    reporter, tests, &hooks, pool, maxfail, dist, disc_dur, history,
+                )
+                .await;
                 continue;
             }
             WatchLoopEvent::Command(WatchKeyAction::ClearResults) => {
@@ -741,6 +806,7 @@ async fn run_watch_loop(
             maxfail,
             dist,
             discovery_duration,
+            history,
         )
         .await;
     }
@@ -941,7 +1007,17 @@ mod watch_tests {
         .await;
         // Returns () — the important behavior is that it does NOT propagate the
         // underlying `report_cycle` Err that `tryke test` relies on for exit code.
-        run_watch_cycle(&mut reporter, tests, &[], &pool, None, DistMode::Test, None).await;
+        run_watch_cycle(
+            &mut reporter,
+            tests,
+            &[],
+            &pool,
+            None,
+            DistMode::Test,
+            None,
+            &mut SchedulingHistory::default(),
+        )
+        .await;
         pool.shutdown().await.expect("shut down worker pool");
         Ok(())
     }
@@ -998,6 +1074,7 @@ mod watch_tests {
             None,
             DistMode::Test,
             run_now,
+            &mut SchedulingHistory::default(),
         )
         .await;
         pool.shutdown().await.expect("shut down worker pool");
@@ -1098,13 +1175,17 @@ mod watch_tests {
 
 #[cfg(test)]
 mod execution_tests {
-    use std::{io, path::PathBuf};
+    use std::{
+        io,
+        path::{Path, PathBuf},
+    };
     use tryke_config::{Project, ProjectMetadata, TrykeOptions};
     use tryke_discovery::{Discoverer, DiscoveryOptions};
     use tryke_reporter::{
         DotReporter, JSONReporter, JUnitReporter, NextReporter, SugarReporter, TextReporter,
     };
-    use tryke_testing::{TestProject, python_bin as test_python_bin};
+    use tryke_testing::{TestProject, python_bin as test_python_bin, workspace_root};
+    use tryke_types::{TestItem, TestResult, TestRunHistory};
 
     use super::*;
 
@@ -1139,6 +1220,8 @@ mod execution_tests {
             DistMode::Test,
             None,
             None,
+            &mut SchedulingHistory::default(),
+            &HashSet::new(),
         )
         .await
     }
@@ -1164,6 +1247,8 @@ mod execution_tests {
             None,
             None,
             &cancellation,
+            SchedulingHistory::default(),
+            &HashSet::new(),
         )
         .await;
         Ok(())
@@ -1288,6 +1373,8 @@ mod execution_tests {
                 None,
                 None,
                 &cancellation,
+                SchedulingHistory::default(),
+                &HashSet::new(),
             )
             .await
             .is_ok()
@@ -1340,6 +1427,8 @@ def test_slow(value: Annotated[str, Depends(resource)]):
             None,
             None,
             &CancellationToken::new(),
+            SchedulingHistory::default(),
+            &HashSet::new(),
         )
         .await?;
         let Interruptible::Completed(summary) = result else {
@@ -1391,7 +1480,7 @@ def test_failing():
             true,
         )
         .await;
-        let units = partition_with_hooks(tests, &[], DistMode::Test).units;
+        let units = plan_work_units(tests, &[], DistMode::Test, ScheduleOptions::default()).units;
         let mut results: Vec<_> = pool.submit(units).expect("submit work").collect().await;
         results.sort_by(|a, b| a.test.name.cmp(&b.test.name));
 
@@ -1450,6 +1539,8 @@ def test_failing():
             DistMode::Test,
             None,
             None,
+            &mut SchedulingHistory::default(),
+            &HashSet::new(),
         )
         .await;
         assert!(
@@ -1492,6 +1583,8 @@ def test_failing():
             DistMode::Test,
             None,
             None,
+            &mut SchedulingHistory::default(),
+            &HashSet::new(),
         )
         .await
         .expect("report_cycle should not error on test failures");
@@ -1499,5 +1592,467 @@ def test_failing():
         assert_eq!(summary.passed, 0);
         pool.shutdown().await.expect("shut down worker pool");
         Ok(())
+    }
+
+    // --- Scheduling history ---
+
+    /// Python test bodies that append their own name to `order.txt`, so
+    /// execution order is observed directly instead of via reporter order.
+    fn recording_tests(names: &[&str]) -> String {
+        let header = "from pathlib import Path\n\nfrom tryke import test\n\n\n\
+                      def record(name):\n    \
+                      with Path(__file__).with_name(\"order.txt\").open(\"a\") as order:\n        \
+                      order.write(name + \"\\n\")\n";
+        let tests: String = names
+            .iter()
+            .map(|name| format!("\n\n@test\ndef {name}():\n    record(\"{name}\")\n"))
+            .collect();
+        format!("{header}{tests}")
+    }
+
+    fn execution_order(root: &Path) -> Vec<String> {
+        std::fs::read_to_string(root.join("order.txt"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn find_test(tests: &[TestItem], name: &str) -> anyhow::Result<TestItem> {
+        tests
+            .iter()
+            .find(|test| test.name == name)
+            .cloned()
+            .with_context(|| format!("{name} was not discovered"))
+    }
+
+    fn history_result(test: &TestItem, failed: bool, duration: Duration) -> TestResult {
+        let outcome = if failed {
+            TestOutcome::Failed {
+                message: "seeded failure".into(),
+                traceback: None,
+                assertions: Vec::new(),
+                executed_lines: Vec::new(),
+            }
+        } else {
+            TestOutcome::Passed
+        };
+        TestResult {
+            test: test.clone(),
+            outcome,
+            duration,
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    }
+
+    fn seed_history(discoverer: &Discoverer, records: &[TestResult]) -> anyhow::Result<()> {
+        let mut history = discoverer.load_scheduling_history();
+        for record in records {
+            history.record(record);
+        }
+        history.save()?;
+        Ok(())
+    }
+
+    fn passed_count(results: &[TestResult]) -> usize {
+        results
+            .iter()
+            .filter(|result| matches!(result.outcome, TestOutcome::Passed))
+            .count()
+    }
+
+    #[derive(Default)]
+    struct RecordingReporter {
+        results: Vec<TestResult>,
+    }
+
+    impl Reporter for RecordingReporter {
+        fn on_run_start(&mut self, _tests: &[TestItem]) {}
+
+        fn on_test_complete(&mut self, result: &TestResult) {
+            self.results.push(result.clone());
+        }
+
+        fn on_run_complete(&mut self, _summary: &RunSummary) {}
+    }
+
+    /// Cancels the run as soon as the first result is reported.
+    struct CancelOnFirstResult {
+        cancellation: CancellationToken,
+        results: Vec<TestResult>,
+    }
+
+    impl Reporter for CancelOnFirstResult {
+        fn on_run_start(&mut self, _tests: &[TestItem]) {}
+
+        fn on_test_complete(&mut self, result: &TestResult) {
+            self.results.push(result.clone());
+            self.cancellation.cancel();
+        }
+
+        fn on_run_complete(&mut self, _summary: &RunSummary) {}
+    }
+
+    /// The gated test cannot finish while `gate` is absent, so a cancelled
+    /// run deterministically has exactly one received result.
+    const GATED_TEST: &str = "import time\nfrom pathlib import Path\n\nfrom tryke import test\n\n\n\
+                              @test\ndef test_gated():\n    \
+                              gate = Path(__file__).with_name(\"gate\")\n    \
+                              deadline = time.monotonic() + 60\n    \
+                              while not gate.exists():\n        \
+                              if time.monotonic() > deadline:\n            \
+                              raise AssertionError(\"gate never opened\")\n        \
+                              time.sleep(0.01)\n";
+
+    struct GateFixture {
+        fixture: TestProject,
+        project: Project,
+        first: TestItem,
+        gated: TestItem,
+        gated_record: TestRunHistory,
+    }
+
+    impl GateFixture {
+        fn new() -> anyhow::Result<Self> {
+            let fixture = TestProject::with_files([
+                (
+                    "test_first.py",
+                    "from tryke import test\n\n\n@test\ndef test_first():\n    pass\n",
+                ),
+                ("test_gated.py", GATED_TEST),
+            ])?;
+            let project = configured_project(fixture.root());
+            let tests = Discoverer::new(&project).rediscover();
+            let first = find_test(&tests, "test_first")?;
+            let gated = find_test(&tests, "test_gated")?;
+            // A historical failure makes the scheduler pick `test_first` first.
+            seed_history(
+                &Discoverer::new(&project),
+                &[
+                    history_result(&first, true, Duration::from_millis(10)),
+                    history_result(&gated, false, Duration::from_millis(500)),
+                ],
+            )?;
+            let gated_record = Discoverer::new(&project)
+                .load_scheduling_history()
+                .entries()
+                .get(&gated.id())
+                .copied()
+                .context("seeded gated record")?;
+            Ok(Self {
+                fixture,
+                project,
+                first,
+                gated,
+                gated_record,
+            })
+        }
+
+        fn open_gate(&self) -> io::Result<()> {
+            std::fs::write(self.fixture.root().join("gate"), "")
+        }
+
+        fn assert_saved_received_only(&self, results: &[TestResult]) -> anyhow::Result<()> {
+            let [received] = results else {
+                anyhow::bail!(
+                    "expected exactly one received result, got {}",
+                    results.len()
+                );
+            };
+            assert_eq!(received.test.id(), self.first.id());
+            assert!(matches!(received.outcome, TestOutcome::Passed));
+            let saved = Discoverer::new(&self.project).load_scheduling_history();
+            assert_eq!(
+                saved.entries().get(&self.first.id()),
+                Some(&TestRunHistory {
+                    failed: false,
+                    duration: Some(received.duration),
+                })
+            );
+            assert_eq!(
+                saved.entries().get(&self.gated.id()),
+                Some(&self.gated_record)
+            );
+            Ok(())
+        }
+    }
+
+    fn git(root: &Path, args: &[&str]) -> anyhow::Result<()> {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .status()?;
+        anyhow::ensure!(status.success(), "git {args:?} failed: {status}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scheduling_cli_uses_persisted_history() -> anyhow::Result<()> {
+        let fixture = TestProject::with_files([(
+            "test_order.py",
+            recording_tests(&["test_slow", "test_failed", "test_unknown", "test_fast"]),
+        )])?;
+        let project = configured_project(fixture.root());
+        let tests = Discoverer::new(&project).rediscover();
+        let slow = find_test(&tests, "test_slow")?;
+        let failed = find_test(&tests, "test_failed")?;
+        let fast = find_test(&tests, "test_fast")?;
+        seed_history(
+            &Discoverer::new(&project),
+            &[
+                history_result(&slow, false, Duration::from_millis(900)),
+                history_result(&failed, true, Duration::from_millis(10)),
+                history_result(&fast, false, Duration::from_millis(100)),
+            ],
+        )?;
+        let history = Discoverer::new(&project).load_scheduling_history();
+        let mut reporter = RecordingReporter::default();
+
+        let result = run_tests(
+            &mut reporter,
+            &project,
+            LevelFilter::Off,
+            tests,
+            &[],
+            None,
+            1,
+            DistMode::Test,
+            None,
+            None,
+            &CancellationToken::new(),
+            history,
+            &HashSet::new(),
+        )
+        .await?;
+        let Interruptible::Completed(summary) = result else {
+            anyhow::bail!("run was not cancelled, so it must complete");
+        };
+
+        assert_eq!((summary.passed, summary.failed, summary.errors), (4, 0, 0));
+        assert_eq!(
+            execution_order(fixture.root()),
+            ["test_failed", "test_unknown", "test_slow", "test_fast"]
+        );
+        let saved = Discoverer::new(&project).load_scheduling_history();
+        assert_eq!(reporter.results.len(), 4);
+        for received in &reporter.results {
+            assert_eq!(
+                saved.entries().get(&received.test.id()),
+                Some(&TestRunHistory {
+                    failed: false,
+                    duration: Some(received.duration),
+                })
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scheduling_changed_first_precedes_failure() -> anyhow::Result<()> {
+        let fixture = TestProject::with_files([
+            ("test_affected.py", recording_tests(&["test_affected_fast"])),
+            (
+                "test_unaffected.py",
+                recording_tests(&["test_unaffected_failed"]),
+            ),
+        ])?;
+        let root = fixture.root();
+        git(root, &["init", "-q"])?;
+        git(root, &["config", "user.email", "tryke@example.com"])?;
+        git(root, &["config", "user.name", "Tryke Tests"])?;
+        git(root, &["config", "commit.gpgsign", "false"])?;
+        git(root, &["add", "."])?;
+        git(root, &["commit", "-q", "-m", "initial"])?;
+        let affected_source = format!("{}\n# changed\n", recording_tests(&["test_affected_fast"]));
+        fixture.write("test_affected.py", affected_source)?;
+
+        let project = configured_project(root);
+        let selection = Discoverer::new(&project).discover(DiscoveryOptions {
+            changed_first: true,
+            ..Default::default()
+        });
+        let affected = find_test(&selection.tests, "test_affected_fast")?;
+        let unaffected = find_test(&selection.tests, "test_unaffected_failed")?;
+        assert_eq!(selection.priority_ids, HashSet::from([affected.id()]));
+        seed_history(
+            &Discoverer::new(&project),
+            &[
+                history_result(&affected, false, Duration::from_millis(1)),
+                history_result(&unaffected, true, Duration::from_millis(10)),
+            ],
+        )?;
+        let history = Discoverer::new(&project).load_scheduling_history();
+
+        let result = run_tests(
+            &mut RecordingReporter::default(),
+            &project,
+            LevelFilter::Off,
+            selection.tests,
+            &selection.hooks,
+            None,
+            1,
+            DistMode::Test,
+            None,
+            None,
+            &CancellationToken::new(),
+            history,
+            &selection.priority_ids,
+        )
+        .await?;
+        let Interruptible::Completed(summary) = result else {
+            anyhow::bail!("run was not cancelled, so it must complete");
+        };
+
+        assert_eq!((summary.passed, summary.failed, summary.errors), (2, 0, 0));
+        assert_eq!(
+            execution_order(root),
+            ["test_affected_fast", "test_unaffected_failed"]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scheduling_watch_relearns_failures() -> anyhow::Result<()> {
+        let fixture =
+            TestProject::with_files([("test_watch.py", recording_tests(&["test_a", "test_b"]))])?;
+        let root = fixture.root();
+        let project = configured_project(root);
+        let mut discoverer = Discoverer::new(&project);
+        let tests = discoverer.rediscover();
+        let a = find_test(&tests, "test_a")?;
+        let b = find_test(&tests, "test_b")?;
+        seed_history(
+            &discoverer,
+            &[
+                history_result(&a, false, Duration::from_millis(900)),
+                history_result(&b, true, Duration::from_millis(10)),
+            ],
+        )?;
+        let mut history = discoverer.load_scheduling_history();
+        let python_path = [root.to_path_buf(), workspace_root().join("python")];
+        let pool = WorkerPool::spawn_from_parts(
+            1,
+            &test_python_bin(),
+            root,
+            Some(&python_path),
+            LevelFilter::Off,
+            false,
+        )
+        .await;
+
+        let mut first_cycle = RecordingReporter::default();
+        run_watch_cycle(
+            &mut first_cycle,
+            tests.clone(),
+            &[],
+            &pool,
+            None,
+            DistMode::Test,
+            None,
+            &mut history,
+        )
+        .await;
+        assert_eq!(execution_order(root), ["test_b", "test_a"]);
+        assert_eq!(first_cycle.results.len(), 2);
+        assert_eq!(passed_count(&first_cycle.results), 2);
+        let learned_b = history.entries().get(&b.id()).copied();
+        assert!(learned_b.is_some_and(|record| !record.failed));
+        let saved = discoverer.load_scheduling_history();
+        assert_eq!(saved.entries().get(&b.id()).copied(), learned_b);
+
+        history.record(&history_result(&a, false, Duration::MAX));
+        assert_eq!(history.entries().get(&b.id()).copied(), learned_b);
+        std::fs::remove_file(root.join("order.txt"))?;
+
+        let mut second_cycle = RecordingReporter::default();
+        run_watch_cycle(
+            &mut second_cycle,
+            tests,
+            &[],
+            &pool,
+            None,
+            DistMode::Test,
+            None,
+            &mut history,
+        )
+        .await;
+        assert_eq!(execution_order(root), ["test_a", "test_b"]);
+        assert_eq!(second_cycle.results.len(), 2);
+        assert_eq!(passed_count(&second_cycle.results), 2);
+
+        pool.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scheduling_cli_interruption_saves_received_results() -> anyhow::Result<()> {
+        let gate = GateFixture::new()?;
+        let tests = Discoverer::new(&gate.project).rediscover();
+        let history = Discoverer::new(&gate.project).load_scheduling_history();
+        let cancellation = CancellationToken::new();
+        let mut reporter = CancelOnFirstResult {
+            cancellation: cancellation.clone(),
+            results: Vec::new(),
+        };
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            run_tests(
+                &mut reporter,
+                &gate.project,
+                LevelFilter::Off,
+                tests,
+                &[],
+                None,
+                1,
+                DistMode::Test,
+                None,
+                None,
+                &cancellation,
+                history,
+                &HashSet::new(),
+            ),
+        )
+        .await;
+        gate.open_gate()?;
+
+        let result = result.context("run_tests did not return after cancellation")??;
+        assert!(matches!(result, Interruptible::Interrupted));
+        gate.assert_saved_received_only(&reporter.results)
+    }
+
+    #[tokio::test]
+    async fn scheduling_watch_interruption_saves_received_results() -> anyhow::Result<()> {
+        let gate = GateFixture::new()?;
+        let test_filter =
+            TestFilter::from_args(&[], None, None).map_err(|error| anyhow::anyhow!(error))?;
+        let cancellation = CancellationToken::new();
+        let mut reporter = CancelOnFirstResult {
+            cancellation: cancellation.clone(),
+            results: Vec::new(),
+        };
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            run_watch(
+                &mut reporter,
+                &gate.project,
+                LevelFilter::Off,
+                &test_filter,
+                None,
+                1,
+                DistMode::Test,
+                false,
+                true,
+                &cancellation,
+            ),
+        )
+        .await;
+        gate.open_gate()?;
+
+        let result = result.context("run_watch did not return after cancellation")??;
+        assert!(matches!(result, Interruptible::Interrupted));
+        gate.assert_saved_received_only(&reporter.results)
     }
 }

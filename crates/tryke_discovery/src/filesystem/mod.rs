@@ -10,10 +10,12 @@ use tryke_types::{ParsedFile, TestItem};
 pub(crate) mod cache;
 pub(crate) mod db;
 mod discoverer;
+mod history;
 pub(crate) mod import_graph;
 
 pub use cache::{CleanCacheReport, clean_project_cache};
 pub use discoverer::{ChangeImpact, Discoverer};
+pub use history::SchedulingHistory;
 
 fn build_excludes(root: &Path, excludes: &[String]) -> Gitignore {
     let mut builder = GitignoreBuilder::new(root);

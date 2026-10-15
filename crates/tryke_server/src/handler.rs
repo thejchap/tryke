@@ -11,7 +11,8 @@ use tokio::{
 };
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
-use tryke_runner::{DistMode, WorkerPool, partition_with_hooks};
+use tryke_discovery::SchedulingHistory;
+use tryke_runner::{DistMode, ScheduleOptions, WorkerPool, plan_work_units};
 use tryke_types::filter::TestFilter;
 use tryke_types::{RunSummary, TestItem, TestOutcome};
 
@@ -33,6 +34,8 @@ pub(crate) struct RunDispatcher {
     outbound_tx: mpsc::Sender<Bytes>,
     run_rx: mpsc::Receiver<RunRequest>,
     cancellation: CancellationToken,
+    /// Scheduling history owned by the serial run owner for the session.
+    history: SchedulingHistory,
 }
 
 impl RunDispatcher {
@@ -42,6 +45,7 @@ impl RunDispatcher {
         outbound_tx: mpsc::Sender<Bytes>,
         run_rx: mpsc::Receiver<RunRequest>,
         cancellation: CancellationToken,
+        history: SchedulingHistory,
     ) -> Self {
         Self {
             discoverer,
@@ -49,6 +53,7 @@ impl RunDispatcher {
             outbound_tx,
             run_rx,
             cancellation,
+            history,
         }
     }
 
@@ -67,19 +72,25 @@ impl RunDispatcher {
                 }
             };
 
-            let execution = execute_run(
-                request.params,
-                &self.discoverer,
-                &self.outbound_tx,
-                &self.worker_pool,
-            );
-            tokio::pin!(execution);
+            // Scoped so the execution's mutable history borrow ends before
+            // the flush below.
+            let result = {
+                let execution = execute_run(
+                    request.params,
+                    &self.discoverer,
+                    &self.outbound_tx,
+                    &self.worker_pool,
+                    &mut self.history,
+                );
+                tokio::pin!(execution);
 
-            let result = tokio::select! {
-                biased;
-                () = self.cancellation.cancelled() => break,
-                result = &mut execution => result,
+                tokio::select! {
+                    biased;
+                    () = self.cancellation.cancelled() => break,
+                    result = &mut execution => result,
+                }
             };
+            save_scheduling_history(&mut self.history);
 
             let (run_id, summary) = match result {
                 Ok(result) => result,
@@ -115,9 +126,18 @@ impl RunDispatcher {
             }
         }
 
+        // Execution cancellation skips the per-run flush; keep received results.
+        save_scheduling_history(&mut self.history);
         let shutdown_result = self.worker_pool.shutdown().await;
 
         combine_shutdown(dispatch_result, shutdown_result)
+    }
+}
+
+/// History is advisory: a failed write must never change the run outcome.
+fn save_scheduling_history(history: &mut SchedulingHistory) {
+    if let Err(error) = history.save() {
+        log::warn!("Failed to save scheduling history: {error}");
     }
 }
 
@@ -455,6 +475,7 @@ async fn execute_run(
     discoverer: &tokio::sync::Mutex<tryke_discovery::Discoverer>,
     outbound_tx: &mpsc::Sender<Bytes>,
     pool: &WorkerPool,
+    history: &mut SchedulingHistory,
 ) -> anyhow::Result<(String, RunSummary)> {
     let run_id = run_params.run_id.clone();
     // Every server run must execute against current source. A worker that
@@ -491,7 +512,15 @@ async fn execute_run(
 
     let test_start = Instant::now();
     // Server uses test-level distribution by default.
-    let partition = partition_with_hooks(tests, &hooks, DistMode::Test);
+    let partition = plan_work_units(
+        tests,
+        &hooks,
+        DistMode::Test,
+        ScheduleOptions {
+            history: Some(history.entries()),
+            first: None,
+        },
+    );
     for warning in &partition.warnings {
         log::warn!("{}", warning.message);
     }
@@ -504,6 +533,7 @@ async fn execute_run(
     let mut todo = 0usize;
 
     while let Some(result) = stream.next().await {
+        history.record(&result);
         match &result.outcome {
             TestOutcome::Passed => passed += 1,
             TestOutcome::Failed { .. } | TestOutcome::XPassed => failed += 1,
@@ -701,7 +731,8 @@ mod tests {
     };
     use tryke_discovery::Discoverer;
     use tryke_runner::WorkerPool;
-    use tryke_testing::{TestProject, python_bin as test_python_bin};
+    use tryke_testing::{TestProject, python_bin as test_python_bin, workspace_root};
+    use tryke_types::{TestResult, TestRunHistory};
 
     use super::*;
 
@@ -785,8 +816,14 @@ mod tests {
             .await
             .context("Queued request was not available to the test harness")?;
         let _run_guard = run_lock.lock().await;
-        let (run_id, summary) =
-            execute_run(request.params, discoverer, outbound_tx, worker_pool).await?;
+        let (run_id, summary) = execute_run(
+            request.params,
+            discoverer,
+            outbound_tx,
+            worker_pool,
+            &mut SchedulingHistory::default(),
+        )
+        .await?;
         Ok(Some(
             Response::new(request.id, RunResponse { run_id, summary }).into_json_line()?,
         ))
@@ -1610,6 +1647,7 @@ mod tests {
             outbound_tx.clone(),
             run_rx,
             cancellation.clone(),
+            SchedulingHistory::default(),
         );
         let dispatcher_task = tokio::spawn(dispatcher.run());
 
@@ -1684,6 +1722,7 @@ mod tests {
                 outbound_tx.clone(),
                 run_rx,
                 cancellation.clone(),
+                SchedulingHistory::default(),
             )
             .run(),
         );
@@ -1919,5 +1958,354 @@ mod tests {
             }
         }
         assert!(active.is_none(), "run never completed: events={events:?}");
+    }
+
+    // --- Scheduling history ---
+
+    /// `test_failed` passes only while the `pass-failed` marker exists.
+    const SCHEDULING_ORDER_SOURCE: &str = "from pathlib import Path\n\n\
+        from tryke import expect, test\n\n\n\
+        @test\ndef test_slow():\n    pass\n\n\n\
+        @test\ndef test_failed():\n    \
+        expect(Path(__file__).with_name(\"pass-failed\").exists()).to_equal(True)\n\n\n\
+        @test\ndef test_unknown():\n    pass\n\n\n\
+        @test\ndef test_fast():\n    pass\n";
+
+    /// The gated test cannot finish while `gate` is absent.
+    const GATED_TEST: &str = "import time\nfrom pathlib import Path\n\nfrom tryke import test\n\n\n\
+        @test\ndef test_gated():\n    \
+        gate = Path(__file__).with_name(\"gate\")\n    \
+        deadline = time.monotonic() + 60\n    \
+        while not gate.exists():\n        \
+        if time.monotonic() > deadline:\n            \
+        raise AssertionError(\"gate never opened\")\n        \
+        time.sleep(0.01)\n";
+
+    fn scheduling_discoverer(root: &std::path::Path) -> Discoverer {
+        Discoverer::from_parts(root, vec![root.to_path_buf()], &[], None)
+    }
+
+    async fn scheduling_pool(root: &std::path::Path) -> WorkerPool {
+        WorkerPool::spawn_from_parts(
+            1,
+            &test_python_bin(),
+            root,
+            Some(&[root.to_path_buf(), workspace_root().join("python")]),
+            LevelFilter::Off,
+            false,
+        )
+        .await
+    }
+
+    fn find_test(tests: &[TestItem], name: &str) -> anyhow::Result<TestItem> {
+        tests
+            .iter()
+            .find(|test| test.name == name)
+            .cloned()
+            .with_context(|| format!("{name} was not discovered"))
+    }
+
+    fn seed_history(
+        discoverer: &Discoverer,
+        records: &[(&TestItem, bool, u64)],
+    ) -> anyhow::Result<()> {
+        let mut history = discoverer.load_scheduling_history();
+        for (test, failed, millis) in records {
+            let outcome = if *failed {
+                TestOutcome::Failed {
+                    message: "seeded failure".into(),
+                    traceback: None,
+                    assertions: Vec::new(),
+                    executed_lines: Vec::new(),
+                }
+            } else {
+                TestOutcome::Passed
+            };
+            history.record(&TestResult {
+                test: (*test).clone(),
+                outcome,
+                duration: Duration::from_millis(*millis),
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+        }
+        history.save()?;
+        Ok(())
+    }
+
+    fn saved_record(root: &std::path::Path, test: &TestItem) -> Option<TestRunHistory> {
+        scheduling_discoverer(root)
+            .load_scheduling_history()
+            .entries()
+            .get(&test.id())
+            .copied()
+    }
+
+    type ClientReader = BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>;
+    type ClientWriter = tokio::io::WriteHalf<tokio::io::DuplexStream>;
+
+    /// Sends one run request and collects its `test_complete` results until
+    /// the matching id-bearing response arrives.
+    async fn send_run(
+        writer: &mut ClientWriter,
+        reader: &mut ClientReader,
+        id: u64,
+        params: serde_json::Value,
+    ) -> anyhow::Result<(Vec<TestResult>, serde_json::Value)> {
+        let run_id = params["run_id"].clone();
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "run",
+            "params": params,
+        });
+        writer.write_all(format!("{request}\n").as_bytes()).await?;
+
+        let mut results = Vec::new();
+        loop {
+            let mut line = String::new();
+            let read = time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
+                .await
+                .context("session went quiet before the run response")??;
+            anyhow::ensure!(read != 0, "server closed before answering run {id}");
+            let value: serde_json::Value = serde_json::from_str(line.trim())?;
+            if value["method"] == "test_complete" && value["params"]["run_id"] == run_id {
+                results.push(serde_json::from_value(value["params"]["result"].clone())?);
+            } else if value["id"] == id {
+                return Ok((results, value["result"]["summary"].clone()));
+            }
+        }
+    }
+
+    fn assert_summary(summary: &serde_json::Value, passed: u64, failed: u64) {
+        assert_eq!(summary["passed"], passed, "summary: {summary}");
+        assert_eq!(summary["failed"], failed, "summary: {summary}");
+        assert_eq!(summary["errors"], 0, "summary: {summary}");
+    }
+
+    async fn read_to_eof(reader: &mut ClientReader) -> anyhow::Result<()> {
+        loop {
+            let mut line = String::new();
+            let read = time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
+                .await
+                .context("server did not close its output")??;
+            if read == 0 {
+                return Ok(());
+            }
+        }
+    }
+
+    type SessionTask = tokio::task::JoinHandle<anyhow::Result<()>>;
+
+    /// Starts a real dispatcher and connection handler over a duplex stream,
+    /// holding no extra senders so closing the client input ends the session.
+    fn start_session(
+        discoverer: Discoverer,
+        pool: WorkerPool,
+        history: SchedulingHistory,
+    ) -> (ClientWriter, ClientReader, SessionTask, SessionTask) {
+        let disc = Arc::new(Mutex::new(discoverer));
+        let (outbound_tx, outbound_rx) = mpsc::channel::<Bytes>(64);
+        let (run_tx, run_rx) = mpsc::channel(8);
+        let cancellation = CancellationToken::new();
+        let dispatcher_task = tokio::spawn(
+            RunDispatcher::new(
+                Arc::clone(&disc),
+                pool,
+                outbound_tx.clone(),
+                run_rx,
+                cancellation.clone(),
+                history,
+            )
+            .run(),
+        );
+        let (client, server_side) = tokio::io::duplex(1 << 16);
+        let (server_r, server_w) = tokio::io::split(server_side);
+        let handler_task = tokio::spawn(
+            ConnectionHandler::new(
+                server_r,
+                server_w,
+                disc,
+                outbound_rx,
+                outbound_tx,
+                run_tx,
+                cancellation,
+            )
+            .run(),
+        );
+        let (client_r, client_w) = tokio::io::split(client);
+        (
+            client_w,
+            BufReader::new(client_r),
+            handler_task,
+            dispatcher_task,
+        )
+    }
+
+    #[tokio::test]
+    async fn scheduling_dispatcher_uses_persisted_and_live_history() -> anyhow::Result<()> {
+        let fixture = TestProject::with_files([
+            ("test_order.py", SCHEDULING_ORDER_SOURCE),
+            ("pass-failed", ""),
+        ])?;
+        let root = fixture.root();
+        let mut discoverer = scheduling_discoverer(root);
+        let tests = discoverer.rediscover();
+        let slow = find_test(&tests, "test_slow")?;
+        let failed = find_test(&tests, "test_failed")?;
+        let unknown = find_test(&tests, "test_unknown")?;
+        let fast = find_test(&tests, "test_fast")?;
+        seed_history(
+            &discoverer,
+            &[
+                (&slow, false, 900),
+                (&failed, true, 10),
+                (&fast, false, 100),
+            ],
+        )?;
+        let history = scheduling_discoverer(root).load_scheduling_history();
+
+        let pool = scheduling_pool(root).await;
+        let (mut client_w, mut reader, handler_task, dispatcher_task) =
+            start_session(discoverer, pool, history);
+
+        let (results, summary) = send_run(
+            &mut client_w,
+            &mut reader,
+            1,
+            serde_json::json!({"run_id": "r1"}),
+        )
+        .await?;
+        let order: Vec<String> = results.iter().map(|result| result.test.id()).collect();
+        assert_eq!(
+            order,
+            [failed.id(), unknown.id(), slow.id(), fast.id()],
+            "persisted history must order the first run"
+        );
+        assert_summary(&summary, 4, 0);
+        assert!(saved_record(root, &failed).is_some_and(|record| !record.failed));
+
+        fixture.remove_file("pass-failed")?;
+        let (results, summary) = send_run(
+            &mut client_w,
+            &mut reader,
+            2,
+            serde_json::json!({"run_id": "r2", "tests": [failed.id()]}),
+        )
+        .await?;
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0].outcome, TestOutcome::Failed { .. }));
+        assert_summary(&summary, 0, 1);
+
+        let (results, summary) = send_run(
+            &mut client_w,
+            &mut reader,
+            3,
+            serde_json::json!({"run_id": "r3"}),
+        )
+        .await?;
+        assert_eq!(
+            results.first().map(|result| result.test.id()),
+            Some(failed.id()),
+            "the live failure must run first"
+        );
+        assert_summary(&summary, 3, 1);
+
+        client_w.shutdown().await?;
+        drop(client_w);
+        read_to_eof(&mut reader).await?;
+        time::timeout(Duration::from_secs(10), handler_task)
+            .await
+            .context("handler should stop once queued runs finish")???;
+        time::timeout(Duration::from_secs(10), dispatcher_task)
+            .await
+            .context("dispatcher should stop once its queue drains")???;
+
+        let record = saved_record(root, &failed).context("failed test record")?;
+        assert!(record.failed);
+        assert!(record.duration.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scheduling_dispatcher_cancellation_saves_received_results() -> anyhow::Result<()> {
+        let fixture = TestProject::with_files([
+            (
+                "test_first.py",
+                "from tryke import test\n\n\n@test\ndef test_first():\n    pass\n",
+            ),
+            ("test_gated.py", GATED_TEST),
+        ])?;
+        let root = fixture.root();
+        let mut discoverer = scheduling_discoverer(root);
+        let tests = discoverer.rediscover();
+        let first = find_test(&tests, "test_first")?;
+        let gated = find_test(&tests, "test_gated")?;
+        // A historical failure makes the scheduler pick `test_first` first.
+        seed_history(&discoverer, &[(&first, true, 10), (&gated, false, 500)])?;
+        let gated_record = saved_record(root, &gated).context("seeded gated record")?;
+        let history = scheduling_discoverer(root).load_scheduling_history();
+
+        let disc = Arc::new(Mutex::new(discoverer));
+        let pool = scheduling_pool(root).await;
+        let (outbound_tx, mut outbound_rx) = mpsc::channel::<Bytes>(64);
+        let (run_tx, run_rx) = mpsc::channel(8);
+        let cancellation = CancellationToken::new();
+        let dispatcher_task = tokio::spawn(
+            RunDispatcher::new(
+                Arc::clone(&disc),
+                pool,
+                outbound_tx.clone(),
+                run_rx,
+                cancellation.clone(),
+                history,
+            )
+            .run(),
+        );
+
+        let queued = super::handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"run","params":{"run_id":"r1"}}"#,
+            &disc,
+            &outbound_tx,
+            &run_tx,
+        )
+        .await?;
+        assert!(
+            queued.is_none(),
+            "run requests are answered by the dispatcher"
+        );
+
+        let received = time::timeout(Duration::from_secs(30), async {
+            loop {
+                let bytes = outbound_rx.recv().await.context("outbound closed")?;
+                let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+                if value["method"] == "test_complete" {
+                    let result: TestResult =
+                        serde_json::from_value(value["params"]["result"].clone())?;
+                    return anyhow::Ok(result);
+                }
+            }
+        })
+        .await
+        .context("first result never arrived")??;
+        assert_eq!(received.test.id(), first.id());
+        assert!(matches!(received.outcome, TestOutcome::Passed));
+
+        cancellation.cancel();
+        drop(run_tx);
+        let shutdown = time::timeout(Duration::from_secs(30), dispatcher_task).await;
+        fs::write(root.join("gate"), "")?;
+        shutdown.context("dispatcher did not stop after cancellation")???;
+
+        assert_eq!(
+            saved_record(root, &first),
+            Some(TestRunHistory {
+                failed: false,
+                duration: Some(received.duration),
+            })
+        );
+        assert_eq!(saved_record(root, &gated), Some(gated_record));
+        drop(outbound_rx);
+        Ok(())
     }
 }

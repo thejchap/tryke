@@ -45,7 +45,16 @@ tryke test --dist file
 tryke test --dist group
 ```
 
-Work units are sorted largest-first before scheduling so the longest pole starts early.
+Work units are ordered before scheduling using a per-test history that tryke stores beside its discovery cache (`scheduling-v1.bin`), recording each test's last outcome and duration:
+
+1. Units containing tests affected by `--changed-first` run first.
+2. Then units containing a test that failed on its last run.
+3. Then units with a test that has no recorded duration yet.
+4. Then the remaining units, longest estimated duration first, so the longest pole starts early. Units with unrecorded tests are ordered by their count of runnable (not skipped or todo) tests instead.
+
+Ties keep the discovery order of each unit's first test, and tests inside a unit are never reordered. The history is advisory: a missing or unreadable file only falls back to largest-first ordering, and skipped or todo tests don't update it.
+
+Runs, watch mode, and the server can share one history. Each save re-reads the file and merges in only the tests that owner just recorded, so a long-running owner doesn't overwrite newer results from other runs; when two owners record the same test, the last save wins. Saves aren't locked, so two saves at exactly the same moment can still drop one owner's update, which only affects ordering for the next run.
 
 ## Scheduling
 

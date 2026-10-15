@@ -61,37 +61,69 @@ pub struct ScheduleOptions<'a> {
     pub first: Option<&'a HashSet<String>>,
 }
 
+/// Groups tests by file, pairing each unit with the discovery position of
+/// its first member.
 #[must_use]
-fn group_by_file(tests: Vec<TestItem>) -> Vec<WorkUnit> {
-    let mut by_file: IndexMap<Option<PathBuf>, Vec<TestItem>> = IndexMap::new();
-    for t in tests {
-        by_file.entry(t.file_path.clone()).or_default().push(t);
+fn group_by_file(tests: impl IntoIterator<Item = (usize, TestItem)>) -> Vec<(usize, WorkUnit)> {
+    let mut by_file: IndexMap<Option<PathBuf>, (usize, Vec<TestItem>)> = IndexMap::new();
+    for (position, t) in tests {
+        by_file
+            .entry(t.file_path.clone())
+            .or_insert_with(|| (position, Vec::new()))
+            .1
+            .push(t);
     }
     by_file
         .into_values()
-        .map(|tests| WorkUnit {
-            tests,
-            hooks: vec![],
+        .map(|(position, tests)| {
+            (
+                position,
+                WorkUnit {
+                    tests,
+                    hooks: vec![],
+                },
+            )
         })
         .collect()
 }
 
-fn group_by_describe(tests: Vec<TestItem>) -> Vec<WorkUnit> {
-    let mut by_group: IndexMap<(Option<PathBuf>, Option<String>), Vec<TestItem>> = IndexMap::new();
-    for t in tests {
+/// A test's file and top-level `describe()` group.
+type DescribeKey = (Option<PathBuf>, Option<String>);
+
+/// Groups tests by file and top-level describe, pairing each unit with the
+/// discovery position of its first member.
+fn group_by_describe(tests: impl IntoIterator<Item = (usize, TestItem)>) -> Vec<(usize, WorkUnit)> {
+    let mut by_group: IndexMap<DescribeKey, (usize, Vec<TestItem>)> = IndexMap::new();
+    for (position, t) in tests {
         let group_key = t.groups.first().cloned();
         by_group
             .entry((t.file_path.clone(), group_key))
-            .or_default()
+            .or_insert_with(|| (position, Vec::new()))
+            .1
             .push(t);
     }
     by_group
         .into_values()
-        .map(|tests| WorkUnit {
-            tests,
-            hooks: vec![],
+        .map(|(position, tests)| {
+            (
+                position,
+                WorkUnit {
+                    tests,
+                    hooks: vec![],
+                },
+            )
         })
         .collect()
+}
+
+fn singleton(position: usize, test: TestItem) -> (usize, WorkUnit) {
+    (
+        position,
+        WorkUnit {
+            tests: vec![test],
+            hooks: vec![],
+        },
+    )
 }
 
 /// Build atomic work units from `tests` according to `mode`, attach the
@@ -105,7 +137,8 @@ fn group_by_describe(tests: Vec<TestItem>) -> Vec<WorkUnit> {
 /// previously failing test, then any test without a measured duration,
 /// then descending estimated work (summed durations for fully measured
 /// units, test count for units with unknown timings). Ties keep the
-/// grouping order and tests inside a unit are never reordered.
+/// original discovery position of each unit's first member, and tests
+/// inside a unit are never reordered.
 #[must_use]
 pub fn plan_work_units(
     tests: Vec<TestItem>,
@@ -135,85 +168,78 @@ pub fn plan_work_units(
         .collect();
 
     let mut warnings: Vec<DiscoveryWarning> = Vec::new();
-    let mut units: Vec<WorkUnit> = if mode == DistMode::Test && !constrained_modules.is_empty() {
-        // Test mode: upgrade constrained modules to group or file level.
-        let (constrained, free): (Vec<_>, Vec<_>) = tests
-            .into_iter()
-            .partition(|t| constrained_modules.contains(t.module_path.as_str()));
+    let indexed = tests.into_iter().enumerate();
+    let mut units: Vec<(usize, WorkUnit)> =
+        if mode == DistMode::Test && !constrained_modules.is_empty() {
+            // Test mode: upgrade constrained modules to group or file level.
+            let (constrained, free): (Vec<_>, Vec<_>) =
+                indexed.partition(|(_, t)| constrained_modules.contains(t.module_path.as_str()));
 
-        let mut affected: Vec<&str> = constrained_modules.iter().copied().collect();
-        affected.sort_unstable();
-        let upgraded_to = if file_constrained_modules.is_empty() {
-            "group"
-        } else {
-            "file"
-        };
-        warnings.push(DiscoveryWarning {
-            file_path: PathBuf::new(),
-            kind: DiscoveryWarningKind::DistModeUpgrade,
-            message: format!(
-                "scheduler: upgrading --dist test → {upgraded_to} for {n} module(s) \
+            let mut affected: Vec<&str> = constrained_modules.iter().copied().collect();
+            affected.sort_unstable();
+            let upgraded_to = if file_constrained_modules.is_empty() {
+                "group"
+            } else {
+                "file"
+            };
+            warnings.push(DiscoveryWarning {
+                file_path: PathBuf::new(),
+                kind: DiscoveryWarningKind::DistModeUpgrade,
+                message: format!(
+                    "scheduler: upgrading --dist test → {upgraded_to} for {n} module(s) \
                  because of per=\"scope\" fixtures ({mods}). Move the fixture into \
                  a describe() to keep finer-grained distribution.",
-                n = affected.len(),
-                mods = affected.join(", "),
-            ),
-        });
+                    n = affected.len(),
+                    mods = affected.join(", "),
+                ),
+            });
 
-        let mut result: Vec<WorkUnit> = free
-            .into_iter()
-            .map(|t| WorkUnit {
-                tests: vec![t],
-                hooks: vec![],
-            })
-            .collect();
+            let mut result: Vec<(usize, WorkUnit)> = free
+                .into_iter()
+                .map(|(position, t)| singleton(position, t))
+                .collect();
 
-        if file_constrained_modules.is_empty() {
-            result.extend(group_by_describe(constrained));
-        } else {
-            result.extend(group_by_file(constrained));
-        }
-        result
-    } else if mode == DistMode::Group && !file_constrained_modules.is_empty() {
-        // Group mode with file-scope per="scope" fixtures: upgrade those modules to file level.
-        let (constrained, free): (Vec<_>, Vec<_>) = tests
-            .into_iter()
-            .partition(|t| file_constrained_modules.contains(t.module_path.as_str()));
+            if file_constrained_modules.is_empty() {
+                result.extend(group_by_describe(constrained));
+            } else {
+                result.extend(group_by_file(constrained));
+            }
+            result
+        } else if mode == DistMode::Group && !file_constrained_modules.is_empty() {
+            // Group mode with file-scope per="scope" fixtures: upgrade those modules to file level.
+            let (constrained, free): (Vec<_>, Vec<_>) = indexed
+                .partition(|(_, t)| file_constrained_modules.contains(t.module_path.as_str()));
 
-        let mut affected: Vec<&str> = file_constrained_modules.iter().copied().collect();
-        affected.sort_unstable();
-        warnings.push(DiscoveryWarning {
-            file_path: PathBuf::new(),
-            kind: DiscoveryWarningKind::DistModeUpgrade,
-            message: format!(
-                "scheduler: upgrading --dist group → file for {n} module(s) \
+            let mut affected: Vec<&str> = file_constrained_modules.iter().copied().collect();
+            affected.sort_unstable();
+            warnings.push(DiscoveryWarning {
+                file_path: PathBuf::new(),
+                kind: DiscoveryWarningKind::DistModeUpgrade,
+                message: format!(
+                    "scheduler: upgrading --dist group → file for {n} module(s) \
                  because of file-scope per=\"scope\" fixtures ({mods}). Move the \
                  fixture into a describe() to keep group-level distribution.",
-                n = affected.len(),
-                mods = affected.join(", "),
-            ),
-        });
+                    n = affected.len(),
+                    mods = affected.join(", "),
+                ),
+            });
 
-        let mut result = group_by_describe(free);
-        result.extend(group_by_file(constrained));
-        result
-    } else {
-        match mode {
-            DistMode::Test => tests
-                .into_iter()
-                .map(|t| WorkUnit {
-                    tests: vec![t],
-                    hooks: vec![],
-                })
-                .collect(),
-            DistMode::File => group_by_file(tests),
-            DistMode::Group => group_by_describe(tests),
-        }
-    };
+            let mut result = group_by_describe(free);
+            result.extend(group_by_file(constrained));
+            result
+        } else {
+            match mode {
+                DistMode::Test => indexed
+                    .map(|(position, t)| singleton(position, t))
+                    .collect(),
+                DistMode::File => group_by_file(indexed),
+                DistMode::Group => group_by_describe(indexed),
+            }
+        };
 
     // Attach hooks to each unit, filtered by the modules in that unit.
     if !hooks.is_empty() {
-        for unit in &mut units {
+        for (_, unit) in &mut units {
             let unit_modules: std::collections::HashSet<&str> =
                 unit.tests.iter().map(|t| t.module_path.as_str()).collect();
             unit.hooks = hooks
@@ -224,7 +250,11 @@ pub fn plan_work_units(
         }
     }
 
-    units.sort_by_cached_key(|unit| unit_rank(unit, options));
+    // The discovery position is only a final tie-breaker: fixture upgrades
+    // build free units before constrained ones, so construction order is
+    // not discovery order.
+    units.sort_by_cached_key(|(position, unit)| (unit_rank(unit, options), *position));
+    let units = units.into_iter().map(|(_, unit)| unit).collect();
     PartitionResult { units, warnings }
 }
 
@@ -938,5 +968,213 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Asserts exactly one upgrade warning, the unit order, and that each
+    /// unit carries exactly the hooks expected for its module.
+    fn assert_fixture_plan(
+        result: &PartitionResult,
+        expected: &[Vec<String>],
+        hooks_by_module: &[(&str, &[&str])],
+    ) {
+        let kinds: Vec<_> = result.warnings.iter().map(|w| w.kind).collect();
+        assert_eq!(kinds, vec![DiscoveryWarningKind::DistModeUpgrade]);
+        assert_eq!(unit_ids(&result.units), expected);
+        for unit in &result.units {
+            let module = unit.tests[0].module_path.as_str();
+            let expected_hooks = hooks_by_module
+                .iter()
+                .find(|(m, _)| *m == module)
+                .map(|(_, hooks)| *hooks);
+            let hook_names: Vec<&str> = unit.hooks.iter().map(|h| h.name.as_str()).collect();
+            assert_eq!(
+                Some(hook_names.as_slice()),
+                expected_hooks,
+                "hooks for {module}"
+            );
+        }
+    }
+
+    /// The three fixture-upgrade variants: Test mode with a describe-scope
+    /// fixture, Test mode with a file-scope fixture, and Group mode with a
+    /// file-scope fixture (where `a2` sits in a different describe).
+    fn fixture_variants() -> Vec<(DistMode, Vec<HookItem>, bool)> {
+        let with = |fixture: HookItem| {
+            vec![
+                fixture,
+                hook_for_module("b_hook", "b", FixturePer::Test, &[]),
+                hook_for_module("c_hook", "c", FixturePer::Test, &[]),
+            ]
+        };
+        vec![
+            (
+                DistMode::Test,
+                with(hook("a_fixture", FixturePer::Scope, &["math"])),
+                false,
+            ),
+            (
+                DistMode::Test,
+                with(hook("a_fixture", FixturePer::Scope, &[])),
+                false,
+            ),
+            (
+                DistMode::Group,
+                with(hook("a_fixture", FixturePer::Scope, &[])),
+                true,
+            ),
+        ]
+    }
+
+    const FIXTURE_HOOKS: &[(&str, &[&str])] = &[
+        ("a", &["a_fixture"]),
+        ("b", &["b_hook"]),
+        ("c", &["c_hook"]),
+    ];
+
+    #[test]
+    fn fixture_upgrade_known_ties_keep_first_discovery_position() {
+        for (mode, hooks, split_a2) in fixture_variants() {
+            let a1 = item("a.py", "t1", &["math"]);
+            let a2 = item(
+                "a.py",
+                "t2",
+                if split_a2 { &["strings"] } else { &["math"] },
+            );
+            let b1 = item("b.py", "t1", &["free"]);
+            let c1 = item("c.py", "t1", &["other"]);
+            let tests = vec![a1.clone(), b1.clone(), a2.clone(), c1.clone()];
+            let a_unit = ids(&[&a1, &a2]);
+            let run = |history: &HashMap<String, TestRunHistory>, first: &HashSet<String>| {
+                plan_work_units(
+                    tests.clone(),
+                    &hooks,
+                    mode,
+                    ScheduleOptions {
+                        history: Some(history),
+                        first: Some(first),
+                    },
+                )
+            };
+            let none = HashSet::new();
+
+            let tied = history(&[
+                (&a1, false, Some(ms(4))),
+                (&a2, false, Some(ms(6))),
+                (&b1, false, Some(ms(10))),
+                (&c1, false, Some(ms(10))),
+            ]);
+            assert_fixture_plan(
+                &run(&tied, &none),
+                &[a_unit.clone(), ids(&[&b1]), ids(&[&c1])],
+                FIXTURE_HOOKS,
+            );
+
+            let b_longer = history(&[
+                (&a1, false, Some(ms(4))),
+                (&a2, false, Some(ms(6))),
+                (&b1, false, Some(ms(11))),
+                (&c1, false, Some(ms(10))),
+            ]);
+            assert_fixture_plan(
+                &run(&b_longer, &none),
+                &[ids(&[&b1]), a_unit.clone(), ids(&[&c1])],
+                FIXTURE_HOOKS,
+            );
+
+            let b_failing = history(&[
+                (&a1, false, Some(ms(4))),
+                (&a2, false, Some(ms(6))),
+                (&b1, true, Some(ms(10))),
+                (&c1, false, Some(ms(10))),
+            ]);
+            assert_fixture_plan(
+                &run(&b_failing, &none),
+                &[ids(&[&b1]), a_unit.clone(), ids(&[&c1])],
+                FIXTURE_HOOKS,
+            );
+            assert_fixture_plan(
+                &run(&b_failing, &HashSet::from([c1.id()])),
+                &[ids(&[&c1]), ids(&[&b1]), a_unit.clone()],
+                FIXTURE_HOOKS,
+            );
+
+            let b_unknown = history(&[
+                (&a1, false, Some(ms(4))),
+                (&a2, false, Some(ms(6))),
+                (&c1, false, Some(ms(10))),
+            ]);
+            assert_fixture_plan(
+                &run(&b_unknown, &none),
+                &[ids(&[&b1]), a_unit.clone(), ids(&[&c1])],
+                FIXTURE_HOOKS,
+            );
+        }
+    }
+
+    #[test]
+    fn fixture_upgrade_cold_ties_keep_discovery_order() {
+        for (mode, hooks, _) in fixture_variants() {
+            let a1 = item("a.py", "t1", &["math"]);
+            let b1 = item("b.py", "t1", &["free"]);
+            let c1 = item("c.py", "t1", &["other"]);
+            let tests = vec![a1.clone(), b1.clone(), c1.clone()];
+            let expected = [ids(&[&a1]), ids(&[&b1]), ids(&[&c1])];
+
+            let absent = plan_work_units(tests.clone(), &hooks, mode, ScheduleOptions::default());
+            assert_fixture_plan(&absent, &expected, FIXTURE_HOOKS);
+
+            let empty_history = HashMap::new();
+            let empty_first = HashSet::new();
+            let empty = plan_work_units(
+                tests,
+                &hooks,
+                mode,
+                ScheduleOptions {
+                    history: Some(&empty_history),
+                    first: Some(&empty_first),
+                },
+            );
+            assert_fixture_plan(&empty, &expected, FIXTURE_HOOKS);
+        }
+    }
+
+    #[test]
+    fn mixed_fixture_constraints_keep_grouping_and_discovery_ties() {
+        let a1 = item("a.py", "t1", &["math"]);
+        let b1 = item("b.py", "t1", &["free"]);
+        let c1 = item("c.py", "t1", &["left"]);
+        let a2 = item("a.py", "t2", &["math"]);
+        let c2 = item("c.py", "t2", &["right"]);
+        let hooks = vec![
+            hook("a_fixture", FixturePer::Scope, &["math"]),
+            hook_for_module("b_hook", "b", FixturePer::Test, &[]),
+            hook_for_module("c_fixture", "c", FixturePer::Scope, &[]),
+        ];
+        let history = history(&[
+            (&a1, false, Some(ms(4))),
+            (&a2, false, Some(ms(6))),
+            (&b1, false, Some(ms(10))),
+            (&c1, false, Some(ms(5))),
+            (&c2, false, Some(ms(5))),
+        ]);
+        let first = HashSet::new();
+        let result = plan_work_units(
+            vec![a1.clone(), b1.clone(), c1.clone(), a2.clone(), c2.clone()],
+            &hooks,
+            DistMode::Test,
+            ScheduleOptions {
+                history: Some(&history),
+                first: Some(&first),
+            },
+        );
+        assert_fixture_plan(
+            &result,
+            &[ids(&[&a1, &a2]), ids(&[&b1]), ids(&[&c1, &c2])],
+            &[
+                ("a", &["a_fixture"]),
+                ("b", &["b_hook"]),
+                ("c", &["c_fixture"]),
+            ],
+        );
     }
 }

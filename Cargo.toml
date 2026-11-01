@@ -41,7 +41,7 @@ tokio = { version = "1", features = [
 ] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
-notify = "6"
+notify = "8"
 notify-debouncer-mini = "0.4"
 toml = "1.0"
 console = "0.16"

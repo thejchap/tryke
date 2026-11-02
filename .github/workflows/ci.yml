@@ -90,7 +90,7 @@ jobs:
       - run: uv sync
       - run: rustup show
       - uses: Swatinem/rust-cache@v2.9.3
-      - uses: taiki-e/install-action@v2.85.4
+      - uses: taiki-e/install-action@v2.88.1
         with:
           tool: nextest
       - run: cargo build --verbose
